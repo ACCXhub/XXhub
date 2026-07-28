@@ -326,6 +326,17 @@ class ModuleManager:
             "display_name": "测试中心",
             "installed": installed,
             "version": entry.get("version") if installed else None,
+            "module_api_version": (
+                entry.get("module_api_version") or manifest.get("module_api_version")
+                if installed
+                else None
+            ),
+            "package_sha256": entry.get("package_sha256") if installed else None,
+            "package_checksum": (
+                entry.get("package_checksum") or manifest.get("package_checksum")
+                if installed
+                else None
+            ),
             "compatible": compatible if installed else True,
             "required_autody_version": requirement,
             "compatibility_reason": reason,
@@ -335,6 +346,30 @@ class ModuleManager:
 
     def installed(self) -> bool:
         return bool(self.status()["installed"])
+
+    def _validate_installed_module(self, root: Path) -> dict:
+        if not root.is_dir() or root.is_symlink():
+            raise ModulePackageError("模块安装目录无效")
+        for relative in _ALLOWED_FILES:
+            path = root / Path(relative)
+            if not path.is_file() or path.is_symlink():
+                raise ModulePackageError("模块安装文件结构不完整")
+        allowed_top_level = {PurePosixPath(name).parts[0] for name in _ALLOWED_FILES} | {"data"}
+        if any(path.name not in allowed_top_level or path.is_symlink() for path in root.iterdir()):
+            raise ModulePackageError("模块安装目录包含未知文件")
+        frontend = root / "frontend"
+        allowed_frontend = {
+            PurePosixPath(name).name
+            for name in _ALLOWED_FILES
+            if PurePosixPath(name).parts[0] == "frontend"
+        }
+        if {path.name for path in frontend.iterdir()} != allowed_frontend:
+            raise ModulePackageError("模块前端文件结构不完整")
+        files = {
+            relative: (root / Path(relative)).read_bytes()
+            for relative in _ALLOWED_FILES
+        }
+        return _read_manifest(files, self.core_version)
 
     def install(self, archive_path: Path) -> dict:
         try:
@@ -348,6 +383,11 @@ class ModuleManager:
         replacement = temporary / MODULE_ID
         backup = self.modules_root / f".{MODULE_ID}.previous"
         previous_registry = self._registry()
+        package_sha256 = sha256(archive_path.read_bytes()).hexdigest()
+        data_moved = False
+        root_backed_up = False
+        replacement_activated = False
+        succeeded = False
         try:
             replacement.mkdir()
             for name, content in files.items():
@@ -356,25 +396,47 @@ class ModuleManager:
                 target.write_bytes(content)
             (replacement / "data").mkdir()
             if backup.exists():
-                shutil.rmtree(backup)
+                raise ModulePackageError("检测到未完成的模块升级备份")
             root = self._safe_module_root()
+            self._validate_installed_module(replacement)
             if root.exists():
+                existing_data = root / "data"
+                if not existing_data.is_dir() or existing_data.is_symlink():
+                    raise ModulePackageError("模块运行数据目录无效")
+                (replacement / "data").rmdir()
+                os.replace(existing_data, replacement / "data")
+                data_moved = True
                 os.replace(root, backup)
+                root_backed_up = True
             os.replace(replacement, root)
+            replacement_activated = True
+            activated_manifest = self._validate_installed_module(root)
             registry = json.loads(json.dumps(previous_registry))
-            registry["modules"][MODULE_ID] = {"version": manifest["module_version"]}
+            registry["modules"][MODULE_ID] = {
+                "version": activated_manifest["module_version"],
+                "module_api_version": activated_manifest["module_api_version"],
+                "package_sha256": package_sha256,
+                "package_checksum": activated_manifest["package_checksum"],
+            }
             self._write_registry(registry)
+            succeeded = True
         except Exception:
-            if backup.exists():
-                if self.module_root.exists():
-                    shutil.rmtree(self.module_root)
-                os.replace(backup, self.module_root)
+            root = self.module_root
+            if replacement_activated and root.exists():
+                if root_backed_up and data_moved and (root / "data").exists():
+                    os.replace(root / "data", backup / "data")
+                shutil.rmtree(root)
+            elif data_moved and (replacement / "data").exists():
+                destination = backup / "data" if root_backed_up else root / "data"
+                os.replace(replacement / "data", destination)
+            if root_backed_up and backup.exists():
+                os.replace(backup, root)
             self._write_registry(previous_registry)
             raise
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary, ignore_errors=True)
-            if backup.exists():
+            if succeeded and backup.exists():
                 shutil.rmtree(backup, ignore_errors=True)
         return self.status()
 

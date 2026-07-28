@@ -25,8 +25,12 @@ git remote -v
 
 ## Safety
 
-- Never type, prepare, paste, simulate, or send a real Douyin message during development or testing.
-- Use fake pages, mocks, fixtures, or read-only checks.
+- Normal development, automated tests, preflight, and navigation checks must never type, prepare, paste, simulate, or send content in a real Douyin composer; use fake pages, mocks, fixtures, or read-only checks.
+- The only exception is one user-initiated Test Center controlled composer dry run explicitly requested for a user-selected target. It is allowed only after the browser lock is held, navigation-only acceptance has passed, the selected and visible stable conversation IDs match, display names are consistent, and the composer is proved empty with no attachment.
+- That controlled dry run may type only an in-memory temporary test value, must never press Enter, click a send control, call the send pipeline, or create a send attempt, and must clear exactly its own unchanged value and verify the composer is empty before reporting success.
+- The temporary value must never be persisted, logged, printed, returned by an API response, included in status/history, or captured in a screenshot. The exception is never automatic and must not retry.
+- Any identity mismatch must stop before the composer is focused or inspected. Existing drafts, attachments, changed text, ambiguous cleanup, or uncertain state must be preserved and stop the run.
+- Never send a real Douyin message.
 - Never retry when a send action may have occurred or the result is uncertain.
 - Preserve identity checks, duplicate protection, confirmation, and the global browser lock.
 - Core send safety must remain functional when Test Center is absent.
