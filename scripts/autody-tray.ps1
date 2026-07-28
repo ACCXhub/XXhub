@@ -1,5 +1,7 @@
 ﻿param(
-    [string]$ProjectRoot = (Join-Path $PSScriptRoot "..")
+    [string]$ProjectRoot = (Join-Path $PSScriptRoot ".."),
+    [switch]$DefineOnly,
+    [switch]$OpenDashboardOnly
 )
 
 # A small first-party Windows Forms host.  It supervises the dashboard only;
@@ -17,9 +19,116 @@ $env:PLAYWRIGHT_SKIP_BROWSER_GC = "1"
 $LogDir = Join-Path $ProjectRoot "data\logs"
 $TrayLog = Join-Path $LogDir "tray.log"
 
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+if (-not ("AutoDyMenuRenderer" -as [type])) {
+    Add-Type -ReferencedAssemblies @("System.Windows.Forms", "System.Drawing") -TypeDefinition @"
+using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+public sealed class AutoDyMenuColorTable : ProfessionalColorTable {
+    private readonly bool dark;
+    public AutoDyMenuColorTable(bool darkMode) { dark = darkMode; UseSystemColors = false; }
+    public override Color ToolStripDropDownBackground { get { return dark ? Color.FromArgb(43, 43, 43) : Color.FromArgb(249, 249, 249); } }
+    public override Color ImageMarginGradientBegin { get { return ToolStripDropDownBackground; } }
+    public override Color ImageMarginGradientMiddle { get { return ToolStripDropDownBackground; } }
+    public override Color ImageMarginGradientEnd { get { return ToolStripDropDownBackground; } }
+    public override Color MenuItemSelected { get { return dark ? Color.FromArgb(62, 62, 62) : Color.FromArgb(232, 232, 232); } }
+    public override Color MenuItemBorder { get { return MenuItemSelected; } }
+    public override Color SeparatorDark { get { return dark ? Color.FromArgb(72, 72, 72) : Color.FromArgb(220, 220, 220); } }
+    public override Color SeparatorLight { get { return SeparatorDark; } }
+}
+
+public sealed class AutoDyMenuRenderer : ToolStripProfessionalRenderer {
+    private readonly bool dark;
+    public AutoDyMenuRenderer(bool darkMode) : base(new AutoDyMenuColorTable(darkMode)) {
+        dark = darkMode;
+        RoundedEdges = true;
+    }
+    protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e) {
+        if (!e.Item.Selected) { return; }
+        Rectangle bounds = new Rectangle(5, 2, Math.Max(1, e.Item.Width - 10), Math.Max(1, e.Item.Height - 4));
+        using (GraphicsPath path = Rounded(bounds, 5))
+        using (SolidBrush brush = new SolidBrush(dark ? Color.FromArgb(62, 62, 62) : Color.FromArgb(232, 232, 232))) {
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.FillPath(brush, path);
+        }
+    }
+    protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
+        e.TextColor = !e.Item.Enabled
+            ? (dark ? Color.FromArgb(145, 145, 145) : Color.FromArgb(145, 145, 145))
+            : (dark ? Color.FromArgb(245, 245, 245) : Color.FromArgb(32, 32, 32));
+        base.OnRenderItemText(e);
+    }
+    protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e) {
+        using (Pen pen = new Pen(dark ? Color.FromArgb(72, 72, 72) : Color.FromArgb(220, 220, 220))) {
+            int y = e.Item.Height / 2;
+            e.Graphics.DrawLine(pen, 10, y, Math.Max(10, e.Item.Width - 10), y);
+        }
+    }
+    protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) {
+        using (Pen pen = new Pen(dark ? Color.FromArgb(76, 76, 76) : Color.FromArgb(214, 214, 214))) {
+            e.Graphics.DrawRectangle(pen, 0, 0, Math.Max(0, e.ToolStrip.Width - 1), Math.Max(0, e.ToolStrip.Height - 1));
+        }
+    }
+    private static GraphicsPath Rounded(Rectangle bounds, int radius) {
+        GraphicsPath path = new GraphicsPath();
+        int diameter = radius * 2;
+        path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 180, 90);
+        path.AddArc(bounds.Right - diameter, bounds.Top, diameter, diameter, 270, 90);
+        path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
+        path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+}
+
+public static class AutoDyMenuWindow {
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+    public static void ApplyRoundedCorners(ContextMenuStrip menu) {
+        try {
+            int preference = 2;
+            DwmSetWindowAttribute(menu.Handle, 33, ref preference, sizeof(int));
+        } catch { }
+    }
+}
+"@
+}
+
 function Write-TrayLog([string]$Message) {
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
     "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message" | Add-Content -LiteralPath $TrayLog -Encoding UTF8
+}
+
+function Test-SystemDarkTheme {
+    try {
+        $value = Get-ItemPropertyValue -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "AppsUseLightTheme" -ErrorAction Stop
+        return [int]$value -eq 0
+    } catch {
+        return $false
+    }
+}
+
+function Set-AutoDyMenuTheme {
+    param([Parameter(Mandatory = $true)][System.Windows.Forms.ContextMenuStrip]$Menu)
+
+    $dark = Test-SystemDarkTheme
+    $Menu.Renderer = New-Object AutoDyMenuRenderer -ArgumentList ([bool]$dark)
+    $Menu.Font = New-Object System.Drawing.Font -ArgumentList @("Segoe UI", 10.0)
+    $Menu.Padding = New-Object System.Windows.Forms.Padding -ArgumentList @(6, 6, 6, 6)
+    $Menu.ShowImageMargin = $false
+    $Menu.ShowCheckMargin = $false
+    $Menu.BackColor = if ($dark) { [Drawing.Color]::FromArgb(43, 43, 43) } else { [Drawing.Color]::FromArgb(249, 249, 249) }
+    $Menu.ForeColor = if ($dark) { [Drawing.Color]::FromArgb(245, 245, 245) } else { [Drawing.Color]::FromArgb(32, 32, 32) }
+    foreach ($item in $Menu.Items) {
+        if ($item -isnot [System.Windows.Forms.ToolStripSeparator]) {
+            $item.Padding = New-Object System.Windows.Forms.Padding -ArgumentList @(4, 3, 8, 3)
+        }
+    }
 }
 
 function Get-Listener {
@@ -210,6 +319,23 @@ function Open-VerifiedDashboard {
     }
 }
 
+$script:LastDashboardActivation = [DateTime]::MinValue
+function Invoke-DashboardOpenAsync {
+    $now = Get-Date
+    if (($now - $script:LastDashboardActivation).TotalMilliseconds -lt 700) { return }
+    $script:LastDashboardActivation = $now
+    $arguments = @(
+        "-NoProfile",
+        "-Sta",
+        "-WindowStyle", "Hidden",
+        "-ExecutionPolicy", "Bypass",
+        "-File", ('"{0}"' -f $PSCommandPath),
+        "-ProjectRoot", ('"{0}"' -f $ProjectRoot),
+        "-OpenDashboardOnly"
+    )
+    Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WorkingDirectory $ProjectRoot -WindowStyle Hidden | Out-Null
+}
+
 function Get-TrayState {
     $snapshot = Get-ServiceSnapshot
     if ($null -eq $snapshot -or -not (Test-OwnedAutoDy $snapshot)) { return "已停止" }
@@ -217,6 +343,17 @@ function Get-TrayState {
     $outcomes = Join-Path $ProjectRoot "data\history\task-outcomes.json"
     if ((Test-Path -LiteralPath $outcomes) -and ((Get-Content -Raw -LiteralPath $outcomes -ErrorAction SilentlyContinue) -match '"outcome"\s*:\s*"retry_pending"')) { return "正在安全重试" }
     return "运行正常"
+}
+
+if ($DefineOnly) { return }
+if ($OpenDashboardOnly) {
+    try {
+        Open-VerifiedDashboard
+    } catch {
+        Write-TrayLog "Dashboard activation failed; the normal browser fallback did not complete."
+        [Windows.Forms.MessageBox]::Show("无法打开 AutoDy 管理台，请稍后重试。", "AutoDy") | Out-Null
+    }
+    return
 }
 
 $createdNew = $false
@@ -238,17 +375,21 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $context = New-Object System.Windows.Forms.ApplicationContext
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
+$menu.AutoSize = $true
+$menu.MinimumSize = New-Object System.Drawing.Size -ArgumentList @(224, 0)
+Set-AutoDyMenuTheme -Menu $menu
+$menu.add_Opened({ Set-AutoDyMenuTheme -Menu $menu; [AutoDyMenuWindow]::ApplyRoundedCorners($menu) })
 $open = $menu.Items.Add("打开 AutoDy 管理台")
 $status = $menu.Items.Add("查看当前状态")
 $logs = $menu.Items.Add("打开日志")
 $restart = $menu.Items.Add("重启管理台")
-$startup = $menu.Items.Add("启用或关闭开机启动")
+$startup = $menu.Items.Add("启用/关闭开机启动")
 [void]$menu.Items.Add("-")
 $exitTray = $menu.Items.Add("退出托盘")
 $exitStop = $menu.Items.Add("退出并停止 AutoDy")
 $notify = New-Object System.Windows.Forms.NotifyIcon
 $iconPath = Join-Path $ProjectRoot "assets\icons\autody.ico"
-$notify.Icon = if (Test-Path -LiteralPath $iconPath) { [Drawing.Icon]::ExtractAssociatedIcon($iconPath) } else { [Drawing.SystemIcons]::Application }
+$notify.Icon = if (Test-Path -LiteralPath $iconPath) { New-Object System.Drawing.Icon -ArgumentList @($iconPath, 32, 32) } else { [Drawing.SystemIcons]::Application }
 $notify.ContextMenuStrip = $menu
 $notify.Visible = $true
 $notify.Text = "AutoDy - 启动中"
@@ -258,8 +399,13 @@ $refresh = {
     $notify.Text = "AutoDy - $state"
     $status.Text = "查看当前状态 ($state)"
 }
-$open.add_Click({ try { Open-VerifiedDashboard } catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, "AutoDy") | Out-Null } })
-$notify.add_DoubleClick({ $open.PerformClick() })
+$open.add_Click({ Invoke-DashboardOpenAsync })
+$notify.add_MouseClick({
+    param($sender, $eventArgs)
+    if ($eventArgs.Button -eq [Windows.Forms.MouseButtons]::Left) {
+        Invoke-DashboardOpenAsync
+    }
+})
 $status.add_Click({ & $refresh; [Windows.Forms.MessageBox]::Show($notify.Text, "AutoDy 当前状态") | Out-Null })
 $logs.add_Click({ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null; Start-Process explorer.exe -ArgumentList $LogDir })
 $restart.add_Click({ try { Stop-ManagedService | Out-Null; Start-Or-ReuseService | Out-Null; & $refresh } catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, "AutoDy") | Out-Null } })

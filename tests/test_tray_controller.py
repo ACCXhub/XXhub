@@ -2,6 +2,8 @@ from pathlib import Path
 import os
 import subprocess
 
+from PIL import Image
+
 
 def test_tray_controller_has_a_real_single_instance_windows_host_and_expected_menu():
     text = Path("scripts/autody-tray.ps1").read_text(encoding="utf-8-sig")
@@ -13,7 +15,7 @@ def test_tray_controller_has_a_real_single_instance_windows_host_and_expected_me
         "查看当前状态",
         "打开日志",
         "重启管理台",
-        "启用或关闭开机启动",
+        "启用/关闭开机启动",
         "退出托盘",
         "退出并停止 AutoDy",
         "启动中",
@@ -60,7 +62,7 @@ def test_tray_opens_dashboard_once_after_health_and_reuses_it_on_second_launch()
     assert "Wait-ForExistingHealthyService | Out-Null" in text
     assert text.count("Start-Process $Url") == 1
     assert "SelectionItemPattern" in text
-    assert "$open.add_Click({ try { Open-VerifiedDashboard" in text
+    assert "$open.add_Click({ Invoke-DashboardOpenAsync })" in text
     startup = text[text.index("try {", text.index("$timer.add_Tick")):text.index("[Windows.Forms.Application]::Run")]
     assert "Open-VerifiedDashboard" in startup
 
@@ -117,3 +119,75 @@ def test_ui_automation_failure_is_optional_and_returns_fallback_without_throwing
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
+
+
+def test_tray_left_click_is_async_and_double_click_is_not_required():
+    text = Path("scripts/autody-tray.ps1").read_text(encoding="utf-8-sig")
+
+    assert "$notify.add_MouseClick" in text
+    assert "Windows.Forms.MouseButtons]::Left" in text
+    assert "Invoke-DashboardOpenAsync" in text
+    assert "-OpenDashboardOnly" in text
+    assert "-WindowStyle Hidden" in text
+    assert "$notify.add_DoubleClick" not in text
+    assert "$notify.ContextMenuStrip = $menu" in text
+    assert "TotalMilliseconds -lt 700" in text
+
+
+def test_tray_menu_theme_helpers_execute_in_powershell():
+    script_path = Path("scripts/autody-tray.ps1").resolve()
+    command = r"""
+    $ErrorActionPreference = "Stop"
+    . $env:AUTODY_TEST_TRAY_SCRIPT -DefineOnly
+    $menu = New-Object System.Windows.Forms.ContextMenuStrip
+    [void]$menu.Items.Add("测试项目")
+    Set-AutoDyMenuTheme -Menu $menu
+    if ($menu.Renderer.GetType().Name -ne "AutoDyMenuRenderer") {
+      throw "custom tray renderer was not installed"
+    }
+    if ($menu.Font.Name -ne "Segoe UI") {
+      throw "tray menu font is not Segoe UI"
+    }
+    if ($menu.Padding.Left -lt 4) {
+      throw "tray menu padding is too small"
+    }
+    if ($menu.Items[0].Padding.Top -lt 3) {
+      throw "tray item padding is too small"
+    }
+    $script:LaunchCount = 0
+    function Start-Process { $script:LaunchCount += 1 }
+    Invoke-DashboardOpenAsync
+    Invoke-DashboardOpenAsync
+    if ($script:LaunchCount -ne 1) {
+      throw "rapid tray activation was not deduplicated"
+    }
+    """
+    test_env = os.environ.copy()
+    test_env["AUTODY_TEST_TRAY_SCRIPT"] = str(script_path)
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Sta", "-Command", command],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=test_env,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_tray_icon_contains_nonblank_high_occupancy_frames():
+    icon = Image.open("assets/icons/autody.ico")
+    required_sizes = {(16, 16), (20, 20), (24, 24), (32, 32), (48, 48), (64, 64), (256, 256)}
+    available = set(icon.ico.sizes())
+
+    assert required_sizes <= available
+    for size in required_sizes:
+        frame = icon.ico.getimage(size).convert("RGBA")
+        alpha = frame.getchannel("A")
+        bounds = alpha.getbbox()
+        assert bounds is not None
+        width = bounds[2] - bounds[0]
+        height = bounds[3] - bounds[1]
+        assert width / size[0] >= 0.68
+        assert height / size[1] >= 0.68
+        assert alpha.getextrema()[1] == 255
