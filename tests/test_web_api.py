@@ -295,6 +295,40 @@ def test_test_center_dry_run_settings_and_status_are_module_local_and_redacted(t
     assert all("模块测试文本" not in path.read_text(encoding="utf-8") for path in files if path.is_file())
 
 
+def test_test_center_batch_selection_defaults_to_eligible_and_prunes_stale_ids(tmp_path: Path):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets[0].stable_id = "target-one"
+    config.targets[0].candidate_id = "candidate-one"
+    config.targets[1].stable_id = "target-two"
+    config.targets[1].candidate_id = "candidate-two"
+    save_config(config_path, config)
+    client = TestClient(create_app(config_path))
+    assert client.post("/api/modules/autody-test-center/install").status_code == 200
+
+    initial = client.get("/api/modules/autody-test-center/dry-run/status").json()
+    assert initial["settings"]["selected_batch_target_ids"] == ["target-one", "target-two"]
+
+    saved = client.put(
+        "/api/modules/autody-test-center/dry-run/settings",
+        json={
+            **initial["settings"],
+            "selected_batch_target_ids": ["target-two", "deleted-target"],
+        },
+    )
+    assert saved.status_code == 200
+    assert saved.json()["selected_batch_target_ids"] == ["target-two"]
+
+    config = load_config(config_path)
+    config.targets[1].enabled = False
+    save_config(config_path, config)
+    pruned = client.get("/api/modules/autody-test-center/dry-run/status").json()
+    assert pruned["settings"]["selected_batch_target_ids"] == []
+    target_two = next(item for item in pruned["targets"] if item["target_id"] == "target-two")
+    assert target_two["batch_eligible"] is False
+    assert target_two["batch_exclusion_reason"] == "已停用"
+
+
 def test_test_center_today_message_preview_is_target_specific_and_read_only(tmp_path: Path):
     config_path = make_project(tmp_path)
     config = load_config(config_path)

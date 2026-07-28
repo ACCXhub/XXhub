@@ -49,6 +49,7 @@ from autody.runner import preview_today_target_message
 from autody.state import StateStore
 from autody.scheduler import ScheduleSettings, SchedulerService
 from autody.test_center_dry_run import (
+    batch_target_exclusion_reasons,
     DryRunController,
     DryRunSettings,
     eligible_batch_targets,
@@ -624,19 +625,39 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
             candidate.candidate_id: candidate.presence_status
             for candidate in discovered.candidates
         } if discovered else {}
-        eligible_ids = {
-            target.stable_id
-            for target in eligible_batch_targets(config, presence)
-        }
+        exclusion_reasons = batch_target_exclusion_reasons(config, presence)
         return [
             {
-                "target_id": target.stable_id,
+                "target_id": target.stable_id or target.candidate_id or f"configured-{index}",
                 "conversation_id": target.candidate_id,
                 "display_name": target.name,
-                "batch_eligible": target.stable_id in eligible_ids,
+                "single_eligible": bool(target.enabled and target.stable_id and target.candidate_id),
+                "batch_eligible": exclusion_reasons[index] is None,
+                "batch_exclusion_reason": exclusion_reasons[index],
             }
-            for target in config.targets if target.enabled and target.stable_id
+            for index, target in enumerate(config.targets)
         ]
+
+    def sanitized_dry_run_settings(
+        settings: DryRunSettings | None = None,
+        *,
+        persist: bool,
+    ) -> DryRunSettings:
+        current = settings or dry_run_controller.settings()
+        eligible_ids = [
+            item["target_id"]
+            for item in dry_run_targets()
+            if item["batch_eligible"]
+        ]
+        if current.selected_batch_target_ids is None:
+            selected_ids = eligible_ids
+        else:
+            requested = set(current.selected_batch_target_ids)
+            selected_ids = [target_id for target_id in eligible_ids if target_id in requested]
+        sanitized = current.model_copy(update={"selected_batch_target_ids": selected_ids})
+        if persist and sanitized != current:
+            dry_run_controller.save_settings(sanitized)
+        return sanitized
 
     def dry_run_target(target_id: str):
         config = load_config(config_path)
@@ -651,6 +672,7 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
     def dry_run_payload() -> dict:
         payload = dry_run_controller.status()
         targets = dry_run_targets()
+        payload["settings"] = sanitized_dry_run_settings(persist=True).model_dump()
         selected = next(
             (item for item in targets if item["target_id"] == payload.get("selected_target_id")),
             None,
@@ -1070,7 +1092,9 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
     @app.put("/api/modules/autody-test-center/dry-run/settings")
     def test_center_dry_run_settings(settings: DryRunSettings):
         _require_test_center()
-        return dry_run_controller.save_settings(settings).model_dump()
+        return dry_run_controller.save_settings(
+            sanitized_dry_run_settings(settings, persist=False)
+        ).model_dump()
 
     @app.post("/api/modules/autody-test-center/dry-run/select")
     def test_center_dry_run_select(payload: DryRunSelectRequest):

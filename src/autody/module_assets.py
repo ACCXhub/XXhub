@@ -21,8 +21,10 @@ let previewSequence = 0;
 let previewTargetId = null;
 let messageMode = 'today';
 let runMode = 'single';
+let batchTargetIds = [];
+let batchDialogOpen = false;
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
-const stageName = value => ({waiting:'等待中',opening_conversation:'正在打开聊天',verifying_identity:'正在核对身份',identity_mismatch:'会话不匹配',navigation_verified:'会话匹配',checking_existing_draft:'检测输入框',typing:'正在输入',observing:'等待观察',clearing:'正在清除',verifying_empty:'清除完成',completed:'测试完成',skipped_existing_draft:'检测到已有草稿，已跳过',skipped_existing_context:'检测到附件或回复，已跳过',cleanup_failed:'清除失败',stopped:'测试已停止',failed:'测试失败'}[value] || '等待中');
+const stageName = value => ({waiting:'等待中',pausing:'正在安全暂停',paused:'已安全暂停',opening_conversation:'正在打开聊天',verifying_identity:'正在核对身份',identity_mismatch:'会话不匹配',navigation_verified:'会话匹配',checking_existing_draft:'检测输入框',typing:'正在输入',observing:'等待观察',clearing:'正在清除',verifying_empty:'清除完成',completed:'测试完成',skipped_existing_draft:'检测到已有草稿，已跳过',skipped_existing_context:'检测到附件或回复，已跳过',cleanup_failed:'清除失败',stopped:'测试已停止',failed:'测试失败'}[value] || '等待中');
 async function request(path, payload, method = 'POST') { const response = await fetch(api + path, {method, headers:{'Content-Type':'application/json'}, body:payload === undefined ? undefined : JSON.stringify(payload)}); if (!response.ok) throw new Error(await response.text() || '请求未完成'); return response.json(); }
 function emptyCounters() { return {real_composer_writes:0, real_composer_clears:0, send_button_clicks:0, enter_key_presses:0, send_pipeline_calls:0, send_attempts:0, existing_drafts_preserved:0, cleanup_failures:0}; }
 function clearRunState(targetId, revision) {
@@ -47,6 +49,9 @@ function applyStatus(status, history, sequence) {
   selectedTargetId = status.selected_target_id || null;
   if (status.run_id) activeRunId = status.run_id;
   state = {...status, history:history?.items || state.history || []};
+  const eligibleIds = state.targets.filter(item => item.batch_eligible).map(item => item.target_id);
+  const storedBatchIds = Array.isArray(status.settings?.selected_batch_target_ids) ? status.settings.selected_batch_target_ids : eligibleIds;
+  batchTargetIds = eligibleIds.filter(targetId => storedBatchIds.includes(targetId));
   runMode = status.mode || runMode;
   if (status.resolved_test_text !== null && status.resolved_test_text !== undefined) {
     testText = status.resolved_test_text;
@@ -106,7 +111,12 @@ async function loadTodayMessage(targetId) {
 function resizeHost() { const height = Math.ceil(Math.max(document.documentElement.scrollHeight, document.body.scrollHeight, 560)); window.parent.postMessage({type:'autody-test-center:resize', moduleId, height}, window.location.origin); }
 new ResizeObserver(resizeHost).observe(document.documentElement);
 function selected() { return state.targets.find(item => item.target_id === state.selected_target_id); }
-function targetOptions() { return state.targets.map(item => `<option value="${escapeHtml(item.target_id)}" ${item.target_id === state.selected_target_id ? 'selected' : ''}>${escapeHtml(item.display_name)}</option>`).join(''); }
+function targetOptions() { return state.targets.map(item => `<option value="${escapeHtml(item.target_id)}" ${item.target_id === state.selected_target_id ? 'selected' : ''} ${item.single_eligible === false ? 'disabled' : ''}>${escapeHtml(item.display_name)}</option>`).join(''); }
+function eligibleBatchTargets() { return state.targets.filter(item => item.batch_eligible); }
+function orderedBatchIds(values) { const selectedIds = new Set(values); return eligibleBatchTargets().map(item => item.target_id).filter(targetId => selectedIds.has(targetId)); }
+function batchTargetRows() {
+  return state.targets.map(item => `<label class="batch-target-row ${item.batch_eligible ? '' : 'excluded'}"><input type="checkbox" data-batch-target="${escapeHtml(item.target_id)}" aria-label="${escapeHtml(item.display_name)}" ${batchTargetIds.includes(item.target_id) ? 'checked' : ''} ${item.batch_eligible ? '' : 'disabled'}><span><strong>${escapeHtml(item.display_name)}</strong>${item.batch_eligible ? '' : `<small>${escapeHtml(item.batch_exclusion_reason || '不符合安全条件')}</small>`}</span></label>`).join('');
+}
 function timingInput(key, label, suffix) { return `<label>${label}<span><input id="setting-${key}" type="number" value="${Number(state.settings?.[key] ?? defaults[key])}" required>${suffix}</span></label>`; }
 const resultName = value => ({completed:'测试通过',batch_completed:'批量测试已完成',navigation_verified:'导航验证通过',skipped_existing_draft:'已跳过：存在草稿',skipped_existing_context:'已跳过：存在附件或回复',message_unavailable:'今日文案不可用',navigation_failed:'无法打开聊天',login_required:'需要登录',browser_busy:'浏览器忙',cleanup_failed:'清除失败',uncertain_composer:'输入框状态不确定',stopped:'用户停止',failed:'测试未完成'}[value] || '待执行');
 const composerName = value => ({unknown:'尚未检查',empty:'输入框为空',test_text_present:'测试文本已输入',existing_draft_preserved:'已有内容，已保留',existing_attachment_preserved:'已有附件，已保留',changed:'内容发生变化',not_empty:'未清空'}[value] || '尚未检查');
@@ -127,6 +137,7 @@ function resultRows(items) {
 }
 function render() {
   const current = selected(); const counters = state.counters || {}; const running = Boolean(state.running);
+  const eligibleCount = eligibleBatchTargets().length;
   root.innerHTML = `<div class="module-shell">
     <header class="module-bar"><div><p>测试中心 · 真实页面干跑</p><small>先核验会话身份，再检查输入框；不会发送消息。</small></div><button class="link danger" id="remove">卸载测试中心</button></header>
     ${state.recovery_warning ? `<p class="warning">${escapeHtml(state.recovery_warning)}</p>` : ''}
@@ -136,7 +147,8 @@ function render() {
         <div class="mode-selector">
           <label class="check"><input type="radio" id="mode-single" name="run-mode" ${runMode === 'single' ? 'checked' : ''} ${running ? 'disabled' : ''}>单个测试</label>
           <label class="check"><input type="radio" id="mode-batch" name="run-mode" ${runMode === 'batch' ? 'checked' : ''} ${running ? 'disabled' : ''}>批量测试</label>
-          <span>可安全批量测试 ${Number(state.eligible_target_count || 0)} 个目标</span>
+          <button class="secondary compact" id="select-batch-targets" ${running ? 'disabled' : ''}>选择目标</button>
+          <span>已选择 ${batchTargetIds.length} / ${eligibleCount} · 可安全批量测试 ${eligibleCount} 个目标</span>
         </div>
         <label>目标<select id="target" ${running || selectionPending ? 'disabled' : ''}><option value="">请选择</option>${targetOptions()}</select></label>
         <div class="button-row"><button class="secondary" id="previous">上一个</button><button class="secondary" id="next">下一个</button><button class="secondary" id="focus-browser">打开受管浏览器</button></div>
@@ -146,7 +158,7 @@ function render() {
           <button class="link" id="reload-today-message">重新载入今日文案</button>
         </div>
         <label>测试文本<textarea id="test-text" rows="4" placeholder="仅在本次测试内存中保留，不会写入历史或日志。">${escapeHtml(testText)}</textarea></label>
-        <div class="button-row"><button id="start-single" ${!current || !testText.trim() || running || selectionPending || state.recovery_warning ? 'disabled' : ''}>开始单个测试</button><button id="start-batch" ${!current || !Number(state.eligible_target_count || 0) || running || selectionPending || state.recovery_warning ? 'disabled' : ''}>开始批量测试</button><button class="secondary" id="pause" ${!running ? 'disabled' : ''}>暂停</button><button class="secondary" id="resume" ${!running ? 'disabled' : ''}>继续</button><button class="danger-button" id="stop" ${!running ? 'disabled' : ''}>安全停止</button></div>
+        <div class="button-row"><button id="start-single" ${!current || !testText.trim() || running || selectionPending || state.recovery_warning ? 'disabled' : ''}>开始单个测试</button><button id="start-batch" ${!current || !batchTargetIds.length || running || selectionPending || state.recovery_warning ? 'disabled' : ''}>开始批量测试</button><button class="secondary" id="pause" ${!running || state.pause_requested || state.paused ? 'disabled' : ''}>暂停</button><button class="secondary" id="resume" ${!running || !state.paused ? 'disabled' : ''}>继续</button><button class="danger-button" id="stop" ${!running ? 'disabled' : ''}>安全停止</button></div>
         <h3>时间设置</h3><div class="timing-grid">${timingInput('page_ready_delay_ms','页面就绪',' ms')}${timingInput('typing_delay_ms','逐字输入',' ms')}${timingInput('typed_text_hold_ms','保留观察',' ms')}${timingInput('clear_verify_delay_ms','清除验证',' ms')}${timingInput('navigation_timeout_seconds','导航超时',' 秒')}</div>
         <div class="button-row"><button class="secondary" id="save-settings">保存设置</button><button class="link" id="restore-defaults">恢复默认值</button></div>
       </section>
@@ -175,6 +187,12 @@ function render() {
           <div><dt>identity_match_reason</dt><dd>${escapeHtml(state.identity_match_reason || '—')}</dd></div>
           <div><dt>run_id</dt><dd>${escapeHtml(state.run_id || '—')}</dd></div>
           <div><dt>request_revision</dt><dd>${Number(state.request_revision || 0)}</dd></div>
+          <div><dt>browser_pid</dt><dd>${escapeHtml(state.browser_pid || '—')}</dd></div>
+          <div><dt>context_identity</dt><dd>${escapeHtml(state.context_identity || '—')}</dd></div>
+          <div><dt>page_identity</dt><dd>${escapeHtml(state.page_identity || '—')}</dd></div>
+          <div><dt>page_count_before / after</dt><dd>${Number(state.page_count_before || 0)} / ${Number(state.page_count_after || 0)}</dd></div>
+          <div><dt>unexpected_page_count</dt><dd>${Number(state.unexpected_page_count || 0)}</dd></div>
+          <div><dt>unexpected_page_message</dt><dd>${escapeHtml(state.unexpected_page_message || '—')}</dd></div>
           <div><dt>result</dt><dd>${escapeHtml(state.result || '—')}</dd></div>
         </dl></details>
         <h3>安全计数</h3><div class="counter-grid"><span>输入 ${Number(counters.real_composer_writes || 0)}</span><span>清除 ${Number(counters.real_composer_clears || 0)}</span><span>发送点击 ${Number(counters.send_button_clicks || 0)}</span><span>Enter ${Number(counters.enter_key_presses || 0)}</span><span>发送链路 ${Number(counters.send_pipeline_calls || 0)}</span><span>发送尝试 ${Number(counters.send_attempts || 0)}</span><span>草稿保留 ${Number(counters.existing_drafts_preserved || 0)}</span></div>
@@ -182,7 +200,8 @@ function render() {
         <h3>最近测试</h3><div class="rows">${historyRows(state.history || [])}</div>
       </section>
     </div>
-    <div class="modal" id="remove-dialog" hidden><div class="dialog"><h2>卸载测试中心？</h2><p>测试历史和设置会被删除；正常好友、文案、发送记录和浏览器资料不会受影响。</p><div><button class="secondary" id="remove-cancel">取消</button><button class="danger-button" id="remove-confirm">卸载</button></div></div></div>
+    <div class="modal" id="batch-target-dialog" ${batchDialogOpen ? '' : 'hidden'}><div class="dialog batch-target-dialog"><h2>选择批量测试目标</h2><p>始终按好友配置顺序执行，与勾选先后无关。</p><div class="batch-selection-actions"><button class="secondary" id="batch-select-all">全选</button><button class="secondary" id="batch-clear">清空</button><button class="secondary" id="batch-invert">反选</button><span>已选择 ${batchTargetIds.length} / ${eligibleCount}</span></div><div class="batch-target-list">${batchTargetRows()}</div><div class="dialog-actions"><button class="secondary" id="batch-cancel">取消</button><button id="batch-done">完成</button></div></div></div>
+    <div class="modal" id="remove-dialog" hidden><div class="dialog"><h2>卸载测试中心？</h2><p>测试历史和设置会被删除；正常好友、文案、发送记录和浏览器资料不会受影响。</p><div class="dialog-actions"><button class="secondary" id="remove-cancel">取消</button><button class="danger-button" id="remove-confirm">卸载</button></div></div></div>
   </div>`;
   const target = document.getElementById('target');
   target.onchange = () => { if (target.value) void selectTarget(target.value); };
@@ -194,7 +213,7 @@ function render() {
     activeRunId = runId;
     state = {...clearRunState(target.value, requestRevision), running:true, run_id:runId};
     render();
-    void request('/dry-run/start', {target_id:target.value, run_id:runId, request_revision:requestRevision, test_text:testText, use_today_message:automatic || messageMode === 'today', automatic, navigation_only:navigationOnly})
+    void request('/dry-run/start', {target_id:target.value, run_id:runId, request_revision:requestRevision, test_text:testText, use_today_message:automatic || messageMode === 'today', automatic, navigation_only:navigationOnly, batch_target_ids:automatic ? orderedBatchIds(batchTargetIds) : null})
       .then(response => { if (activeRunId === runId) applyStatus(response, {items:state.history || []}, ++loadSequence); })
       .then(load)
       .catch(error => {
@@ -222,11 +241,51 @@ function render() {
   };
   document.getElementById('start-single').onclick = () => startRun(false, false);
   document.getElementById('start-batch').onclick = () => startRun(false, true);
-  document.getElementById('pause').onclick = () => void request('/dry-run/pause', {}).then(load).catch(showError);
+  document.getElementById('select-batch-targets').onclick = () => { batchDialogOpen = true; render(); };
+  document.querySelectorAll('[data-batch-target]').forEach(input => {
+    input.onchange = () => {
+      batchTargetIds = orderedBatchIds(Array.from(document.querySelectorAll('[data-batch-target]:checked')).map(item => item.dataset.batchTarget));
+      render();
+    };
+  });
+  document.getElementById('batch-select-all').onclick = () => { batchTargetIds = eligibleBatchTargets().map(item => item.target_id); render(); };
+  document.getElementById('batch-clear').onclick = () => { batchTargetIds = []; render(); };
+  document.getElementById('batch-invert').onclick = () => {
+    const selectedIds = new Set(batchTargetIds);
+    batchTargetIds = eligibleBatchTargets().map(item => item.target_id).filter(targetId => !selectedIds.has(targetId));
+    render();
+  };
+  document.getElementById('batch-cancel').onclick = () => {
+    const stored = Array.isArray(state.settings?.selected_batch_target_ids) ? state.settings.selected_batch_target_ids : eligibleBatchTargets().map(item => item.target_id);
+    batchTargetIds = orderedBatchIds(stored);
+    batchDialogOpen = false;
+    render();
+  };
+  document.getElementById('batch-done').onclick = () => {
+    batchDialogOpen = false;
+    const selectedIds = orderedBatchIds(batchTargetIds);
+    batchTargetIds = selectedIds;
+    render();
+    void request('/dry-run/settings', {...state.settings, selected_batch_target_ids:selectedIds}, 'PUT')
+      .then(saved => {
+        const persisted = Array.isArray(saved.selected_batch_target_ids) ? saved.selected_batch_target_ids : selectedIds;
+        state = {...state, settings:{...state.settings, ...saved}};
+        batchTargetIds = orderedBatchIds(persisted);
+        render();
+      }).catch(showError);
+  };
+  document.getElementById('pause').onclick = () => {
+    state = {...state, pause_requested:true, stage:'pausing'};
+    render();
+    void request('/dry-run/pause', {}).then(response => {
+      if (activeRunId && response.run_id !== activeRunId) return;
+      applyStatus(response, {items:state.history || []}, ++loadSequence);
+    }).catch(showError);
+  };
   document.getElementById('resume').onclick = () => void request('/dry-run/resume', {}).then(load).catch(showError);
   document.getElementById('stop').onclick = () => void request('/dry-run/stop', {}).then(load).catch(showError);
-  document.getElementById('save-settings').onclick = () => { const settings = {}; Object.keys(defaults).forEach(key => { const input = document.getElementById(`setting-${key}`); if (input) settings[key] = Number(input.value); }); void request('/dry-run/settings', settings, 'PUT').then(load).catch(showError); };
-  document.getElementById('restore-defaults').onclick = () => void request('/dry-run/settings', defaults, 'PUT').then(load).catch(showError);
+  document.getElementById('save-settings').onclick = () => { const settings = {selected_batch_target_ids:orderedBatchIds(batchTargetIds)}; Object.keys(defaults).forEach(key => { const input = document.getElementById(`setting-${key}`); if (input) settings[key] = Number(input.value); }); void request('/dry-run/settings', settings, 'PUT').then(load).catch(showError); };
+  document.getElementById('restore-defaults').onclick = () => void request('/dry-run/settings', {...defaults, selected_batch_target_ids:orderedBatchIds(batchTargetIds)}, 'PUT').then(load).catch(showError);
   document.getElementById('remove').onclick = () => { document.getElementById('remove-dialog').hidden = false; resizeHost(); };
   document.getElementById('remove-cancel').onclick = () => { document.getElementById('remove-dialog').hidden = true; resizeHost(); };
   document.getElementById('remove-confirm').onclick = () => void request('/uninstall', {confirmed:true}).then(() => window.parent.postMessage({type:'autody-test-center:removed', moduleId}, window.location.origin)).catch(showError);
@@ -239,4 +298,8 @@ setInterval(() => { if (state.running) void load(); }, 800);
 
 TEST_CENTER_CSS = r"""
 *{box-sizing:border-box}html,body{margin:0;overflow-y:hidden;background:transparent;color:#263750;font:13px/1.5 "Segoe UI","Microsoft YaHei",sans-serif}#root{width:100%;padding:0}.module-shell{width:100%;margin:0}.module-bar{min-height:55px;display:flex;justify-content:space-between;gap:24px;align-items:flex-start;margin-bottom:22px}.module-bar p{margin:0;color:#0b1830;font-size:27px;font-weight:700;letter-spacing:-.04em}.module-bar small,.empty{color:#738097}.dry-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.control-column,.status-column{padding:18px 22px;border:1px solid #e1e7ef;border-radius:10px;background:#fff}.control-column h2,.status-column h2,.control-column h3,.status-column h3{margin:0 0 10px;color:#344761;font-size:14px}.control-column h3,.status-column h3{margin-top:16px;font-size:13px}label{display:grid;gap:4px;margin-top:9px;color:#65748a;font-size:12px}.button-row,.message-mode,.mode-selector{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:10px}.message-mode,.mode-selector{padding:8px 9px;border-radius:7px;background:#f7f9fc}.mode-selector span{margin-left:auto;color:#65748a;font-size:12px}.check{display:flex;align-items:center;gap:5px;margin:0}.check input{width:auto}.timing-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.timing-grid label{margin:0}.timing-grid span{display:flex;align-items:center;gap:4px}select,input,textarea,button{font:inherit}select,input,textarea{width:100%;border:1px solid #ced8e5;border-radius:7px;padding:7px;color:#263750;background:#fff}textarea{display:block;resize:vertical}button{border:1px solid #1769e8;border-radius:8px;padding:7px 10px;color:#fff;background:#1769e8;cursor:pointer}button:disabled{opacity:.55;cursor:not-allowed}.secondary,.link{border-color:#d2dce8;color:#3f526d;background:#fff}.link{border:0;padding:0;text-decoration:underline;text-underline-offset:3px}.danger{color:#a53845}.danger-button{border-color:#b83e4d;background:#b83e4d}.status-column dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}.status-column dl div{padding:7px 9px;border-radius:7px;background:#f7f9fc}.status-column dt{color:#7a8799;font-size:11px}.status-column dd{margin:2px 0 0;font-weight:650;word-break:break-word}.diagnostics{margin-top:10px;border-top:1px solid #eef2f6;padding-top:8px}.diagnostics summary{cursor:pointer;color:#65748a}.diagnostics dl{margin-top:8px}.counter-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.counter-grid span{padding:6px 8px;border-radius:6px;background:#f7f9fc;color:#55657c;font-size:12px}.rows article{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 10px;padding:7px 0;border-top:1px solid #eef2f6}.rows article:first-child{border-top:0}.rows small{grid-column:1/-1;color:#8490a0}.warning{margin:8px 0 0;padding:8px 10px;border-radius:7px;background:#fff4dc;color:#875b0d}.modal[hidden]{display:none}.modal{position:fixed;inset:0;display:grid;place-items:center;padding:18px;background:rgba(20,36,60,.42)}.dialog{width:min(430px,100%);padding:18px;border-radius:10px;background:#fff;box-shadow:0 12px 34px rgba(20,36,60,.22)}.dialog h2{margin:0;font-size:16px}.dialog p{color:#65748a}.dialog div{display:flex;justify-content:flex-end;gap:8px}@media(max-width:760px){.module-bar{margin-bottom:16px}.module-bar p{font-size:23px}.dry-grid{grid-template-columns:1fr}.timing-grid,.status-column dl,.counter-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+"""
+
+TEST_CENTER_CSS += r"""
+.compact{padding:5px 9px}.batch-target-dialog{width:min(520px,100%)}.dialog .batch-selection-actions{display:flex;justify-content:flex-start;align-items:center;gap:7px;flex-wrap:wrap}.batch-selection-actions span{margin-left:auto;color:#65748a;font-size:12px}.dialog .batch-target-list{display:grid;margin:12px 0;border:1px solid #e1e7ef;border-radius:8px}.batch-target-row{display:flex;grid-template-columns:none;align-items:flex-start;gap:10px;margin:0;padding:9px 11px;border-top:1px solid #eef2f6;color:#344761}.batch-target-row:first-child{border-top:0}.batch-target-row input{flex:0 0 auto;width:auto;margin-top:3px}.batch-target-row span{display:grid;gap:2px}.batch-target-row strong{font-size:13px}.batch-target-row small{color:#8a96a6}.batch-target-row.excluded{background:#f8f9fb;color:#8a96a6}.dialog .dialog-actions{display:flex;justify-content:flex-end;gap:8px}
 """

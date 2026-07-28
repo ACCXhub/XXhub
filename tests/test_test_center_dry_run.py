@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import autody.test_center_dry_run as dry_run_module
-from autody.chat import ChatSelectors, DouyinChat
+from autody.chat import ChatSelectors, ComposerState, ConversationIdentity, DouyinChat
 from autody.config import AppConfig, Target, save_config
 from autody.module_assets import TEST_CENTER_JS
 from autody.test_center_dry_run import (
@@ -48,10 +48,13 @@ def _frontend_state(
 ) -> dict:
     return {
         "targets": [
-            {"target_id": "target-a", "display_name": "好友甲", "conversation_id": CONVERSATION_A_ID},
-            {"target_id": "target-b", "display_name": "好友乙", "conversation_id": CONVERSATION_B_ID},
+            {"target_id": "target-a", "display_name": "好友甲", "conversation_id": CONVERSATION_A_ID, "batch_eligible": True, "batch_exclusion_reason": None},
+            {"target_id": "target-b", "display_name": "好友乙", "conversation_id": CONVERSATION_B_ID, "batch_eligible": True, "batch_exclusion_reason": None},
         ],
-        "settings": DryRunSettings().model_dump(),
+        "settings": {
+            **DryRunSettings().model_dump(),
+            "selected_batch_target_ids": ["target-a", "target-b"],
+        },
         "counters": {
             "real_composer_writes": 0,
             "real_composer_clears": 0,
@@ -262,6 +265,93 @@ def test_batch_mode_shows_eligible_count_and_sends_one_pass_request(page):
     assert payload["automatic"] is True
     assert payload["use_today_message"] is True
     assert payload["navigation_only"] is False
+    assert payload["batch_target_ids"] == ["target-a", "target-b"]
+
+
+def test_batch_target_dialog_selects_subset_and_preserves_configured_order(page):
+    page.set_default_timeout(1000)
+    status = _frontend_state(
+        selected_target_id="target-a",
+        request_revision=1,
+        run_id=None,
+        visible_name=None,
+        result=None,
+    )
+    status["targets"].append({
+        "target_id": "target-disabled",
+        "display_name": "停用目标",
+        "conversation_id": "candidate-disabled",
+        "batch_eligible": False,
+        "batch_exclusion_reason": "已停用",
+    })
+    _open_mocked_frontend(page, status, {"target-a": "今日文案甲"})
+    page.get_by_label("批量测试").check()
+    page.get_by_role("button", name="选择目标").click()
+
+    picker = page.locator("#batch-target-dialog")
+    assert picker.is_visible()
+    assert "已选择 2 / 2" in picker.inner_text()
+    assert picker.get_by_label("停用目标").is_disabled()
+    assert "已停用" in picker.inner_text()
+
+    picker.get_by_role("button", name="清空").click()
+    assert page.get_by_role("button", name="开始批量测试").is_disabled()
+    picker.get_by_label("好友乙").check()
+    picker.get_by_label("好友甲").check()
+    assert "已选择 2 / 2" in picker.inner_text()
+    picker.get_by_role("button", name="完成").click()
+
+    page.wait_for_function("window.__requests.length === 3")
+    page.evaluate(
+        """status => window.__resolveRequest(2, status.settings)""",
+        status,
+    )
+    page.get_by_role("button", name="开始批量测试").click()
+    page.wait_for_function("window.__requests.length === 4")
+    payload = page.evaluate("() => JSON.parse(window.__requests[3].options.body)")
+    assert payload["batch_target_ids"] == ["target-a", "target-b"]
+
+
+def test_batch_target_dialog_select_all_clear_and_invert(page):
+    page.set_default_timeout(1000)
+    status = _frontend_state(
+        selected_target_id="target-a",
+        request_revision=1,
+        run_id=None,
+        visible_name=None,
+        result=None,
+    )
+    _open_mocked_frontend(page, status, {"target-a": "今日文案甲"})
+    page.get_by_role("button", name="选择目标").click()
+    picker = page.locator("#batch-target-dialog")
+
+    picker.get_by_role("button", name="清空").click()
+    assert "已选择 0 / 2" in picker.inner_text()
+    picker.get_by_role("button", name="反选").click()
+    assert "已选择 2 / 2" in picker.inner_text()
+    picker.get_by_role("button", name="全选").click()
+    assert "已选择 2 / 2" in picker.inner_text()
+
+
+def test_pause_click_shows_safe_pause_immediately_without_waiting_for_response(page):
+    page.set_default_timeout(1000)
+    status = _frontend_state(
+        selected_target_id="target-a",
+        request_revision=1,
+        run_id="run-pausing",
+        visible_name="好友甲",
+        result=None,
+    )
+    status.update({"running": True, "stage": "typing", "mode": "batch"})
+    _open_mocked_frontend(page, status)
+
+    started = time.monotonic()
+    page.get_by_role("button", name="暂停", exact=True).click()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.2
+    assert "正在安全暂停" in page.locator(".status-summary").inner_text()
+    assert page.get_by_role("button", name="暂停", exact=True).is_disabled()
 
 
 def test_batch_progress_and_results_are_chinese_without_raw_reason_codes(page):
@@ -459,14 +549,14 @@ def test_zero_width_placeholder_does_not_trigger_false_existing_draft(page, tmp_
     assert result.counters["real_composer_clears"] == 1
 
 
-def test_stop_request_waits_for_exact_cleanup_before_stopping(page, tmp_path: Path):
+def test_stop_before_composer_access_stops_without_writing(page, tmp_path: Path):
     _open_fixture(page)
     result = TestCenterDryRun(page, ChatSelectors.test_defaults(), artifact_dir=tmp_path).run_target(
         Target(name="小明", stable_id="target-a", candidate_id=CONVERSATION_A_ID), "模块测试文本", DryRunSettings(), stop_requested=lambda: True
     )
 
     assert result.result == "stopped"
-    assert result.counters["real_composer_writes"] == result.counters["real_composer_clears"] == 1
+    assert result.counters["real_composer_writes"] == result.counters["real_composer_clears"] == 0
     assert (page.locator('[data-e2e="chat-input"]').text_content() or "").strip() == ""
 
 
@@ -659,6 +749,199 @@ def test_batch_runs_one_configured_pass_resolving_each_targets_today_message(tmp
     ))
 
 
+def test_three_target_batch_uses_one_browser_context_and_authoritative_page(tmp_path: Path, monkeypatch):
+    config_path, _targets = _configured_batch(tmp_path)
+    opened = 0
+    visited_pages: list[int] = []
+    context = SimpleNamespace(pages=[])
+    page = SimpleNamespace(bring_to_front=lambda: None, context=context)
+    context.pages.append(page)
+
+    class FakeChatSession:
+        def __enter__(self):
+            nonlocal opened
+            opened += 1
+            return page
+
+        def __exit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(dry_run_module, "SingleInstanceLock", lambda _path: nullcontext())
+    monkeypatch.setattr(dry_run_module, "open_chat", lambda *_args, **_kwargs: FakeChatSession())
+    monkeypatch.setattr(
+        dry_run_module,
+        "preview_today_target_message",
+        lambda _config, target, _today: SimpleNamespace(text=f"今日文案-{target.stable_id}"),
+    )
+
+    def complete_target(
+        runner,
+        target,
+        _test_text,
+        _settings,
+        *,
+        run_id,
+        request_revision,
+        on_composer_write_started,
+        resolve_test_text,
+        **_kwargs,
+    ):
+        visited_pages.append(id(runner.page))
+        resolve_test_text()
+        on_composer_write_started()
+        counters = empty_counters()
+        counters["real_composer_writes"] = counters["real_composer_clears"] = 1
+        return DryRunResult(
+            run_id=run_id,
+            request_revision=request_revision,
+            target_id=target.stable_id,
+            selected_target_id=target.stable_id,
+            expected_conversation_id=target.candidate_id,
+            selected_display_name=target.name,
+            visible_conversation_id=target.candidate_id,
+            visible_display_name=target.name,
+            identity_match=True,
+            identity_match_reason="stable_id_match",
+            composer_status="empty",
+            stage="completed",
+            result="completed",
+            counters=counters,
+        )
+
+    monkeypatch.setattr(TestCenterDryRun, "run_target", complete_target)
+    monkeypatch.setattr(DryRunController, "_browser_process_id", staticmethod(lambda _page: 4242))
+    controller = DryRunController(config_path, tmp_path / "module-data")
+    monkeypatch.setattr(controller, "_wait_switch_interval", lambda _seconds: True)
+    controller.select("target-0", request_revision=1)
+    controller.start(
+        "target-0",
+        "",
+        automatic=True,
+        use_today_message=True,
+        run_id="run-one-page",
+        request_revision=1,
+    )
+    controller._thread.join(timeout=3)
+    status = controller.status()
+
+    assert opened == 1
+    assert len(set(visited_pages)) == 1
+    assert status["browser_pid"] == 4242
+    assert status["context_identity"]
+    assert status["page_identity"]
+    assert status["page_count_before"] == status["page_count_after"] == 1
+
+
+def test_batch_stops_before_target_when_context_has_ambiguous_extra_page(tmp_path: Path, monkeypatch):
+    config_path, _targets = _configured_batch(tmp_path, count=1)
+    page = SimpleNamespace(bring_to_front=lambda: None)
+    extra = SimpleNamespace(opener=lambda: None)
+    context = SimpleNamespace(pages=[page, extra])
+    page.context = context
+    monkeypatch.setattr(dry_run_module, "SingleInstanceLock", lambda _path: nullcontext())
+    monkeypatch.setattr(dry_run_module, "open_chat", lambda *_args, **_kwargs: nullcontext(page))
+    monkeypatch.setattr(
+        TestCenterDryRun,
+        "run_target",
+        lambda *_args, **_kwargs: pytest.fail("target must not start with ambiguous pages"),
+    )
+    controller = DryRunController(config_path, tmp_path / "module-data")
+    controller.select("target-0", request_revision=1)
+
+    controller.start(
+        "target-0",
+        "测试",
+        automatic=False,
+        run_id="run-ambiguous-page",
+        request_revision=1,
+    )
+    controller._thread.join(timeout=3)
+    status = controller.status()
+
+    assert status["result"] == "navigation_failed"
+    assert status["page_count_before"] == status["page_count_after"] == 2
+    assert status["completed_targets"] == 0
+
+
+def test_confirmed_unexpected_popup_is_closed_and_recorded_before_batch_continues(tmp_path: Path, monkeypatch):
+    config_path, _targets = _configured_batch(tmp_path, count=2)
+    visited: list[str] = []
+
+    class FakePopup:
+        def __init__(self, opener):
+            self._opener = opener
+            self.closed = False
+
+        def opener(self):
+            return self._opener
+
+        def close(self):
+            self.closed = True
+            context.pages.remove(self)
+
+    context = SimpleNamespace(pages=[])
+    page = SimpleNamespace(bring_to_front=lambda: None, context=context)
+    popup = FakePopup(page)
+    context.pages.append(page)
+    monkeypatch.setattr(dry_run_module, "SingleInstanceLock", lambda _path: nullcontext())
+    monkeypatch.setattr(dry_run_module, "open_chat", lambda *_args, **_kwargs: nullcontext(page))
+    monkeypatch.setattr(
+        dry_run_module,
+        "preview_today_target_message",
+        lambda _config, target, _today: SimpleNamespace(text=f"今日文案-{target.stable_id}"),
+    )
+
+    def target_with_popup(
+        _runner,
+        target,
+        _test_text,
+        _settings,
+        *,
+        run_id,
+        request_revision,
+        **_kwargs,
+    ):
+        visited.append(target.stable_id)
+        if target.stable_id == "target-0":
+            context.pages.append(popup)
+        return DryRunResult(
+            run_id=run_id,
+            request_revision=request_revision,
+            target_id=target.stable_id,
+            selected_target_id=target.stable_id,
+            expected_conversation_id=target.candidate_id,
+            selected_display_name=target.name,
+            visible_conversation_id=target.candidate_id,
+            visible_display_name=target.name,
+            identity_match=True,
+            identity_match_reason="stable_id_match",
+            composer_status="empty",
+            stage="completed",
+            result="completed",
+        )
+
+    monkeypatch.setattr(TestCenterDryRun, "run_target", target_with_popup)
+    controller = DryRunController(config_path, tmp_path / "module-data")
+    monkeypatch.setattr(controller, "_wait_switch_interval", lambda _seconds: True)
+    controller.select("target-0", request_revision=1)
+    controller.start(
+        "target-0",
+        "",
+        automatic=True,
+        use_today_message=True,
+        run_id="run-popup",
+        request_revision=1,
+    )
+    controller._thread.join(timeout=3)
+    status = controller.status()
+
+    assert popup.closed is True
+    assert visited == ["target-0", "target-1"]
+    assert status["page_count_before"] == status["page_count_after"] == 1
+    assert status["unexpected_page_count"] == 1
+    assert status["unexpected_page_message"] == "检测到并关闭了意外弹出页面"
+
+
 def test_batch_continues_after_safe_skip_identity_and_navigation_failures(tmp_path: Path, monkeypatch):
     config_path, _targets = _configured_batch(tmp_path, count=4)
     visited: list[str] = []
@@ -777,6 +1060,235 @@ def test_pause_becomes_visible_only_after_current_target_is_safely_cleared(tmp_p
     controller.resume()
     controller._thread.join(timeout=3)
     assert controller.status()["completed_targets"] == 2
+
+
+def test_pause_request_sets_nonblocking_safe_pause_state_immediately(tmp_path: Path):
+    controller = DryRunController(tmp_path / "config.yaml", tmp_path / "module-data")
+    controller._update(running=True, stage="typing")
+
+    started = time.monotonic()
+    status = controller.pause()
+
+    assert time.monotonic() - started < 0.2
+    assert status["pause_requested"] is True
+    assert status["paused"] is False
+    assert status["stage"] == "pausing"
+
+
+def test_pause_during_browser_lock_wait_stops_retries_until_resume(tmp_path: Path, monkeypatch):
+    attempts = 0
+    acquired = threading.Event()
+    release = threading.Event()
+
+    class ContendedLock:
+        def __init__(self, _path):
+            pass
+
+        def __enter__(self):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise dry_run_module.TaskAlreadyRunning("busy")
+            acquired.set()
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(dry_run_module, "SingleInstanceLock", ContendedLock)
+    controller = DryRunController(tmp_path / "config.yaml", tmp_path / "module-data")
+    controller._update(running=True)
+    controller.pause()
+
+    def acquire():
+        with controller._acquire_browser_lock(tmp_path / "browser.lock", timeout_seconds=2):
+            release.wait(timeout=2)
+
+    thread = threading.Thread(target=acquire)
+    thread.start()
+    deadline = time.monotonic() + 1
+    while not controller.status()["paused"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert controller.status()["paused"] is True
+    assert attempts == 0
+    controller.resume()
+    assert acquired.wait(timeout=1)
+    release.set()
+    thread.join(timeout=1)
+    assert attempts == 2
+
+
+def test_pause_during_target_interval_is_immediate(tmp_path: Path):
+    controller = DryRunController(tmp_path / "config.yaml", tmp_path / "module-data")
+    controller._update(running=True)
+    finished = threading.Event()
+
+    thread = threading.Thread(
+        target=lambda: (controller._wait_switch_interval(0.5), finished.set())
+    )
+    thread.start()
+    started = time.monotonic()
+    controller.pause()
+    deadline = started + 0.2
+    while not controller.status()["paused"] and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+    assert controller.status()["paused"] is True
+    assert time.monotonic() - started < 0.2
+    controller.resume()
+    assert finished.wait(timeout=1)
+    thread.join(timeout=1)
+
+
+def test_pause_during_partial_typing_clears_only_the_exact_inserted_prefix(tmp_path: Path, monkeypatch):
+    pause_requested = threading.Event()
+
+    class FakeEditor:
+        def __init__(self):
+            self.text = ""
+
+        def press_sequentially(self, value, *, delay):
+            assert delay == 30
+            self.text += value
+            if len(self.text) == 2:
+                pause_requested.set()
+
+        def press(self, key):
+            if key == "Backspace":
+                self.text = ""
+
+    editor = FakeEditor()
+
+    class FakeChat:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def open_conversation_identity(self, *_args, **_kwargs):
+            return ConversationIdentity("candidate-a", "candidate-a", "目标", "目标", True, "stable_id_match")
+
+        def composer_editor(self):
+            return editor
+
+        def composer_state(self, _editor):
+            normalized = len(editor.text.replace(" ", ""))
+            return ComposerState(editor.text, normalized, normalized > 0, False, False, normalized == 0, "empty" if normalized == 0 else "visible_text")
+
+    page = SimpleNamespace(
+        set_default_timeout=lambda _value: None,
+        bring_to_front=lambda: None,
+        wait_for_timeout=lambda _value: None,
+    )
+    monkeypatch.setattr(dry_run_module, "DouyinChat", FakeChat)
+    result = TestCenterDryRun(page, ChatSelectors.test_defaults(), artifact_dir=tmp_path).run_target(
+        Target(name="目标", stable_id="target-a", candidate_id="candidate-a"),
+        "四字文本",
+        DryRunSettings(page_ready_delay_ms=500, typing_delay_ms=30, typed_text_hold_ms=500, clear_verify_delay_ms=200),
+        pause_requested=pause_requested.is_set,
+    )
+
+    assert result.result == "paused"
+    assert editor.text == ""
+    assert result.counters["real_composer_writes"] == 1
+    assert result.counters["real_composer_clears"] == 1
+    assert result.counters["cleanup_failures"] == 0
+
+
+def test_pause_after_navigation_stops_before_composer_inspection(tmp_path: Path, monkeypatch):
+    pause_requested = threading.Event()
+    composer_inspections = 0
+
+    class FakeChat:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def open_conversation_identity(self, *_args, **_kwargs):
+            pause_requested.set()
+            return ConversationIdentity("candidate-a", "candidate-a", "目标", "目标", True, "stable_id_match")
+
+        def composer_editor(self):
+            nonlocal composer_inspections
+            composer_inspections += 1
+            raise AssertionError("composer must not be inspected while pausing")
+
+    page = SimpleNamespace(
+        set_default_timeout=lambda _value: None,
+        bring_to_front=lambda: None,
+        wait_for_timeout=lambda _value: None,
+    )
+    monkeypatch.setattr(dry_run_module, "DouyinChat", FakeChat)
+    result = TestCenterDryRun(page, ChatSelectors.test_defaults(), artifact_dir=tmp_path).run_target(
+        Target(name="目标", stable_id="target-a", candidate_id="candidate-a"),
+        "测试文本",
+        DryRunSettings(),
+        pause_requested=pause_requested.is_set,
+    )
+
+    assert result.result == "paused"
+    assert composer_inspections == 0
+    assert all(value == 0 for value in result.counters.values())
+
+
+@pytest.mark.parametrize("pause_phase", ["observation", "cleanup"])
+def test_pause_during_observation_or_cleanup_finishes_exact_cleanup(
+    pause_phase: str,
+    tmp_path: Path,
+    monkeypatch,
+):
+    pause_requested = threading.Event()
+
+    class FakeEditor:
+        def __init__(self):
+            self.text = ""
+
+        def press_sequentially(self, value, *, delay):
+            self.text += value
+
+        def press(self, key):
+            if key == "Backspace":
+                self.text = ""
+                if pause_phase == "cleanup":
+                    pause_requested.set()
+
+    editor = FakeEditor()
+
+    class FakeChat:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def open_conversation_identity(self, *_args, **_kwargs):
+            return ConversationIdentity("candidate-a", "candidate-a", "目标", "目标", True, "stable_id_match")
+
+        def composer_editor(self):
+            return editor
+
+        def composer_state(self, _editor):
+            normalized = len(editor.text.replace(" ", ""))
+            return ComposerState(editor.text, normalized, normalized > 0, False, False, normalized == 0, "empty" if normalized == 0 else "visible_text")
+
+    def wait_for_timeout(_milliseconds):
+        if pause_phase == "observation" and editor.text == "测试":
+            pause_requested.set()
+
+    page = SimpleNamespace(
+        set_default_timeout=lambda _value: None,
+        bring_to_front=lambda: None,
+        wait_for_timeout=wait_for_timeout,
+    )
+    monkeypatch.setattr(dry_run_module, "DouyinChat", FakeChat)
+
+    result = TestCenterDryRun(page, ChatSelectors.test_defaults(), artifact_dir=tmp_path).run_target(
+        Target(name="目标", stable_id="target-a", candidate_id="candidate-a"),
+        "测试",
+        DryRunSettings(page_ready_delay_ms=500, typing_delay_ms=30, typed_text_hold_ms=500, clear_verify_delay_ms=200),
+        pause_requested=pause_requested.is_set,
+    )
+
+    assert result.result == "paused"
+    assert editor.text == ""
+    assert result.counters["real_composer_writes"] == 1
+    assert result.counters["real_composer_clears"] == 1
+    assert result.counters["cleanup_failures"] == 0
 
 
 def test_safe_stop_waits_for_balanced_cleanup_and_does_not_start_next_target(tmp_path: Path, monkeypatch):
@@ -918,8 +1430,8 @@ def test_identity_or_cleanup_mismatch_stops_without_deleting_user_content(page, 
         ) if stage == "observing" else None,
     )
 
-    assert changed.result == "stopped"
-    assert changed.message == "输入内容发生变化，已停止测试"
+    assert changed.result == "cleanup_failed"
+    assert changed.message == "输入内容发生变化，无法确认安全清除"
     assert page.locator('[data-e2e="chat-input"]').inner_text() == "用户修改后的草稿"
     assert changed.counters["cleanup_failures"] == 1
     assert changed.counters["real_composer_clears"] == 0

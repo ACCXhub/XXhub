@@ -5,6 +5,7 @@ conversation through ``DouyinChat``, writes only a supplied temporary test
 value, and will delete only that exact value after re-checking it.
 """
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 import hashlib
@@ -20,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from autody.chat import (
     AuthenticationError,
+    ChatNavigationInterrupted,
     ChatPageLoadError,
     ChatSelectors,
     DOUYIN_SELECTORS,
@@ -39,6 +41,7 @@ class DryRunSettings(BaseModel):
     clear_verify_delay_ms: int = Field(default=500, ge=200, le=3000)
     target_switch_interval_seconds: int = Field(default=8, ge=5, le=60)
     navigation_timeout_seconds: int = Field(default=12, ge=5, le=30)
+    selected_batch_target_ids: list[str] | None = Field(default=None, max_length=50)
 
 
 _COUNTER_NAMES = (
@@ -61,29 +64,49 @@ def _normalized_target_name(value: str) -> str:
     return " ".join(value.split()).casefold()
 
 
-def eligible_batch_targets(
+def batch_target_exclusion_reasons(
     config: AppConfig,
     candidate_presence: Mapping[str, str] | None = None,
-) -> list[Target]:
-    """Return safe configured targets in their original configured order."""
-    configured = [
+) -> dict[int, str | None]:
+    candidate_presence = candidate_presence or {}
+    identity_ready = [
         target
         for target in config.targets
         if target.enabled and target.stable_id and target.candidate_id
     ]
     grouped_names: dict[str, int] = {}
-    for target in configured:
+    for target in identity_ready:
         normalized = _normalized_target_name(target.name)
         grouped_names[normalized] = grouped_names.get(normalized, 0) + 1
     ambiguous_names = {name for name, count in grouped_names.items() if count > 1}
+    reasons: dict[int, str | None] = {}
+    for index, target in enumerate(config.targets):
+        if not target.enabled:
+            reason = "已停用"
+        elif not target.stable_id:
+            reason = "缺少稳定身份"
+        elif not target.candidate_id:
+            reason = "尚未解析会话"
+        elif candidate_presence.get(target.candidate_id, "current") == "stale":
+            reason = "好友发现记录已过期"
+        elif _normalized_target_name(target.name) in ambiguous_names:
+            reason = "名称重复，身份存在歧义"
+        else:
+            reason = None
+        reasons[index] = reason
+    return reasons
+
+
+def eligible_batch_targets(
+    config: AppConfig,
+    candidate_presence: Mapping[str, str] | None = None,
+) -> list[Target]:
+    """Return safe configured targets in their original configured order."""
+    reasons = batch_target_exclusion_reasons(config, candidate_presence)
     return [
         target
-        for target in configured
-        if _normalized_target_name(target.name) not in ambiguous_names
-        and (
-            candidate_presence is None
-            or candidate_presence.get(target.candidate_id, "current") != "stale"
-        )
+        for index, target in enumerate(config.targets)
+        if reasons[index] is None
     ]
 
 
@@ -199,6 +222,29 @@ class TestCenterDryRun:
         self.selectors = selectors
         self.artifact_dir = artifact_dir
 
+    def _wait_interruptibly(
+        self,
+        milliseconds: int,
+        *,
+        pause_requested: Callable[[], bool] | None,
+        stop_requested: Callable[[], bool] | None,
+        allow_pause: bool = True,
+    ) -> str | None:
+        remaining = max(0, milliseconds)
+        while remaining > 0:
+            if stop_requested is not None and stop_requested():
+                return "stop"
+            if allow_pause and pause_requested is not None and pause_requested():
+                return "pause"
+            wait_slice = min(50, remaining)
+            self.page.wait_for_timeout(wait_slice)
+            remaining -= wait_slice
+        if stop_requested is not None and stop_requested():
+            return "stop"
+        if allow_pause and pause_requested is not None and pause_requested():
+            return "pause"
+        return None
+
     def run_target(
         self,
         target: Target,
@@ -211,6 +257,7 @@ class TestCenterDryRun:
         on_stage: Callable[[str], None] | None = None,
         on_composer_write_started: Callable[[], None] | None = None,
         stop_requested: Callable[[], bool] | None = None,
+        pause_requested: Callable[[], bool] | None = None,
         resolve_test_text: Callable[[], str] | None = None,
     ) -> DryRunResult:
         if not test_text and resolve_test_text is None and not navigation_only:
@@ -238,17 +285,34 @@ class TestCenterDryRun:
             if on_stage is not None:
                 on_stage(value)
 
+        def interrupt_result(kind: str) -> DryRunResult:
+            result.result = "paused" if kind == "pause" else "stopped"
+            result.stage = result.result
+            result.message = "已安全暂停" if kind == "pause" else "用户停止"
+            return result
+
+        def navigation_interrupt() -> str | None:
+            if stop_requested is not None and stop_requested():
+                return "stop"
+            if pause_requested is not None and pause_requested():
+                return "pause"
+            return None
+
         started = time.monotonic()
         try:
             stage("opening_conversation")
             chat = DouyinChat(self.page, self.selectors, self.artifact_dir)
             self.page.set_default_timeout(settings.navigation_timeout_seconds * 1000)
-            identity = chat.open_conversation_identity(
-                target_id,
-                target.candidate_id,
-                target.name,
-                timeout_ms=settings.navigation_timeout_seconds * 1000,
-            )
+            try:
+                identity = chat.open_conversation_identity(
+                    target_id,
+                    target.candidate_id,
+                    target.name,
+                    timeout_ms=settings.navigation_timeout_seconds * 1000,
+                    interrupt_requested=navigation_interrupt,
+                )
+            except ChatNavigationInterrupted as exc:
+                return interrupt_result(exc.kind)
             result.visible_conversation_id = identity.visible_conversation_id
             result.visible_display_name = identity.visible_display_name
             stage("verifying_identity")
@@ -259,12 +323,22 @@ class TestCenterDryRun:
                 result.stage = "identity_mismatch"
                 result.message = "会话不匹配，测试已停止"
                 return result
+            if pause_requested is not None and pause_requested():
+                return interrupt_result("pause")
+            if stop_requested is not None and stop_requested():
+                return interrupt_result("stop")
             self.page.bring_to_front()
             if navigation_only:
                 result.result = "navigation_verified"
                 result.stage = "navigation_verified"
                 return result
-            self.page.wait_for_timeout(settings.page_ready_delay_ms)
+            interrupted = self._wait_interruptibly(
+                settings.page_ready_delay_ms,
+                pause_requested=pause_requested,
+                stop_requested=stop_requested,
+            )
+            if interrupted:
+                return interrupt_result(interrupted)
             editor = chat.composer_editor()
             stage("checking_existing_draft")
             composer = chat.composer_state(editor)
@@ -299,41 +373,78 @@ class TestCenterDryRun:
                 result.text_hash = hashlib.sha256(resolved_text.encode("utf-8")).hexdigest()
             result.composer_status = "empty"
             stage("typing")
-            if on_composer_write_started is not None:
-                on_composer_write_started()
-            result.counters["real_composer_writes"] = 1
-            editor.press_sequentially(resolved_text, delay=settings.typing_delay_ms)
+            inserted_prefix = ""
+
+            def clear_inserted_text(expected_text: str) -> bool:
+                stage("clearing")
+                typed = chat.composer_state(editor)
+                if (
+                    typed.visible_text != expected_text
+                    or typed.attachment_present
+                    or typed.mention_or_reply_present
+                ):
+                    result.result = "cleanup_failed"
+                    result.stage = "cleanup_failed"
+                    result.message = "输入内容发生变化，无法确认安全清除"
+                    result.composer_status = "changed"
+                    result.counters["cleanup_failures"] = 1
+                    return False
+                editor.press("Control+A")
+                editor.press("Backspace")
+                result.counters["real_composer_clears"] = 1
+                stage("verifying_empty")
+                self._wait_interruptibly(
+                    settings.clear_verify_delay_ms,
+                    pause_requested=pause_requested,
+                    stop_requested=None,
+                    allow_pause=False,
+                )
+                if not chat.composer_state(editor).composer_empty:
+                    result.result = "cleanup_failed"
+                    result.stage = "cleanup_failed"
+                    result.message = "输入框未清空，批量测试已停止"
+                    result.composer_status = "not_empty"
+                    result.counters["cleanup_failures"] = 1
+                    return False
+                result.composer_status = "empty"
+                return True
+
+            for character in resolved_text:
+                if pause_requested is not None and pause_requested():
+                    if inserted_prefix and not clear_inserted_text(inserted_prefix):
+                        return result
+                    return interrupt_result("pause")
+                if stop_requested is not None and stop_requested():
+                    if inserted_prefix and not clear_inserted_text(inserted_prefix):
+                        return result
+                    return interrupt_result("stop")
+                if not inserted_prefix:
+                    if on_composer_write_started is not None:
+                        on_composer_write_started()
+                    result.counters["real_composer_writes"] = 1
+                editor.press_sequentially(character, delay=settings.typing_delay_ms)
+                inserted_prefix += character
+                if pause_requested is not None and pause_requested():
+                    if not clear_inserted_text(inserted_prefix):
+                        return result
+                    return interrupt_result("pause")
+                if stop_requested is not None and stop_requested():
+                    if not clear_inserted_text(inserted_prefix):
+                        return result
+                    return interrupt_result("stop")
             result.composer_status = "test_text_present"
             stage("observing")
-            self.page.wait_for_timeout(settings.typed_text_hold_ms)
-            stage("clearing")
-            typed = chat.composer_state(editor)
-            if (
-                typed.visible_text != resolved_text
-                or typed.attachment_present
-                or typed.mention_or_reply_present
-            ):
-                result.result = "stopped"
-                result.stage = "stopped"
-                result.message = "输入内容发生变化，已停止测试"
-                result.composer_status = "changed"
-                result.counters["cleanup_failures"] = 1
+            interrupted = self._wait_interruptibly(
+                settings.typed_text_hold_ms,
+                pause_requested=pause_requested,
+                stop_requested=stop_requested,
+            )
+            if not clear_inserted_text(resolved_text):
                 return result
-            # The entire editor is selected only after proving it still contains
-            # exactly our own text.  Enter and send controls are never used.
-            editor.press("Control+A")
-            editor.press("Backspace")
-            result.counters["real_composer_clears"] = 1
-            stage("verifying_empty")
-            self.page.wait_for_timeout(settings.clear_verify_delay_ms)
-            if not chat.composer_state(editor).composer_empty:
-                result.result = "stopped"
-                result.stage = "stopped"
-                result.message = "输入框未清空，已停止测试"
-                result.composer_status = "not_empty"
-                result.counters["cleanup_failures"] = 1
-                return result
-            result.composer_status = "empty"
+            if interrupted:
+                return interrupt_result(interrupted)
+            if pause_requested is not None and pause_requested():
+                return interrupt_result("pause")
             result.result = "stopped" if stop_requested and stop_requested() else "completed"
             result.stage = result.result
             return result
@@ -376,6 +487,7 @@ class DryRunController:
         self._state: dict = {
             "running": False,
             "paused": False,
+            "pause_requested": False,
             "stage": "waiting",
             "selected_target_id": self._selection()[0],
             "expected_conversation_id": None,
@@ -402,6 +514,13 @@ class DryRunController:
             "results": [],
             "resolved_test_text": None,
             "counters": empty_counters(),
+            "browser_pid": None,
+            "context_identity": None,
+            "page_identity": None,
+            "page_count_before": 0,
+            "page_count_after": 0,
+            "unexpected_page_count": 0,
+            "unexpected_page_message": None,
         }
 
     @property
@@ -439,6 +558,7 @@ class DryRunController:
             self._state.update({
                 "running": False,
                 "paused": False,
+                "pause_requested": False,
                 "stage": "waiting",
                 "selected_target_id": target_id,
                 "expected_conversation_id": expected_conversation_id,
@@ -523,7 +643,7 @@ class DryRunController:
             self._stop_requested = False
             self._pause_requested = False
             self._state.update({
-                "running": True, "paused": False, "stage": "waiting", "selected_target_id": target_id,
+                "running": True, "paused": False, "pause_requested": False, "stage": "waiting", "selected_target_id": target_id,
                 "current_target_id": None, "visible_conversation_id": None, "visible_display_name": None,
                 "identity_match": None, "identity_match_reason": None, "composer_status": "unknown",
                 "result": None, "message": None, "run_id": bound_run_id,
@@ -533,6 +653,10 @@ class DryRunController:
                 "skipped_targets": 0, "failed_targets": 0,
                 "remaining_targets": len(targets), "results": [],
                 "resolved_test_text": None, "counters": empty_counters(),
+                "browser_pid": None, "context_identity": None,
+                "page_identity": None, "page_count_before": 0,
+                "page_count_after": 0, "unexpected_page_count": 0,
+                "unexpected_page_message": None,
             })
         self._thread = threading.Thread(
             target=self._run,
@@ -555,6 +679,8 @@ class DryRunController:
         with self._lock:
             if self._state["running"]:
                 self._pause_requested = True
+                self._state["pause_requested"] = True
+                self._state["stage"] = "pausing"
         return self.status()
 
     def resume(self) -> dict:
@@ -562,12 +688,14 @@ class DryRunController:
             self._pause_requested = False
             if self._state["running"]:
                 self._state["paused"] = False
+                self._state["pause_requested"] = False
         return self.status()
 
     def stop(self) -> dict:
         with self._lock:
             self._stop_requested = True
             self._pause_requested = False
+            self._state["pause_requested"] = False
         return self.status()
 
     def focus_browser(self) -> dict:
@@ -595,6 +723,10 @@ class DryRunController:
         with self._lock:
             return self._stop_requested
 
+    def _should_pause(self) -> bool:
+        with self._lock:
+            return self._pause_requested
+
     def _wait_until_resumed_or_stopped(self) -> bool:
         while True:
             with self._lock:
@@ -603,7 +735,8 @@ class DryRunController:
                 paused = self._pause_requested
                 self._state["paused"] = paused
                 if paused:
-                    self._state["stage"] = "waiting"
+                    self._state["pause_requested"] = True
+                    self._state["stage"] = "paused"
             if not paused:
                 return True
             time.sleep(0.1)
@@ -615,6 +748,29 @@ class DryRunController:
                 return False
             time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
         return not self._should_stop()
+
+    @contextmanager
+    def _acquire_browser_lock(self, path: Path, *, timeout_seconds: float):
+        deadline = time.monotonic() + timeout_seconds
+        lock = None
+        while lock is None:
+            pause_started = time.monotonic()
+            if not self._wait_until_resumed_or_stopped():
+                raise TaskAlreadyRunning("测试已停止")
+            deadline += time.monotonic() - pause_started
+            candidate = SingleInstanceLock(path)
+            try:
+                candidate.__enter__()
+            except TaskAlreadyRunning:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+                continue
+            lock = candidate
+        try:
+            yield lock
+        finally:
+            lock.__exit__(None, None, None)
 
     @staticmethod
     def _candidate_presence(config: AppConfig) -> dict[str, str]:
@@ -714,6 +870,26 @@ class DryRunController:
             })
         return safe_cleanup
 
+    def _accumulate_interrupted_attempt(self, result: DryRunResult) -> bool:
+        payload = result.payload()
+        safe_cleanup = not self.recovery_needed(payload)
+        if safe_cleanup:
+            self.store.clear_recovery()
+        with self._lock:
+            if (
+                self._state.get("run_id") != result.run_id
+                or self._state.get("request_revision") != result.request_revision
+            ):
+                return False
+            self._state["counters"] = {
+                key: int(self._state["counters"].get(key, 0))
+                + int(result.counters.get(key, 0))
+                for key in _COUNTER_NAMES
+            }
+            self._state["composer_status"] = result.composer_status
+            self._state["message"] = result.message
+        return safe_cleanup
+
     @staticmethod
     def can_advance(result: dict) -> bool:
         counters = result.get("counters") if isinstance(result, dict) else None
@@ -746,6 +922,49 @@ class DryRunController:
             or counters.get("cleanup_failures", 0) != 0
         )
 
+    @staticmethod
+    def _browser_process_id(page) -> int | None:
+        value = getattr(page, "browser_pid", None)
+        if isinstance(value, int):
+            return value
+        context = getattr(page, "context", None)
+        impl = getattr(context, "_impl_obj", None)
+        browser = getattr(impl, "_browser", None)
+        connection = getattr(browser or impl, "_connection", None)
+        transport = getattr(connection, "_transport", None)
+        process = getattr(transport, "_proc", None)
+        pid = getattr(process, "pid", None)
+        return int(pid) if isinstance(pid, int) else None
+
+    @staticmethod
+    def _page_count(page) -> int:
+        context = getattr(page, "context", None)
+        pages = getattr(context, "pages", None)
+        return len(pages) if pages is not None else 1
+
+    @staticmethod
+    def _close_confirmed_unexpected_pages(page) -> tuple[int, bool]:
+        context = getattr(page, "context", None)
+        pages = list(getattr(context, "pages", []) or [])
+        closed = 0
+        ambiguous = False
+        for candidate in pages:
+            if candidate is page:
+                continue
+            try:
+                opener = candidate.opener()
+            except Exception:
+                opener = None
+            if opener is not page:
+                ambiguous = True
+                continue
+            try:
+                candidate.close()
+                closed += 1
+            except Exception:
+                ambiguous = True
+        return closed, ambiguous
+
     def _run(
         self,
         targets: list[Target],
@@ -760,155 +979,246 @@ class DryRunController:
         try:
             config = load_config(self.config_path)
             settings = self.settings()
-            for index, target in enumerate(targets):
-                if not self._wait_until_resumed_or_stopped():
-                    break
-                target_id = target.stable_id or target.candidate_id
-                self._update_for_run(
-                    run_id,
-                    request_revision,
-                    selected_target_id=target_id,
-                    expected_conversation_id=target.candidate_id,
-                    selected_display_name=target.name,
-                    current_target_id=target_id,
-                    current_position=index + 1,
-                    stage="waiting",
-                    visible_conversation_id=None,
-                    visible_display_name=None,
-                    identity_match=None,
-                    identity_match_reason=None,
-                    composer_status="unknown",
-                    result=None,
-                    message=None,
-                    resolved_test_text=None,
-                    elapsed_seconds=int(time.monotonic() - started),
-                )
-                target_started = time.monotonic()
-                resolved_text = {"value": test_text}
-                started_at = datetime.now().isoformat(timespec="seconds")
-
-                def failed_result(code: str, message: str) -> DryRunResult:
-                    return DryRunResult(
-                        run_id=run_id,
-                        request_revision=request_revision,
-                        target_id=target_id,
-                        selected_target_id=target_id,
-                        expected_conversation_id=target.candidate_id,
-                        selected_display_name=target.name,
-                        stage="failed",
-                        result=code,
-                        message=message,
-                        completed_at=datetime.now().isoformat(timespec="seconds"),
-                        duration_seconds=round(time.monotonic() - target_started, 3),
+            with self._acquire_browser_lock(
+                config.lock_file,
+                timeout_seconds=settings.navigation_timeout_seconds,
+            ):
+                with open_chat(
+                    config.profile_dir,
+                    timeout_ms=settings.navigation_timeout_seconds * 1000,
+                    headless=False,
+                    home=self.config_path.parent,
+                ) as page:
+                    page.bring_to_front()
+                    self._focus_requested.clear()
+                    context = getattr(page, "context", None)
+                    self._update_for_run(
+                        run_id,
+                        request_revision,
+                        browser_pid=self._browser_process_id(page),
+                        context_identity=f"context-{id(context):x}",
+                        page_identity=f"page-{id(page):x}",
+                        page_count_before=self._page_count(page),
+                        page_count_after=self._page_count(page),
                     )
-
-                try:
-                    with SingleInstanceLock(config.lock_file):
-                        with open_chat(
-                            config.profile_dir,
-                            timeout_ms=settings.navigation_timeout_seconds * 1000,
-                            headless=False,
-                            home=self.config_path.parent,
-                        ) as page:
-                            page.bring_to_front()
-                            self._focus_requested.clear()
-                            runner = TestCenterDryRun(
-                                page,
-                                DOUYIN_SELECTORS,
-                                artifact_dir=config.artifact_dir,
+                    if self._page_count(page) != 1:
+                        closed_pages, ambiguous_pages = self._close_confirmed_unexpected_pages(page)
+                        self._update_for_run(
+                            run_id,
+                            request_revision,
+                            page_count_after=self._page_count(page),
+                            unexpected_page_count=closed_pages,
+                            unexpected_page_message=(
+                                "检测到无法确认的额外页面"
+                                if ambiguous_pages or self._page_count(page) != 1
+                                else "检测到并关闭了意外弹出页面"
+                            ),
+                        )
+                        if ambiguous_pages or self._page_count(page) != 1:
+                            self._update_for_run(
+                                run_id,
+                                request_revision,
+                                stage="failed",
+                                result="navigation_failed",
+                                message="检测到无法确认的额外页面，批量测试已停止",
                             )
+                            return
+                    runner = TestCenterDryRun(
+                        page,
+                        DOUYIN_SELECTORS,
+                        artifact_dir=config.artifact_dir,
+                    )
+                    for index, target in enumerate(targets):
+                        if not self._wait_until_resumed_or_stopped():
+                            break
+                        target_id = target.stable_id or target.candidate_id
+                        self._update_for_run(
+                            run_id,
+                            request_revision,
+                            selected_target_id=target_id,
+                            expected_conversation_id=target.candidate_id,
+                            selected_display_name=target.name,
+                            current_target_id=target_id,
+                            current_position=index + 1,
+                            stage="waiting",
+                            visible_conversation_id=None,
+                            visible_display_name=None,
+                            identity_match=None,
+                            identity_match_reason=None,
+                            composer_status="unknown",
+                            result=None,
+                            message=None,
+                            resolved_test_text=None,
+                            elapsed_seconds=int(time.monotonic() - started),
+                        )
+                        target_started = time.monotonic()
+                        resolved_text = {"value": test_text}
+                        started_at = datetime.now().isoformat(timespec="seconds")
 
-                            def record_stage(stage: str, current=target_id) -> None:
-                                if self._focus_requested.is_set():
-                                    page.bring_to_front()
-                                    self._focus_requested.clear()
-                                self._update_for_run(
-                                    run_id,
-                                    request_revision,
-                                    stage=stage,
-                                    current_target_id=current,
-                                    elapsed_seconds=int(time.monotonic() - started),
-                                )
-
-                            def resolve_current_text() -> str:
-                                value = (
-                                    preview_today_target_message(config, target, date.today()).text
-                                    if use_today_message
-                                    else test_text
-                                )
-                                resolved_text["value"] = value
-                                self._update_for_run(
-                                    run_id,
-                                    request_revision,
-                                    resolved_test_text=value,
-                                )
-                                return value
-
-                            def record_composer_write_started(current=target_id) -> None:
-                                value = resolved_text["value"]
-                                self.store.save_recovery({
-                                    "run_id": run_id,
-                                    "target_id": current,
-                                    "text_hash": hashlib.sha256(value.encode("utf-8")).hexdigest(),
-                                    "text_length": len(value),
-                                    "stage": "typing",
-                                    "started_at": started_at,
-                                })
-
-                            result = runner.run_target(
-                                target,
-                                None if use_today_message else test_text,
-                                settings,
+                        def failed_result(code: str, message: str) -> DryRunResult:
+                            return DryRunResult(
                                 run_id=run_id,
                                 request_revision=request_revision,
-                                navigation_only=navigation_only,
-                                on_stage=record_stage,
-                                on_composer_write_started=record_composer_write_started,
-                                stop_requested=self._should_stop,
-                                resolve_test_text=(
-                                    resolve_current_text
-                                    if use_today_message and not navigation_only
-                                    else None
-                                ),
+                                target_id=target_id,
+                                selected_target_id=target_id,
+                                expected_conversation_id=target.candidate_id,
+                                selected_display_name=target.name,
+                                stage="failed",
+                                result=code,
+                                message=message,
+                                completed_at=datetime.now().isoformat(timespec="seconds"),
+                                duration_seconds=round(time.monotonic() - target_started, 3),
                             )
-                except TaskAlreadyRunning:
-                    result = failed_result("browser_busy", "浏览器忙")
-                except AuthenticationError:
-                    result = failed_result("login_required", "需要登录")
-                except ChatPageLoadError:
-                    result = failed_result("navigation_failed", "无法打开聊天")
-                except Exception:
-                    result = failed_result("navigation_failed", "无法打开聊天")
 
-                safe_cleanup = self._finish_target(result)
-                if not safe_cleanup:
-                    break
-                if self._should_stop():
-                    self._update_for_run(
-                        run_id,
-                        request_revision,
-                        stage="stopped",
-                        result="stopped",
-                        message="用户停止",
-                    )
-                    break
-                if (
-                    automatic
-                    and index + 1 < len(targets)
-                    and not self._wait_switch_interval(
-                        settings.target_switch_interval_seconds
-                    )
-                ):
-                    break
-            else:
-                if automatic:
-                    self._update_for_run(
-                        run_id,
-                        request_revision,
-                        stage="completed",
-                        result="batch_completed",
-                        message="批量测试已完成",
-                    )
+                        def record_stage(stage: str, current=target_id) -> None:
+                            if self._focus_requested.is_set():
+                                page.bring_to_front()
+                                self._focus_requested.clear()
+                            self._update_for_run(
+                                run_id,
+                                request_revision,
+                                stage=stage,
+                                current_target_id=current,
+                                elapsed_seconds=int(time.monotonic() - started),
+                            )
+
+                        def resolve_current_text() -> str:
+                            value = (
+                                preview_today_target_message(config, target, date.today()).text
+                                if use_today_message
+                                else test_text
+                            )
+                            resolved_text["value"] = value
+                            self._update_for_run(
+                                run_id,
+                                request_revision,
+                                resolved_test_text=value,
+                            )
+                            return value
+
+                        def record_composer_write_started(current=target_id) -> None:
+                            value = resolved_text["value"]
+                            self.store.save_recovery({
+                                "run_id": run_id,
+                                "target_id": current,
+                                "text_hash": hashlib.sha256(value.encode("utf-8")).hexdigest(),
+                                "text_length": len(value),
+                                "stage": "typing",
+                                "started_at": started_at,
+                            })
+
+                        while True:
+                            try:
+                                result = runner.run_target(
+                                    target,
+                                    None if use_today_message else test_text,
+                                    settings,
+                                    run_id=run_id,
+                                    request_revision=request_revision,
+                                    navigation_only=navigation_only,
+                                    on_stage=record_stage,
+                                    on_composer_write_started=record_composer_write_started,
+                                    stop_requested=self._should_stop,
+                                    pause_requested=self._should_pause,
+                                    resolve_test_text=(
+                                        resolve_current_text
+                                        if use_today_message and not navigation_only
+                                        else None
+                                    ),
+                                )
+                            except AuthenticationError:
+                                result = failed_result("login_required", "需要登录")
+                            except ChatPageLoadError:
+                                result = failed_result("navigation_failed", "无法打开聊天")
+                            except Exception:
+                                result = failed_result("navigation_failed", "无法打开聊天")
+                            if result.result != "paused":
+                                break
+                            if not self._accumulate_interrupted_attempt(result):
+                                break
+                            if not self._wait_until_resumed_or_stopped():
+                                result = failed_result("stopped", "用户停止")
+                                result.stage = "stopped"
+                                break
+
+                        closed_pages, ambiguous_pages = self._close_confirmed_unexpected_pages(page)
+                        if closed_pages:
+                            with self._lock:
+                                total_unexpected = int(self._state["unexpected_page_count"]) + closed_pages
+                            self._update_for_run(
+                                run_id,
+                                request_revision,
+                                unexpected_page_count=total_unexpected,
+                                unexpected_page_message="检测到并关闭了意外弹出页面",
+                            )
+                        self._update_for_run(
+                            run_id,
+                            request_revision,
+                            page_count_after=self._page_count(page),
+                        )
+                        safe_cleanup = self._finish_target(result)
+                        if ambiguous_pages:
+                            self._update_for_run(
+                                run_id,
+                                request_revision,
+                                stage="failed",
+                                result="navigation_failed",
+                                message="检测到无法确认的额外页面，批量测试已停止",
+                                unexpected_page_message="检测到无法确认的额外页面",
+                            )
+                            break
+                        if not safe_cleanup:
+                            break
+                        if self._should_stop():
+                            self._update_for_run(
+                                run_id,
+                                request_revision,
+                                stage="stopped",
+                                result="stopped",
+                                message="用户停止",
+                            )
+                            break
+                        if (
+                            automatic
+                            and index + 1 < len(targets)
+                            and not self._wait_switch_interval(
+                                settings.target_switch_interval_seconds
+                            )
+                        ):
+                            break
+                    else:
+                        if automatic:
+                            self._update_for_run(
+                                run_id,
+                                request_revision,
+                                stage="completed",
+                                result="batch_completed",
+                                message="批量测试已完成",
+                            )
+        except TaskAlreadyRunning:
+            self._update_for_run(
+                run_id,
+                request_revision,
+                stage="failed",
+                result="browser_busy",
+                message="浏览器忙",
+            )
+        except AuthenticationError:
+            self._update_for_run(
+                run_id,
+                request_revision,
+                stage="failed",
+                result="login_required",
+                message="需要登录",
+            )
+        except ChatPageLoadError:
+            self._update_for_run(
+                run_id,
+                request_revision,
+                stage="failed",
+                result="navigation_failed",
+                message="无法打开聊天",
+            )
         except Exception:
             self._update_for_run(
                 run_id,
@@ -932,5 +1242,6 @@ class DryRunController:
                 request_revision,
                 running=False,
                 paused=False,
+                pause_requested=False,
                 elapsed_seconds=int(time.monotonic() - started),
             )

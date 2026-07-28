@@ -39,6 +39,12 @@ class ChatPageLoadError(FatalChatError):
     pass
 
 
+class ChatNavigationInterrupted(RuntimeError):
+    def __init__(self, kind: str):
+        super().__init__(kind)
+        self.kind = kind
+
+
 class PageChangedError(FatalChatError):
     pass
 
@@ -261,13 +267,20 @@ class DouyinChat:
         except Exception:
             return False
 
-    def _find_conversation(self, target: str, expected_conversation_id: str | None = None):
+    def _find_conversation(
+        self,
+        target: str,
+        expected_conversation_id: str | None = None,
+        interrupt_requested: Callable[[], str | None] | None = None,
+    ):
         conversations = self.page.locator(self.selectors.conversation)
         scrollable = self.page.locator(self.selectors.conversation_list)
         if scrollable.count():
             scrollable.first.evaluate("el => el.scrollTop = 0")
         deadline = time.monotonic() + self.friend_search_timeout_ms / 1000
         for _ in range(50):
+            if interrupt_requested is not None and (kind := interrupt_requested()):
+                raise ChatNavigationInterrupted(kind)
             if expected_conversation_id:
                 for index in range(conversations.count()):
                     item = conversations.nth(index)
@@ -321,6 +334,7 @@ class DouyinChat:
         selected_display_name: str,
         *,
         timeout_ms: int,
+        interrupt_requested: Callable[[], str | None] | None = None,
     ) -> ConversationIdentity:
         """Open and stably verify one conversation without touching the composer."""
         if not expected_conversation_id:
@@ -333,7 +347,11 @@ class DouyinChat:
                 False,
                 "missing_expected_conversation_id",
             )
-        item, count = self._find_conversation(selected_display_name, expected_conversation_id)
+        item, count = self._find_conversation(
+            selected_display_name,
+            expected_conversation_id,
+            interrupt_requested,
+        )
         if count != 1:
             visible_id, visible_name = self._visible_conversation()
             reason = "stable_id_mismatch" if visible_id else "conversation_not_found"
@@ -353,6 +371,8 @@ class DouyinChat:
         visible_id: str | None = None
         visible_name: str | None = None
         while time.monotonic() < deadline:
+            if interrupt_requested is not None and (kind := interrupt_requested()):
+                raise ChatNavigationInterrupted(kind)
             try:
                 visible_id, visible_name = self._visible_conversation()
             except Exception:

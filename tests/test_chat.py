@@ -6,6 +6,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from autody.chat import (
     ChatPageLoadError,
+    ChatNavigationInterrupted,
     ChatSelectors,
     DOUYIN_CONFIRMATION_SELECTORS,
     DOUYIN_SELECTORS,
@@ -100,6 +101,27 @@ def test_douyin_current_conversation_class_is_recognized_as_selected(page, fake_
     )
 
     assert fake_chat._row_is_selected(row) is True
+
+
+def test_identity_navigation_can_be_interrupted_before_composer_access(page, fake_chat):
+    checks = 0
+
+    def interrupt_requested():
+        nonlocal checks
+        checks += 1
+        return "pause"
+
+    with pytest.raises(ChatNavigationInterrupted) as interrupted:
+        fake_chat.open_conversation_identity(
+            "target-a",
+            "conversation-a",
+            "小明",
+            timeout_ms=1000,
+            interrupt_requested=interrupt_requested,
+        )
+
+    assert interrupted.value.kind == "pause"
+    assert checks == 1
 
 
 def test_send_rejects_optimistic_bubble_that_disappears(page, tmp_path):
