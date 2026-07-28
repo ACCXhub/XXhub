@@ -200,6 +200,134 @@ def test_official_module_status_and_generated_install_share_the_version_policy(t
     assert manifest["required_autody_version"] == OFFICIAL_TEST_CENTER_CORE_RANGE
 
 
+def test_official_install_upgrades_same_version_when_package_hash_differs_and_preserves_data(tmp_path: Path):
+    config = make_project(tmp_path)
+    client = TestClient(create_app(config))
+    installed = client.post("/api/modules/autody-test-center/install")
+    assert installed.status_code == 200
+    module_root = tmp_path / "data" / "modules" / MODULE_ID
+    runtime_path = module_root / "data" / "history" / "preserved.jsonl"
+    runtime_path.parent.mkdir(parents=True)
+    runtime_path.write_bytes(b'{"private":"runtime"}\n')
+    registry_path = tmp_path / "data" / "modules" / "registry.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry["modules"][MODULE_ID]["package_sha256"] = "0" * 64
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+    stale = client.get("/api/modules").json()["modules"][0]
+    upgraded = client.post("/api/modules/autody-test-center/install")
+    current = client.get("/api/modules").json()["modules"][0]
+
+    assert stale["version"] == stale["bundled_version"] == OFFICIAL_TEST_CENTER_VERSION
+    assert stale["update_available"] is True
+    assert upgraded.status_code == 200
+    assert current["update_available"] is False
+    assert current["package_sha256"] == current["bundled_package"]["sha256"]
+    assert runtime_path.read_bytes() == b'{"private":"runtime"}\n'
+
+
+def test_test_center_preview_selection_is_module_local_and_never_starts_a_send_action(tmp_path: Path):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets[0].stable_id = "target-one"
+    config.targets[1].stable_id = "target-two"
+    save_config(config_path, config)
+    calls: list[str] = []
+    client = TestClient(create_app(config_path, action_runner=lambda action: calls.append(action) or {"id": "job", "status": "running"}))
+    assert client.post("/api/modules/autody-test-center/install").status_code == 200
+
+    selected = client.post("/api/modules/autody-test-center/preview/select", json={"target_id": "target-one"})
+    changed = client.post("/api/modules/autody-test-center/preview/select", json={"target_id": "target-two"})
+
+    assert selected.status_code == 200
+    assert selected.json()["selected_target_id"] == "target-one"
+    assert selected.json()["real_composer_writes"] == 0
+    assert changed.json()["selected_target_id"] == "target-two"
+    assert changed.json()["navigation_status"] == "待人工查看"
+    assert calls == []
+    assert (tmp_path / "messages.txt").read_text(encoding="utf-8") == "早安\n晚安\n"
+
+
+def test_test_center_dry_run_settings_and_status_are_module_local_and_redacted(tmp_path: Path):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets[0].stable_id = "target-one"
+    config.targets[0].candidate_id = "candidate-conversation-one"
+    save_config(config_path, config)
+    client = TestClient(create_app(config_path))
+    assert client.post("/api/modules/autody-test-center/install").status_code == 200
+
+    initial = client.get("/api/modules/autody-test-center/dry-run/status")
+    invalid = client.put("/api/modules/autody-test-center/dry-run/settings", json={"typing_delay_ms": 301})
+    updated = client.put("/api/modules/autody-test-center/dry-run/settings", json={"typing_delay_ms": 120})
+    selected = client.post(
+        "/api/modules/autody-test-center/dry-run/select",
+        json={"target_id": "target-one", "request_revision": 1},
+    )
+    stale = client.post(
+        "/api/modules/autody-test-center/dry-run/select",
+        json={"target_id": "target-one", "request_revision": 1},
+    )
+
+    assert initial.status_code == 200
+    assert initial.json()["settings"]["page_ready_delay_ms"] == 1500
+    assert initial.json()["counters"]["send_attempts"] == 0
+    assert invalid.status_code == 422
+    assert updated.json()["typing_delay_ms"] == 120
+    assert selected.json()["selected_target_id"] == "target-one"
+    assert selected.json()["expected_conversation_id"] == "candidate-conversation-one"
+    assert selected.json()["visible_conversation_id"] is None
+    assert selected.json()["selected_display_name"] == config.targets[0].name
+    assert selected.json()["visible_display_name"] is None
+    assert selected.json()["identity_match"] is None
+    assert selected.json()["identity_match_reason"] is None
+    assert selected.json()["run_id"] is None
+    assert selected.json()["request_revision"] == 1
+    assert stale.status_code == 409
+    assert client.get("/api/modules/autody-test-center/dry-run/status").json()["selected_target_id"] == "target-one"
+    restarted = TestClient(create_app(config_path))
+    restarted_status = restarted.get("/api/modules/autody-test-center/dry-run/status").json()
+    assert restarted_status["selected_target_id"] == "target-one"
+    assert restarted_status["expected_conversation_id"] == "candidate-conversation-one"
+    assert restarted_status["selected_display_name"] == config.targets[0].name
+    assert restarted_status["request_revision"] == 1
+    files = list((tmp_path / "data" / "modules" / MODULE_ID / "data").rglob("*"))
+    assert all("模块测试文本" not in path.read_text(encoding="utf-8") for path in files if path.is_file())
+
+
+def test_test_center_today_message_preview_is_target_specific_and_read_only(tmp_path: Path):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets[0].stable_id = "target-one"
+    config.targets[0].candidate_id = "conversation-one"
+    config.targets[0].suffix_mode = "custom"
+    config.targets[0].suffix_override = "专属后缀"
+    save_config(config_path, config)
+    client = TestClient(create_app(config_path))
+    assert client.post("/api/modules/autody-test-center/install").status_code == 200
+    before = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    response = client.get(
+        "/api/modules/autody-test-center/dry-run/message-preview",
+        params={"target_id": "target-one"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["available"] is True
+    assert response.json()["mode"] == "today"
+    assert response.json()["text"].endswith(" —— 专属后缀")
+    after = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
 def test_target_settings_and_today_plan_are_test_center_routes(tmp_path: Path):
     config_path = make_project(tmp_path)
     config = load_config(config_path)

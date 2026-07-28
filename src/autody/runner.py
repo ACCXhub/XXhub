@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum
+import copy
 import hashlib
 import logging
 import random
@@ -39,6 +40,11 @@ class RunResult:
     run_id: str | None = None
     retry_count: int = 0
     confirmation_results: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TodayTargetMessage:
+    text: str
 
 
 def _history_path(config: AppConfig):
@@ -93,11 +99,20 @@ def _target_suffix(target: Target, config: AppConfig) -> MessageSuffixConfig:
     return config.message_suffix
 
 
+def _selection_rng(day: date, scope: str, target: Target | None = None) -> random.Random:
+    target_id = ""
+    if target is not None:
+        target_id = target.stable_id or target.candidate_id or stable_target_id(target.name)
+    seed = hashlib.sha256(f"{day.isoformat()}:{scope}:{target_id}".encode("utf-8")).digest()
+    return random.Random(int.from_bytes(seed, "big"))
+
+
 def _target_base_message(
     target: Target,
     config: AppConfig,
     daily: dict,
     messages: list[str],
+    day: date,
 ) -> str:
     if not target.message_pack:
         return daily["message"]
@@ -107,9 +122,56 @@ def _target_base_message(
     if cached:
         return cached
     pack_messages = MessagePackService(config.messages_file.parent, config.message_pack_index_url).preview(target.message_pack).messages
-    selected = random.SystemRandom().choice(pack_messages) if (target.message_selection or config.message_selection) == "per_friend" else pack_messages[0]
+    selected = _selection_rng(day, "message-pack", target).choice(pack_messages) if (target.message_selection or config.message_selection) == "per_friend" else pack_messages[0]
     daily["messages_by_target"][key] = selected
     return selected
+
+
+def _resolve_target_message(
+    target: Target,
+    config: AppConfig,
+    day: date,
+    daily: dict,
+    messages: list[str],
+) -> str:
+    if target.message_pack:
+        base = _target_base_message(target, config, daily, messages, day)
+    elif (target.message_selection or config.message_selection) == "per_friend":
+        target_id = target.stable_id or target.candidate_id or stable_target_id(target.name)
+        key = f"target:{target_id}"
+        per_target = daily.setdefault("messages_by_target", {})
+        base = per_target.get(key) or per_target.get(target.name)
+        if not base:
+            base = _selection_rng(day, "per-friend", target).choice(messages)
+            per_target[key] = base
+    else:
+        base = daily["message"]
+    return format_message_with_suffix(base, _target_suffix(target, config))
+
+
+def preview_today_target_message(
+    config: AppConfig,
+    target: Target,
+    today: date | None = None,
+) -> TodayTargetMessage:
+    """Resolve production-equivalent text without persisting or advancing state."""
+    day = today or date.today()
+    state = copy.deepcopy(StateStore(config.state_file).load())
+    daily = state.daily.setdefault(
+        day.isoformat(),
+        {
+            "message": "",
+            "succeeded": [],
+            "failures": {},
+            "confirmation_results": {},
+            "consumed": False,
+        },
+    )
+    messages = read_messages(config.messages_file)
+    if not daily.get("message"):
+        daily["message"] = MessageRotation(_selection_rng(day, "daily")).peek(messages, state.rotation)
+    daily.setdefault("messages_by_target", {})
+    return TodayTargetMessage(_resolve_target_message(target, config, day, daily, messages))
 
 
 def _record_history(
@@ -161,7 +223,7 @@ def run_daily(
         started = datetime.combine(today, datetime.strptime(config.daily_send_time, "%H:%M").time())
     key = today.isoformat()
     store = StateStore(config.state_file)
-    rotation = MessageRotation()
+    rotation = MessageRotation(_selection_rng(today, "daily"))
     state = store.load()
     daily = state.daily.setdefault(
         key,
@@ -247,22 +309,17 @@ def run_daily(
             time.sleep(remaining)
         if target.message_pack:
             try:
-                base = _target_base_message(target, config, daily, messages)
+                target_message = _resolve_target_message(target, config, today, daily, messages)
             except MessagePackError as exc:
                 daily["failures"][target_name] = "send_failed_before_action"
                 logger.warning("目标文案包不可用：%s：%s", target_name, exc)
                 store.save(state)
                 continue
-            target_message = format_message_with_suffix(base, _target_suffix(target, config))
         elif (target.message_selection or config.message_selection) == "per_friend":
-            base = daily["messages_by_target"].get(target_name)
-            if not base:
-                base = random.SystemRandom().choice(messages)
-                daily["messages_by_target"][target_name] = base
-                store.save(state)
-            target_message = format_message_with_suffix(base, _target_suffix(target, config))
+            target_message = _resolve_target_message(target, config, today, daily, messages)
+            store.save(state)
         else:
-            target_message = format_message_with_suffix(daily["message"], _target_suffix(target, config))
+            target_message = _resolve_target_message(target, config, today, daily, messages)
         target_id = target.stable_id or target.candidate_id or stable_target_id(target_name)
         try:
             delivery = _delivery_result(chat.send(target_name, target_message))

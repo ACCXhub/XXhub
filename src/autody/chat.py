@@ -2,10 +2,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+import hashlib
 import re
 import time
 from pathlib import Path
 from typing import Callable
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
@@ -13,6 +15,16 @@ from autody.runtime import configure_runtime
 
 
 CHAT_URL = "https://www.douyin.com/chat"
+CONVERSATION_ID_ATTRIBUTES = (
+    "data-conversation-id",
+    "data-im-conversation-id",
+    "data-id",
+    "data-key",
+)
+_VOLATILE_AVATAR_QUERY_KEYS = {
+    "auth_key", "expires", "signature", "timestamp", "ts", "x-expires",
+    "x-signature", "x-tos-signature", "x-bce-date", "x-bce-expire", "x-bce-signature",
+}
 
 
 class FatalChatError(RuntimeError):
@@ -63,6 +75,17 @@ class ConfirmationSelectors:
         return cls('[data-e2e="message-text"]')
 
 
+@dataclass(frozen=True)
+class ComposerState:
+    visible_text: str
+    normalized_text_length: int
+    visible_text_present: bool
+    attachment_present: bool
+    mention_or_reply_present: bool
+    composer_empty: bool
+    reason: str
+
+
 class DeliveryStatus(str, Enum):
     CONFIRMED = "confirmed"
     RETRY_CONFIRMED = "retry_confirmed"
@@ -82,6 +105,69 @@ class DeliveryResult:
     @property
     def successful(self) -> bool:
         return self.status in {DeliveryStatus.CONFIRMED, DeliveryStatus.RETRY_CONFIRMED}
+
+
+@dataclass(frozen=True)
+class ConversationIdentity:
+    expected_conversation_id: str | None
+    visible_conversation_id: str | None
+    selected_display_name: str
+    visible_display_name: str | None
+    identity_match: bool
+    identity_match_reason: str
+
+
+def opaque_conversation_identity(source: str, value: str) -> str:
+    digest = hashlib.sha256(f"{source}\0{value}".encode("utf-8")).hexdigest()
+    return f"{source}:{digest}"
+
+
+def normalized_avatar_source(source: str) -> str:
+    try:
+        parsed = urlsplit(source)
+        query = [
+            (key, value)
+            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+            if key.casefold() not in _VOLATILE_AVATAR_QUERY_KEYS
+        ]
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
+    except ValueError:
+        return source
+
+
+def conversation_row_identity(item) -> tuple[str | None, str | None]:
+    """Return the same opaque identity used by friend discovery."""
+    for attribute in CONVERSATION_ID_ATTRIBUTES:
+        try:
+            value = item.get_attribute(attribute)
+        except Exception:
+            value = None
+        if value:
+            return opaque_conversation_identity("row", str(value)), "row_attribute"
+    try:
+        source = item.locator("img").first.get_attribute("src")
+    except Exception:
+        source = None
+    if source:
+        return opaque_conversation_identity("avatar", normalized_avatar_source(str(source))), "avatar_source"
+    try:
+        markup = item.evaluate("el => el.outerHTML")
+    except Exception:
+        markup = None
+    if markup:
+        return opaque_conversation_identity("row", str(markup)), "row_fingerprint"
+    return None, None
+
+
+def conversation_candidate_id(identity_key: str | None) -> str | None:
+    if not identity_key:
+        return None
+    return f"candidate-{hashlib.sha256(identity_key.encode('utf-8')).hexdigest()[:32]}"
+
+
+def conversation_row_candidate_id(item) -> str | None:
+    identity_key, _ = conversation_row_identity(item)
+    return conversation_candidate_id(identity_key)
 
 
 # Centralized selectors based on the current douyin.com/chat page and the upstream
@@ -159,21 +245,43 @@ class DouyinChat:
                 return status, attempt
         return None, self.confirmation_retries + 1
 
-    def _find_conversation(self, target: str):
+    @staticmethod
+    def _row_is_selected(item) -> bool:
+        try:
+            return bool(item.evaluate(
+                """element => {
+                    const selected = ['aria-selected', 'aria-current', 'data-selected', 'data-active']
+                      .some(name => ['true', 'page'].includes(String(element.getAttribute(name)).toLowerCase()));
+                    const classes = String(element.className || '');
+                    return selected || classes.split(/\\s+/).some(
+                      name => /(?:active|selected|current|curConversation)$/i.test(name)
+                    );
+                }"""
+            ))
+        except Exception:
+            return False
+
+    def _find_conversation(self, target: str, expected_conversation_id: str | None = None):
         conversations = self.page.locator(self.selectors.conversation)
-        names = self.page.locator(
-            self.selectors.conversation_name,
-            has_text=re.compile(rf"^{re.escape(target)}$"),
-        )
-        matches = conversations.filter(has=names)
         scrollable = self.page.locator(self.selectors.conversation_list)
         if scrollable.count():
             scrollable.first.evaluate("el => el.scrollTop = 0")
         deadline = time.monotonic() + self.friend_search_timeout_ms / 1000
         for _ in range(50):
-            count = matches.count()
-            if count:
-                return matches, count
+            if expected_conversation_id:
+                for index in range(conversations.count()):
+                    item = conversations.nth(index)
+                    if conversation_row_candidate_id(item) == expected_conversation_id:
+                        return item, 1
+            else:
+                names = self.page.locator(
+                    self.selectors.conversation_name,
+                    has_text=re.compile(rf"^{re.escape(target)}$"),
+                )
+                matches = conversations.filter(has=names)
+                count = matches.count()
+                if count:
+                    return matches, count
             if not scrollable.count():
                 break
             position = scrollable.first.evaluate(
@@ -192,32 +300,216 @@ class DouyinChat:
                 position["step"],
             )
             self.page.wait_for_timeout(250)
+        if expected_conversation_id:
+            return conversations, 0
         return matches, matches.count()
+
+    def _visible_conversation(self) -> tuple[str | None, str | None]:
+        header = self.page.locator(self.selectors.header_name)
+        visible_name = header.first.inner_text().strip() if header.count() and header.first.is_visible() else None
+        conversations = self.page.locator(self.selectors.conversation)
+        for index in range(conversations.count()):
+            item = conversations.nth(index)
+            if self._row_is_selected(item):
+                return conversation_row_candidate_id(item), visible_name
+        return None, visible_name
+
+    def open_conversation_identity(
+        self,
+        selected_target_id: str,
+        expected_conversation_id: str | None,
+        selected_display_name: str,
+        *,
+        timeout_ms: int,
+    ) -> ConversationIdentity:
+        """Open and stably verify one conversation without touching the composer."""
+        if not expected_conversation_id:
+            visible_id, visible_name = self._visible_conversation()
+            return ConversationIdentity(
+                expected_conversation_id,
+                visible_id,
+                selected_display_name,
+                visible_name,
+                False,
+                "missing_expected_conversation_id",
+            )
+        item, count = self._find_conversation(selected_display_name, expected_conversation_id)
+        if count != 1:
+            visible_id, visible_name = self._visible_conversation()
+            reason = "stable_id_mismatch" if visible_id else "conversation_not_found"
+            return ConversationIdentity(
+                expected_conversation_id,
+                visible_id,
+                selected_display_name,
+                visible_name,
+                False,
+                reason,
+            )
+
+        item.click()
+        header = self.page.locator(self.selectors.header_name)
+        deadline = time.monotonic() + timeout_ms / 1000
+        stable_reads = 0
+        visible_id: str | None = None
+        visible_name: str | None = None
+        while time.monotonic() < deadline:
+            try:
+                visible_id, visible_name = self._visible_conversation()
+            except Exception:
+                visible_id, visible_name = None, None
+            if (
+                visible_id == expected_conversation_id
+                and visible_name is not None
+                and self._row_is_selected(item)
+                and header.count()
+                and header.first.is_visible()
+            ):
+                stable_reads += 1
+                if stable_reads >= 2:
+                    break
+            else:
+                stable_reads = 0
+            self.page.wait_for_timeout(100)
+
+        if stable_reads < 2:
+            return ConversationIdentity(
+                expected_conversation_id,
+                visible_id,
+                selected_display_name,
+                visible_name,
+                False,
+                "navigation_not_stable",
+            )
+        if visible_id != expected_conversation_id:
+            reason = "stable_id_mismatch"
+        elif visible_name != selected_display_name:
+            reason = "display_name_mismatch"
+        else:
+            reason = "stable_id_match"
+        return ConversationIdentity(
+            expected_conversation_id,
+            visible_id,
+            selected_display_name,
+            visible_name,
+            reason == "stable_id_match",
+            reason,
+        )
+
+    def open_conversation(self, target: str) -> str:
+        """Open one unambiguous chat and return the currently visible header.
+
+        This navigation primitive deliberately does not inspect, write, or send
+        any composer content.  It is shared by the normal sender and the
+        Test Center's separately guarded dry-run operation.
+        """
+        matches, count = self._find_conversation(target)
+        if count == 0:
+            raise RuntimeError(f"target not found: {target}")
+        if count > 1:
+            raise RuntimeError(f"ambiguous target: {target}")
+        matches.first.click()
+        header = self.page.locator(self.selectors.header_name)
+        header.first.wait_for(state="visible")
+        return header.first.inner_text().strip()
+
+    def open_verified_conversation(self, target: str) -> str:
+        """Wait for the opened conversation header to prove the target identity."""
+        self.open_conversation(target)
+        header = self.page.locator(self.selectors.header_name).filter(
+            has_text=re.compile(rf"^{re.escape(target)}$")
+        )
+        header.first.wait_for(state="visible")
+        return header.first.inner_text().strip()
+
+    def composer_editor(self):
+        """Return the editable child used by the already-open conversation."""
+        editor_container = self.page.locator(self.selectors.input)
+        editor_container.wait_for(state="visible")
+        editable_child = editor_container.locator("[contenteditable], textarea, input")
+        return editable_child.last if editable_child.count() else editor_container
+
+    def composer_state(self, editor=None) -> ComposerState:
+        """Read one authoritative, visibility-aware snapshot of the composer."""
+        editor = editor or self.composer_editor()
+        raw = editor.evaluate(
+            """element => {
+                const visible = node => {
+                    if (!(node instanceof Element)) return false;
+                    const style = getComputedStyle(node);
+                    return style.display !== 'none' && style.visibility !== 'hidden';
+                };
+                const matchesVisible = selectors => Array.from(
+                    element.matches(selectors) ? [element] : element.querySelectorAll(selectors)
+                ).some(visible);
+                const parentMatchesVisible = selectors => Array.from(
+                    element.parentElement?.querySelectorAll(selectors) || []
+                ).some(visible);
+                const attachmentSelectors = [
+                    'video', '[data-e2e="chat-attachment"]',
+                    '[class*="attachment" i]', '[class*="uploadPreview" i]',
+                    '[class*="filePreview" i]'
+                ].join(',');
+                const mentionSelectors = [
+                    '[data-e2e="mention-chip"]', '[data-e2e="reply-chip"]',
+                    '[class*="mention" i]', '[class*="reply" i][contenteditable="false"]'
+                ].join(',');
+                const emojiSelectors = [
+                    'img[data-e2e="emoji"]', 'img[class*="emoji" i]'
+                ].join(',');
+                const text = element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement
+                    ? element.value
+                    : (element.innerText || '');
+                const emojiText = Array.from(element.querySelectorAll(emojiSelectors))
+                    .filter(visible)
+                    .map(node => node.getAttribute('alt') || '')
+                    .join('');
+                const visibleText = `${text}${emojiText}`
+                    .replace(/[\\u200b-\\u200d\\u2060\\ufeff]/g, '');
+                const normalized = visibleText
+                    .replace(/\\u00a0/g, ' ')
+                    .replace(/\\s+/g, '');
+                const attachment = matchesVisible(attachmentSelectors)
+                    || parentMatchesVisible(attachmentSelectors);
+                const mentionOrReply = matchesVisible(mentionSelectors);
+                return {
+                    visibleText,
+                    normalizedTextLength: Array.from(normalized).length,
+                    attachment,
+                    mentionOrReply
+                };
+            }"""
+        )
+        visible_text_present = int(raw["normalizedTextLength"]) > 0
+        attachment_present = bool(raw["attachment"])
+        mention_or_reply_present = bool(raw["mentionOrReply"])
+        if attachment_present:
+            reason = "attachment"
+        elif mention_or_reply_present:
+            reason = "mention_or_reply"
+        elif visible_text_present:
+            reason = "visible_text"
+        else:
+            reason = "empty"
+        return ComposerState(
+            visible_text=str(raw["visibleText"]),
+            normalized_text_length=int(raw["normalizedTextLength"]),
+            visible_text_present=visible_text_present,
+            attachment_present=attachment_present,
+            mention_or_reply_present=mention_or_reply_present,
+            composer_empty=reason == "empty",
+            reason=reason,
+        )
 
     def send(self, target: str, message: str) -> DeliveryResult:
         try:
-            matches, count = self._find_conversation(target)
-            if count == 0:
-                raise RuntimeError(f"target not found: {target}")
-            if count > 1:
-                raise RuntimeError(f"ambiguous target: {target}")
-            matches.first.click()
-            header = self.page.locator(self.selectors.header_name).filter(
-                has_text=re.compile(rf"^{re.escape(target)}$")
-            )
-            header.first.wait_for(state="visible")
+            self.open_verified_conversation(target)
             if self._latest_matches(message):
                 return DeliveryResult(
                     DeliveryStatus.CONFIRMED,
                     send_attempts=0,
                     confirmation_attempts=1,
                 )
-            editor_container = self.page.locator(self.selectors.input)
-            editor_container.wait_for(state="visible")
-            editable_child = editor_container.locator(
-                "[contenteditable], textarea, input"
-            )
-            editor = editable_child.last if editable_child.count() else editor_container
+            editor = self.composer_editor()
             editor.fill(message)
             editor.press("Enter")
             status, attempts = self._confirm_delivery(message)

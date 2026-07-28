@@ -12,24 +12,22 @@ from pathlib import Path
 import re
 import time
 from typing import Callable
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import uuid
 
 from PIL import Image, UnidentifiedImageError
 
-from autody.chat import ChatSelectors
+from autody.chat import (
+    ChatSelectors,
+    conversation_candidate_id,
+    conversation_row_identity,
+    opaque_conversation_identity,
+)
 from autody.config import AppConfig, Target
 
 
 _SAFE_LOCAL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 DISCOVERY_CACHE_TTL = timedelta(hours=24)
 AVATAR_CACHE_TTL = timedelta(days=7)
-_ROW_ID_ATTRIBUTES = (
-    "data-conversation-id",
-    "data-im-conversation-id",
-    "data-id",
-    "data-key",
-)
 logger = logging.getLogger(__name__)
 
 
@@ -211,62 +209,15 @@ def _capture_temporary_avatar(
 
 
 def _opaque_identity(source: str, value: str) -> str:
-    digest = hashlib.sha256(f"{source}\0{value}".encode("utf-8")).hexdigest()
-    return f"{source}:{digest}"
-
-
-_VOLATILE_AVATAR_QUERY_KEYS = {
-    "auth_key", "expires", "signature", "timestamp", "ts", "x-expires",
-    "x-signature", "x-tos-signature", "x-bce-date", "x-bce-expire", "x-bce-signature",
-}
-
-
-def _normalized_avatar_source(source: str) -> str:
-    """Remove only well-known expiring CDN query fields before fingerprinting."""
-    try:
-        parsed = urlsplit(source)
-        query = [
-            (key, value)
-            for key, value in parse_qsl(parsed.query, keep_blank_values=True)
-            if key.casefold() not in _VOLATILE_AVATAR_QUERY_KEYS
-        ]
-        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
-    except ValueError:
-        return source
+    return opaque_conversation_identity(source, value)
 
 
 def _row_identity_hint(item) -> tuple[str | None, str | None]:
-    """Return an opaque row identity without persisting Douyin DOM data or URLs."""
-    for attribute in _ROW_ID_ATTRIBUTES:
-        try:
-            value = item.get_attribute(attribute)
-        except Exception:
-            value = None
-        if value:
-            return _opaque_identity("row", str(value)), "row_attribute"
-    # Douyin's visible chat rows currently do not expose a per-conversation DOM
-    # id.  The row's avatar source is, however, tied to that same rendered row
-    # and is less volatile than the complete DOM markup (unread markers and
-    # timestamps change the markup during a scan).  Persist only its digest.
-    try:
-        source = item.locator("img").first.get_attribute("src")
-    except Exception:
-        source = None
-    if source:
-        return _opaque_identity("avatar", _normalized_avatar_source(str(source))), "avatar_source"
-    try:
-        markup = item.evaluate("el => el.outerHTML")
-    except Exception:
-        markup = None
-    if markup:
-        return _opaque_identity("row", str(markup)), "row_fingerprint"
-    return None, None
+    return conversation_row_identity(item)
 
 
 def _candidate_id(identity_key: str | None) -> str:
-    if identity_key:
-        return f"candidate-{hashlib.sha256(identity_key.encode('utf-8')).hexdigest()[:32]}"
-    return _new_local_id("candidate")
+    return conversation_candidate_id(identity_key) or _new_local_id("candidate")
 
 
 def _scan_items(

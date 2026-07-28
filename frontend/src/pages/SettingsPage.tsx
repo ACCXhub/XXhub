@@ -27,12 +27,13 @@ export function SettingsPage({ notify, onOpenTestCenter = () => undefined, onTes
     try { setConfig(await api.saveConfig(config)); notify("运行设置已保存"); }
     catch (error) { notify(error instanceof Error ? error.message : "设置保存失败"); }
   };
-  const installTestCenter = async (file?: File) => {
+  const openTestCenter = async () => {
+    if (testCenter?.installed && !testCenter.update_available) return onOpenTestCenter();
     try {
-      const result = await api.installTestCenter(file);
+      const result = await api.installTestCenter();
       setTestCenter(result);
       onTestCenterStateChange(true);
-      notify("测试中心已安装，可从设置中打开。");
+      onOpenTestCenter();
     } catch (error) { notify(error instanceof Error ? error.message : "测试中心安装失败"); }
   };
   const uninstallTestCenter = async () => {
@@ -66,9 +67,9 @@ export function SettingsPage({ notify, onOpenTestCenter = () => undefined, onTes
         <label className="preview-setting"><span>发送预览<small>状态文件仍只记录“你好”基础文案</small></span><code>{suffixPreview(config)}</code></label>
         <label><span>GitHub 文案索引 URL<small>留空时使用内置文案包</small></span><input aria-label="GitHub 文案索引 URL" placeholder="https://raw.githubusercontent.com/.../index.json" value={config.message_pack_index_url || ""} onChange={(event) => setConfig({ ...config, message_pack_index_url: event.target.value || null })} /></label>
       </div>
-      <section className="panel">
-        <div className="panel-heading"><div><h2>可选模块</h2><small>官方模块默认不安装；卸载会永久删除模块自己的测试历史和设置。</small></div></div>
-        {testCenter ? <article className="module-card"><div className="module-card-main"><div className="module-title"><strong>{testCenter.display_name}</strong><span className={`tag ${testCenter.compatible ? "success" : "failed"}`}>{testCenter.compatible ? "兼容当前 AutoDy" : "需要更新"}</span></div><p>用于只读预检、任务诊断和安全测试；默认不会安装，也不会参与正常发送。</p><dl className="module-facts"><div><dt>AutoDy 核心</dt><dd>{testCenter.core_version || "—"}</dd></div><div><dt>官方模块版本</dt><dd>{testCenter.bundled_version || "—"}</dd></div><div><dt>当前状态</dt><dd>{testCenter.installed ? `已安装 ${testCenter.version || "未知版本"}` : "当前未安装"}</dd></div><div><dt>核心兼容范围</dt><dd>{testCenter.required_autody_version || "≥ 1.3.0，< 2.0.0"}</dd></div></dl><p className="module-notice">模块版本独立于 AutoDy 核心版本，以兼容范围为准。</p>{testCenter.update_available ? <p className="module-notice">发现官方更新，可重新安装以更新到 {testCenter.bundled_version}。</p> : null}{!testCenter.compatible ? <p className="module-error">{testCenter.compatibility_reason || "模块与当前核心版本不兼容，请安装官方兼容包。"}</p> : null}{testCenter.load_error ? <p className="module-error">加载失败：{testCenter.load_error}。可重新安装官方模块包；若问题仍在，请导出脱敏诊断信息。</p> : null}</div><div className="module-actions">{testCenter.installed ? <><button className="action-button" disabled={!testCenter.compatible} onClick={onOpenTestCenter}>打开测试中心</button><label className="action-button">重新安装<input aria-label="选择测试中心模块包" type="file" accept=".zip,.autody-module.zip" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void installTestCenter(file); event.currentTarget.value = ""; }} /></label><button className="action-button danger" onClick={() => void uninstallTestCenter()}>卸载模块</button></> : <><button className="action-button primary" disabled={!testCenter.compatible} onClick={() => void installTestCenter()}>获取与安装</button><label className="action-button">选择官方 ZIP<input aria-label="选择测试中心模块包" type="file" accept=".zip,.autody-module.zip" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void installTestCenter(file); event.currentTarget.value = ""; }} /></label></>}</div></article> : <div className="empty-state compact">正在读取可选模块状态…</div>}
+      <section className="module-entry">
+        <h2>可选模块</h2>
+        {testCenter ? <div className="module-entry-line"><small>测试中心 · 核心 {testCenter.core_version || "—"} / 模块 {testCenter.bundled_version || "—"} · {testCenter.compatible ? "兼容" : "需更新"}</small><span className="module-entry-actions"><button className="module-link" disabled={!testCenter.compatible} onClick={() => void openTestCenter()}>{testCenter.update_available ? "更新" : "测试"}</button>{testCenter.installed && <button className="module-link danger-link" onClick={() => void uninstallTestCenter()}>卸载</button>}</span>{testCenter.load_error && <small className="module-entry-error">{testCenter.load_error}</small>}</div> : <small>正在读取模块状态…</small>}
       </section>
     </section>
   );

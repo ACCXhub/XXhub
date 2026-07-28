@@ -204,6 +204,9 @@ export interface OptionalModuleStatus {
   required_autody_version?: string | null;
   compatibility_reason?: string | null;
   update_available?: boolean;
+  module_api_version?: string | null;
+  package_sha256?: string | null;
+  package_checksum?: string | null;
   load_error?: string | null;
 }
 

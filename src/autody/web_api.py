@@ -45,8 +45,14 @@ from autody.modules import (
 from autody.messages import read_messages
 from autody.preflight import PreflightStore
 from autody.recovery import recovery_due
+from autody.runner import preview_today_target_message
 from autody.state import StateStore
 from autody.scheduler import ScheduleSettings, SchedulerService
+from autody.test_center_dry_run import (
+    DryRunController,
+    DryRunSettings,
+    eligible_batch_targets,
+)
 from autody.transfer import (
     DEFAULT_CATEGORIES,
     ExportCategory,
@@ -116,6 +122,22 @@ class ConfigUpdate(BaseModel):
 
 class MessagesUpdate(BaseModel):
     messages: list[str]
+
+
+class DryRunStartRequest(BaseModel):
+    target_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1, max_length=80)
+    request_revision: int = Field(ge=1)
+    test_text: str = Field(default="", max_length=1000)
+    use_today_message: bool = True
+    automatic: bool = False
+    navigation_only: bool = False
+    batch_target_ids: list[str] | None = Field(default=None, max_length=50)
+
+
+class DryRunSelectRequest(BaseModel):
+    target_id: str = Field(min_length=1)
+    request_revision: int = Field(ge=1)
 
 
 class MessagePackImportRequest(BaseModel):
@@ -520,6 +542,7 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
     initial_config = load_config(config_path)
     manager.module_data_root = initial_config.state_file.parent / "modules" / MODULE_ID / "data"
     module_manager = ModuleManager(initial_config.state_file.parent, core_version=_application_version())
+    dry_run_controller = DryRunController(config_path, module_manager.module_root / "data")
     try:
         bundled_module = ensure_official_module_archive(root)
         bundled_module_error = None
@@ -566,6 +589,84 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps({"title": title, "created_at": datetime.now().isoformat(timespec="seconds")}, ensure_ascii=False) + "\n")
+
+    def preview_state() -> dict:
+        config = load_config(config_path)
+        path = module_data_path("preview/state.json")
+        try:
+            stored = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            stored = {}
+        targets = [
+            {"target_id": target.stable_id or target.candidate_id, "display_name": target.name}
+            for target in config.targets if target.enabled and (target.stable_id or target.candidate_id)
+        ]
+        selected = str(stored.get("selected_target_id", "")) or None
+        if selected not in {item["target_id"] for item in targets}:
+            selected = None
+        return {
+            "targets": targets,
+            "selected_target_id": selected,
+            "navigation_status": "待人工查看" if selected else "未选择目标",
+            "page_open": False,
+            "conversation_matches": False,
+            "manual_ready": False,
+            "last_refreshed_at": stored.get("updated_at"),
+            "real_composer_writes": 0,
+        }
+
+    def dry_run_targets() -> list[dict]:
+        config = load_config(config_path)
+        discovered = load_discovered_friends(
+            config.state_file.parent / "discovered_friends.json"
+        )
+        presence = {
+            candidate.candidate_id: candidate.presence_status
+            for candidate in discovered.candidates
+        } if discovered else {}
+        eligible_ids = {
+            target.stable_id
+            for target in eligible_batch_targets(config, presence)
+        }
+        return [
+            {
+                "target_id": target.stable_id,
+                "conversation_id": target.candidate_id,
+                "display_name": target.name,
+                "batch_eligible": target.stable_id in eligible_ids,
+            }
+            for target in config.targets if target.enabled and target.stable_id
+        ]
+
+    def dry_run_target(target_id: str):
+        config = load_config(config_path)
+        return next(
+            (
+                target for target in config.targets
+                if target.enabled and target.stable_id == target_id
+            ),
+            None,
+        )
+
+    def dry_run_payload() -> dict:
+        payload = dry_run_controller.status()
+        targets = dry_run_targets()
+        selected = next(
+            (item for item in targets if item["target_id"] == payload.get("selected_target_id")),
+            None,
+        )
+        if selected is None:
+            payload["selected_target_id"] = None
+            payload["expected_conversation_id"] = None
+            payload["selected_display_name"] = None
+        else:
+            payload["expected_conversation_id"] = selected["conversation_id"]
+            payload["selected_display_name"] = selected["display_name"]
+        payload["targets"] = targets
+        payload["eligible_target_count"] = sum(
+            bool(item["batch_eligible"]) for item in targets
+        )
+        return payload
 
     def preflight_payload(config: AppConfig, result: dict | None) -> dict:
         if not result:
@@ -832,13 +933,24 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
         status["bundled_available"] = bundled_module is not None
         status["bundled_version"] = bundled_version
         status["core_version"] = module_manager.core_version
-        status["update_available"] = bool(status["installed"] and status.get("version") != bundled_version)
+        status["update_available"] = bool(
+            status["installed"]
+            and bundled_module is not None
+            and (
+                status.get("version") != bundled_version
+                or status.get("module_api_version") != bundled_module["module_api_version"]
+                or status.get("package_sha256") != bundled_module["sha256"]
+                or status.get("package_checksum") != bundled_module["package_checksum"]
+            )
+        )
         status["bundled_package"] = bundled_module
         status["load_error"] = bundled_module_error or status["load_error"]
         return {"modules": [status]}
 
     @app.post("/api/modules/autody-test-center/install")
     async def install_test_center(file: UploadFile | None = File(default=None)):
+        if dry_run_controller.status()["running"]:
+            raise HTTPException(409, "测试中心正在运行；停止并完成安全清理后才能更新。")
         temporary: Path | None = None
         try:
             if file is None:
@@ -861,6 +973,9 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
     def uninstall_test_center(payload: dict):
         if payload.get("confirmed") is not True:
             raise HTTPException(422, "卸载测试中心后，所有测试历史、测试设置和测试目标覆盖将被永久删除。AutoDy 的正常好友、文案、发送记录和浏览器数据不会受到影响。")
+        if dry_run_controller.status()["running"]:
+            dry_run_controller.stop()
+            raise HTTPException(409, "测试中心正在安全清理输入框；完成后才能卸载。")
         cancel_path = module_manager.module_root / "data" / "preflight" / "cancel.json"
         if cancel_path.parent.is_dir():
             cancel_path.write_text(json.dumps({"requested_at": datetime.now().isoformat()}), encoding="utf-8")
@@ -908,6 +1023,127 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
                 if isinstance(item, dict) and isinstance(item.get("title"), str):
                     items.append({"title": item["title"], "created_at": str(item.get("created_at", ""))})
         return {"items": list(reversed(items))}
+
+    @app.get("/api/modules/autody-test-center/preview")
+    def test_center_preview():
+        _require_test_center()
+        return preview_state()
+
+    @app.post("/api/modules/autody-test-center/preview/select")
+    def test_center_select_preview(payload: dict):
+        _require_test_center()
+        target_id = str(payload.get("target_id", ""))
+        current = preview_state()
+        if target_id not in {item["target_id"] for item in current["targets"]}:
+            raise HTTPException(422, "预览目标无效或已停用")
+        path = module_data_path("preview/state.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"selected_target_id": target_id, "updated_at": datetime.now().isoformat(timespec="seconds")}, ensure_ascii=False), encoding="utf-8")
+        append_module_history("已切换预览目标（未操作真实聊天输入框）")
+        return preview_state()
+
+    @app.get("/api/modules/autody-test-center/dry-run/status")
+    def test_center_dry_run_status():
+        _require_test_center()
+        return dry_run_payload()
+
+    @app.get("/api/modules/autody-test-center/dry-run/message-preview")
+    def test_center_dry_run_message_preview(target_id: str):
+        _require_test_center()
+        config = load_config(config_path)
+        target = next(
+            (
+                item
+                for item in config.targets
+                if item.enabled and _target_id(item) == target_id
+            ),
+            None,
+        )
+        if target is None:
+            raise HTTPException(422, "测试目标无效或已停用")
+        try:
+            preview = preview_today_target_message(config, target, date.today())
+        except (OSError, ValueError, MessagePackError) as exc:
+            raise HTTPException(422, f"今日文案不可用：{exc}") from exc
+        return {"available": True, "text": preview.text, "mode": "today"}
+
+    @app.put("/api/modules/autody-test-center/dry-run/settings")
+    def test_center_dry_run_settings(settings: DryRunSettings):
+        _require_test_center()
+        return dry_run_controller.save_settings(settings).model_dump()
+
+    @app.post("/api/modules/autody-test-center/dry-run/select")
+    def test_center_dry_run_select(payload: DryRunSelectRequest):
+        _require_test_center()
+        target = dry_run_target(payload.target_id)
+        if target is None:
+            raise HTTPException(422, "测试目标无效或已停用")
+        try:
+            accepted = dry_run_controller.select(
+                payload.target_id,
+                request_revision=payload.request_revision,
+                expected_conversation_id=target.candidate_id,
+                selected_display_name=target.name,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if not accepted:
+            raise HTTPException(409, "请求版本已过期")
+        return dry_run_payload()
+
+    @app.post("/api/modules/autody-test-center/dry-run/start", status_code=202)
+    def test_center_dry_run_start(payload: DryRunStartRequest):
+        _require_test_center()
+        if dry_run_controller.store.recovery_warning():
+            raise HTTPException(409, "检测到未完成的测试输入，请先人工检查聊天输入框。")
+        target = dry_run_target(payload.target_id)
+        if target is None:
+            raise HTTPException(422, "测试目标无效或已停用")
+        if not target.candidate_id:
+            raise HTTPException(422, "测试目标缺少稳定会话身份")
+        try:
+            return dry_run_controller.start(
+                payload.target_id,
+                payload.test_text,
+                automatic=payload.automatic,
+                run_id=payload.run_id,
+                request_revision=payload.request_revision,
+                navigation_only=payload.navigation_only,
+                use_today_message=payload.use_today_message,
+                batch_target_ids=payload.batch_target_ids,
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/modules/autody-test-center/dry-run/pause")
+    def test_center_dry_run_pause():
+        _require_test_center()
+        return dry_run_controller.pause()
+
+    @app.post("/api/modules/autody-test-center/dry-run/resume")
+    def test_center_dry_run_resume():
+        _require_test_center()
+        return dry_run_controller.resume()
+
+    @app.post("/api/modules/autody-test-center/dry-run/stop")
+    def test_center_dry_run_stop():
+        _require_test_center()
+        return dry_run_controller.stop()
+
+    @app.post("/api/modules/autody-test-center/dry-run/focus-browser")
+    def test_center_dry_run_focus_browser():
+        _require_test_center()
+        try:
+            return dry_run_controller.focus_browser()
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/modules/autody-test-center/dry-run/history")
+    def test_center_dry_run_history():
+        _require_test_center()
+        return {"items": dry_run_controller.history()}
 
     @app.post("/api/modules/autody-test-center/fixtures")
     def test_center_fixtures():

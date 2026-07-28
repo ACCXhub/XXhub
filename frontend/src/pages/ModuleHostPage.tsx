@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 const MODULE_ID = "autody-test-center";
-const MIN_HOST_HEIGHT = 760;
+const MIN_HOST_HEIGHT = 560;
 const MAX_HOST_HEIGHT = 4000;
 
 export function isValidModuleHeightMessage(event: MessageEvent, expectedSource: MessageEventSource | null): number | null {
@@ -32,14 +32,7 @@ export function ModuleHostPage({ onRemoved }: { onRemoved: () => void }) {
   }, [onRemoved]);
 
   return (
-    <section className="editor-page module-host-page">
-      <header className="page-header module-host-header">
-        <div>
-          <p className="page-breadcrumb">设置 / 可选模块 / 测试中心</p>
-          <h1>测试中心</h1>
-          <p>用于只读预检、任务诊断和安全测试。模块可随时移除，不影响 AutoDy 的正常功能。</p>
-        </div>
-      </header>
+    <section className="editor-page">
       <iframe
         ref={iframeRef}
         title="测试中心"

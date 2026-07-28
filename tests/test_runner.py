@@ -5,6 +5,7 @@ from pathlib import Path
 
 from autody.config import AppConfig, Target
 from autody.chat import DeliveryResult, DeliveryStatus, FatalChatError
+from autody import runner as runner_module
 from autody.runner import RunStatus, record_safe_pre_send_failure, run_daily
 from autody.retry_state import TaskOutcome, TaskOutcomeStore
 
@@ -183,6 +184,57 @@ def test_target_overrides_apply_pack_and_explicit_suffix_without_changing_global
     assert chat.sent[0] == ("小明", "专属问候 —— 专属后缀")
     assert chat.sent[1][1] in {"早安", "晚安"}
     assert config.message_suffix.text == "gpt小助手"
+
+
+def test_today_message_preview_matches_production_resolution_without_mutating_state_or_history(tmp_path: Path):
+    config = make_config(tmp_path)
+    config.targets = [Target(name="小明", stable_id="target-one", message_selection="per_friend")]
+    before_messages = config.messages_file.read_bytes()
+
+    preview = runner_module.preview_today_target_message(
+        config,
+        config.targets[0],
+        date(2026, 7, 28),
+    )
+
+    assert preview.text.endswith(" —— gpt小助手")
+    assert not config.state_file.exists()
+    assert not (tmp_path / "history").exists()
+    assert config.messages_file.read_bytes() == before_messages
+
+    chat = FakeChat()
+    run_daily(config, chat, date(2026, 7, 28))
+    assert chat.sent == [("小明", preview.text)]
+
+
+def test_today_message_preview_uses_target_pack_and_custom_suffix_without_persisting_plaintext(tmp_path: Path):
+    config = make_config(tmp_path)
+    pack_dir = tmp_path / "message-packs"
+    pack_dir.mkdir()
+    (pack_dir / "special.txt").write_text("专属问候\n", encoding="utf-8")
+    (pack_dir / "index.json").write_text(
+        '{"packs":[{"id":"special","name":"测试包","description":"","version":"1","file":"special.txt","relative_url":"special.txt","raw_url":null,"count":1,"category":"test"}]}',
+        encoding="utf-8",
+    )
+    config.targets = [
+        Target(
+            name="小明",
+            stable_id="target-one",
+            message_pack="special",
+            suffix_mode="custom",
+            suffix_override="专属后缀",
+        )
+    ]
+
+    preview = runner_module.preview_today_target_message(
+        config,
+        config.targets[0],
+        date(2026, 7, 28),
+    )
+
+    assert preview.text == "专属问候 —— 专属后缀"
+    assert not config.state_file.exists()
+    assert not (tmp_path / "history").exists()
 
 
 def test_confirmation_failure_is_not_recorded_as_success_and_retry_does_not_duplicate(tmp_path: Path):

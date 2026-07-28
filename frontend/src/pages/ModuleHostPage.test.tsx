@@ -27,10 +27,13 @@ test("accepts only bounded resize messages from the Test Center iframe", () => {
   } as unknown as MessageEvent, source)).toBeNull();
 });
 
-test("renders Test Center as a full Settings child page", () => {
+test("renders Test Center without a duplicated host header or nested scroll shell", () => {
   render(<ModuleHostPage onRemoved={() => undefined} />);
 
-  expect(screen.getByText("设置 / 可选模块 / 测试中心")).toBeInTheDocument();
-  expect(screen.getByRole("heading", { name: "测试中心" })).toBeInTheDocument();
+  expect(screen.queryByText("设置 / 可选模块 / 测试中心")).not.toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "测试中心" })).not.toBeInTheDocument();
+  expect(screen.getByTitle("测试中心").parentElement).toHaveClass("editor-page");
+  expect(screen.getByTitle("测试中心").parentElement).not.toHaveClass("module-host-page");
   expect(screen.getByTitle("测试中心")).toHaveClass("module-host");
+  expect(screen.getByTitle("测试中心")).not.toHaveStyle({ overflow: "auto" });
 });

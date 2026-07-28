@@ -90,6 +90,18 @@ def test_editor_container_uses_contenteditable_descendant(page, tmp_path):
     assert chat.send("小明", "早安").successful
 
 
+def test_douyin_current_conversation_class_is_recognized_as_selected(page, fake_chat):
+    row = page.locator('[data-e2e="conversation-item"]')
+    row.evaluate(
+        """element => {
+            element.removeAttribute('aria-selected');
+            element.className = 'conversationConversationItemwrapper conversationConversationItemcurConversation';
+        }"""
+    )
+
+    assert fake_chat._row_is_selected(row) is True
+
+
 def test_send_rejects_optimistic_bubble_that_disappears(page, tmp_path):
     page.goto((Path("tests/fixtures/chat.html").resolve()).as_uri())
     page.locator('[data-e2e="chat-input"]').evaluate(
