@@ -1,240 +1,82 @@
-# AutoDy 项目精简交接
+# AutoDy 项目交接
 
-> 用途：让新的 Codex/ChatGPT 会话快速接手当前项目。
-> 基线：2026-07-28，仓库 `Siqihub/hlhub` 的 `main`。
-> 只记录当前状态与下一步，不替代 README、CHANGELOG、源码或 Git 历史。
-## 1. 项目与版本
+更新时间：2026-07-28
+工作目录：`C:\Users\Administrator\Documents\autody`
 
-AutoDy 是 Windows 本地续火管理台，负责目标、好友发现、文案、定时任务、发送记录、日志、环境诊断、备份迁移和可选测试中心。
+## 当前基线
 
-```text
-本地仓库：C:\Users\Administrator\Documents\autody
-GitHub：Siqihub/hlhub
-管理台：http://127.0.0.1:8765
-当前工作区：AutoDy 1.4.0、Test Center 1.2.0（均未发布）
-已发布基线：AutoDy 1.3.0、Test Center 1.1.0
-稳定标签：v1.3.0
-```
+- 当前核心代码版本：AutoDy `1.4.0`。
+- 当前官方 Test Center：`1.2.0`，模块 API `1`，核心兼容范围 `>=1.3.0,<2.0.0`。
+- 已发布基线：`v1.3.0`；不得移动、删除或强制更新该标签。
+- `v1.4.0` 尚未打标签、未发布。
+- 远程：`origin` → `git@github.com:Siqihub/hlhub.git`。
 
-版本由 `pyproject.toml`、`frontend/package.json`、模块 manifest、README 和 CHANGELOG 共同约束。
+## 已实现能力
 
-最近关键提交：
+### 安全执行与重试
 
-- `2d2a0a3`：重新生成脱敏截图；
-- `9914286`：Release 构建不依赖本地 `.venv`；
-- `7a8b258`：准备 1.3.0；
-- `41fca2d`：完成 Test Center 自移除；
-- `6942faa`：准备 1.1.2；
-- `562728d` / `558a72e`：修复并验证启动器；
-- `f733434` / `2668529` / `0a07640`：修复安装器与快捷方式。
+- 浏览器流程使用全局锁、稳定会话身份校验、重复保护和确认路径。
+- 任务状态：`scheduled`、`running`、`retry_pending`、`recovered`、`completed`、`final_failed`、`uncertain`、`cancelled`。
+- 仅明确发生在发送动作之前的失败可按 2、5、10 分钟进入延迟重试；不得越过任务完成窗口。
+- 可能发送、确认不确定、身份歧义或无法证明重复保护安全时进入 `uncertain`，绝不重试。
+- `retry_pending` 可跨重启恢复；最终通知按任务运行 ID 与终态去重。
 
-`v1.3.0` 曾被错误地强制移动过一次。当前发布已验证，但以后绝不能移动任何已发布标签。
-## 2. 技术栈
+### Test Center 与模块包
 
-- 后端：Python 3.11+、FastAPI、Uvicorn、Pydantic、Typer、PyYAML、HTTPX、Pillow、Playwright。
-- 前端：React 19、TypeScript、Vite 6、Vitest、Testing Library、Lucide React。
-- Windows：项目 `.venv`、项目 Chromium、Windows Task Scheduler、PowerShell 5.1、ASCII 安全 `.cmd`。
-- 发布：GitHub Actions、Windows runner、Python 3.11、Node.js 22、便携 ZIP、SHA-256、GitHub Release。
-## 3. 关键结构
+- Test Center 是 Settings 下的可选模块，不是主导航入口；未安装时不得加载模块页面或轮询其 API。
+- 模块版本与核心版本独立显示。正确组合为 AutoDy `1.4.0` / 官方模块 `1.2.0` / 兼容 `>=1.3.0,<2.0.0`。
+- 模块安装和升级使用注册表、清单、包哈希和原子替换；诊断应显示实际加载包的路径与哈希。
+- 启动时若服务或模块来自旧安装位置，应给出可操作错误，而不是把问题归因于浏览器缓存。
+- Test Center 受控干跑必须由用户明确发起并满足锁、身份、空编辑器和无附件条件；它不发送、不调用发送管道，也不自动重试。
 
-```text
-src/autody/                 Python 核心、CLI、Web API、模块系统
-src/autody/web/static/      后端实际提供的生产前端资源
-frontend/                   React/Vite 源码
-tests/                      后端与集成测试
-scripts/                    安装、启动、健康检查、打包
-docs/                       文档与脱敏截图
-.github/workflows/          CI 与 Release
-output/                     本地发布产物
-data/                       本机运行数据，禁止提交
-```
+### Windows 启动和托盘
 
-新会话只先读：
+- `scripts/autody-tray.ps1` 提供单实例托盘宿主，可打开管理台、查看状态/日志、重启、切换启动项和退出。
+- 托盘只可复用或停止已验证属于 AutoDy 的服务；不得接管无关的 8765 端口拥有者。
+- 退出托盘不会删除计划任务或用户数据；计划任务可以独立于托盘运行。
+- 源开发使用项目 `.venv`；便携式/安装路径必须使用当前应用目录、当前前端构建与当前官方模块 ZIP。
 
-```text
-AGENTS.md
-docs/PROJECT_HANDOFF.md
-与当前任务直接相关的源码和测试
-```
+## 当前工作树注意事项
 
-不要先全仓库扫描。
-## 4. 核心架构与安全
-
-```text
-React/Vite UI → FastAPI 本地 API
-→ 配置、目标、历史、日志、调度、模块管理
-→ 全局浏览器锁 → Playwright Chromium → 抖音 Web
-```
-
-管理台只监听 `127.0.0.1`。发送流程必须保留登录、目标身份、会话和编辑器可用性、发送控件、同日去重、不确定结果保护、发送确认和全局锁。
-
-常规开发、自动化测试、预检和导航验收不得操作真实聊天输入框，也绝不允许发送真实消息。唯一窄例外是用户在当前任务中明确发起、并指定目标的 Test Center 单次受控输入测试；它必须先取得全局浏览器锁并完成导航验收，证明所选与可见会话的稳定 ID 相等、显示名一致，随后才可确认输入框为空且无附件。测试文本只存在内存中，不得持久化、记录、打印、出现在 API 响应、状态、历史或截图中；不得按 Enter、点击发送控件、调用发送链路或形成发送尝试；只能在文本仍精确等于自身测试值时清除，并再次证明为空。该例外不得自动运行或重试。身份不匹配必须在聚焦或检查输入框前停止；已有草稿、附件、内容变化或清理不确定时保留现场并停止。只有能证明尚未触发发送的失败才允许安全重试。
-## 5. 已稳定功能
-### 好友、目标与文案
-
-- 好友昵称和头像按同一聊天列表行绑定；
-- 使用稳定 candidate/target 身份；
-- 重名时明确提示，不能猜测；
-- 已配置目标与候选好友分区；
-- 删除按钮紧凑，不占独立布局行；
-- 目标支持启用、备注、文案包、后缀、顺序和延迟；
-- 同日成功记录阻止重复发送；
-- 不确定结果禁止重试。
-### 调度
-
-```text
-AutoDy-Health-Daily   每日 07:20
-AutoDy-DailySpark     每日 07:30
-AutoDy-Health-Weekly  每周日 20:00
-```
-
-Windows 任务使用 `IgnoreNew`；目标延迟由主任务内部处理。
-### 安装与启动
-
-- 使用项目 `.venv` 和项目 Chromium；
-- 启动失败必须可见，不能闪退；
-- 已修复 PowerShell 5.1 UTF-8、`.cmd` 编码和 `.venv` Errno 13；
-- 更新只停止并重启确认属于本项目的服务；
-- 源码安装可重建前端；
-- 便携包不要求 Node.js；
-- HTML 入口 `no-store`，JS/CSS 使用哈希文件名。
-## 6. 当前 UI 基线
-
-普通总览：无“发送前自检”、无测试中心卡片、不加载模块资源。
-
-好友管理：无“测试可发送状态”、无单目标预检；好友卡片紧凑，删除按钮不增加高度；候选区保持普通业务结构。
-
-测试中心：
-
-- 位于“设置”下，不是一级侧栏；
-- 使用隔离 iframe；
-- 宿主 100% 宽度，最小高度 760 px；
-- 安装和升级使用同一官方模块安装接口；升级原子替换代码与资源，保留模块 `data`，激活或注册失败时回滚旧代码、数据和注册状态；
-- 已安装包身份由模块版本、模块 API、包 SHA-256 和清单 checksum 共同证明，同版本但包哈希不同仍显示为待更新；
-- 模块静态资源响应为 `no-store`，升级后重新加载即可获取新资源，不需要清理浏览器缓存；
-- ResizeObserver 回传高度；
-- 仅接受同源、同 iframe、正确模块 ID、760–4000 px；
-- 自卸载位于底部“模块管理”；
-- 未安装时无子导航、iframe、模块资源和轮询。
-## 7. Test Center 数据边界
-
-```text
-模块 ID：autody-test-center
-数据根：data/modules/autody-test-center
-```
-
-模块可拥有测试历史、只读预检历史、进度、夹具、设置、计划缓存、目标覆盖、诊断缓存、模块日志和临时文件。
-
-卸载必须删除模块数据，但保留：
-
-- `config.yaml`、普通目标与好友身份；
-- 文案库、轮换、正常发送和任务历史；
-- 核心日志、浏览器资料、账号与头像；
-- 计划任务、备份、安装器和启动器；
-- 核心发送安全逻辑。
-
-测试中心预检必须只读，以下动作计数应为零：
-
-```text
-fill / type / press / keyboard input
-send-control click / send_message
-message rotation mutation
-completion state mutation
-recovery invocation
-```
-## 8. 隐私与发布排除
-
-不得提交或发布：
-
-```text
-config.yaml、messages.txt、data/
-Cookie、浏览器 profile、登录状态
-账号资料、真实好友名和头像
-好友缓存、日志、任务历史
-模块注册表、模块历史和设置
-本机截图、备份、.venv、node_modules
-私有绝对路径
-```
-
-文档截图只使用“演示账号”“好友A/B/C”、通用头像和安全夹具。真实页面截图不得原样上传。
-## 9. 常用命令
+开始工作前必须执行：
 
 ```powershell
-# 启动
-.\.venv\Scripts\python.exe -m autody.cli ui
-# 后端
-.\.venv\Scripts\python.exe -m autody.cli doctor
-.\.venv\Scripts\pytest.exe -q
-# 前端
-cd frontend
-npm ci
-npm test
-npm run build
-cd ..
-# 便携包
-.\scripts\build-portable.ps1
-```
-
-安装器、启动器或发布脚本修改后，还要检查 PowerShell 5.1、ASCII `.cmd`、快捷方式、服务身份、8765 单监听器、无关端口保护和便携包无 Node.js 依赖。
-
-最近一次 v1.3.0 报告：后端 190 passed，前端 22 passed；生产构建、PowerShell、便携包、CI、Release 和回下载校验成功；最终 Test Center 未安装；无真实消息操作。新改动必须重新验证。
-## 10. 当前未解决问题
-### P1 模块设置 UI 不统一
-
-模块名称、版本、兼容性、说明和按钮排版与其他设置项不一致。应复用现有字体、间距、图标、按钮和状态徽标。
-### P1 残留无效候选缓存
-
-完整成功扫描后，以当前 candidate ID 集合协调缓存，删除未配置且已不存在的旧候选；保留暂时缺失的已配置目标。失败、取消、超时、部分或歧义扫描不得清理。
-### P1 定时发送过早弹失败通知
-
-需要 `retry_pending / recovered / completed / final_failed / uncertain` 状态。安全重试期限内不弹最终失败；成功后抑制旧失败；不确定结果立即提示且禁止重试；通知按 task-run ID 去重。
-### P1 日志筛选不生效
-
-日期、级别、任务和状态必须真正改变列表、数量、空状态和分页。前后端参数需一致，并提供活动筛选摘要和重置。
-### P2 日志整理体验差
-
-“按日期归档”缺少结果；“复制错误摘要”应改为详情内“复制诊断信息”；需要整理预览、结果、归档入口和重复错误分组，不能粗暴拼接日志。
-### P2 文档过度拆分
-
-多份工程文档内容过浅。建议保留 README、CHANGELOG、SECURITY、LICENSE，并合并为一个实质性的 `docs/AUTODY_ENGINEERING_MANUAL.md`。
-### P2 Release 与 MSI
-
-减少重复 Release 资产；Test Center 可继续内嵌主包。未来建立 `packaging/windows/` 再规划 WiX/MSI；运行数据必须与安装目录分离。
-## 11. 推荐任务顺序
-
-1. 模块设置 UI + Test Center 兼容；
-2. 完整扫描后的旧缓存协调；
-3. 安全重试状态机 + 延迟通知；
-4. 日志筛选；
-5. 日志归档、清理和诊断信息；
-6. 文档合并与仓库清理；
-7. MSI 打包。
-
-每次只处理一个主题：复现、找根因、聚焦修改、针对性测试、真实页面验收，再决定是否统一发版。
-
-普通任务优先 Terra Medium/High。只有跨核心状态机且难定位时再用 Sol High；通常不需要 Extra High。
-## 12. 新会话模板
-
-```text
-Work in C:\Users\Administrator\Documents\autody.
-
-Before editing, read only:
-- AGENTS.md
-- docs/PROJECT_HANDOFF.md
-- files directly related to this task
-
-Then run:
 git status --short
 git log -8 --oneline --decorate
 git remote -v
-
-Do not scan the entire repository unless required.
-Preserve unrelated work.
-Do not send real Douyin messages.
-Do not move published tags.
 ```
 
-随后只描述一个具体问题和验收结果，不再粘贴完整项目历史。
-## 13. 维护规则
+本工作副本存在未提交的产品、前端、静态资源、图标、托盘和测试改动。它们归当前操作者所有，后续任务必须保留，不能使用 reset、clean、stash 或覆盖式构建清理它们。
 
-仅在发布新版本、技术栈/目录/命令改变、稳定行为或数据边界改变、P1/P2 问题新增或关闭时更新本文件。小样式、临时调试、单次测试和内部重构无需写入。
+运行时数据、模块注册表、浏览器资料、日志、缓存、备份、`.venv` 和 `output/` 均不应提交或删除；尤其不得读取、暴露或纳入真实账号、好友、消息、Cookie 或资料文件。
+
+## 验证基线
+
+发布或产品修改前应执行：
+
+```powershell
+.\.venv\Scripts\python.exe -m autody.cli doctor
+.\.venv\Scripts\pytest.exe -q
+cd frontend
+npm test
+npm run build
+cd ..
+.\scripts\build-portable.ps1
+```
+
+UI 修改还要用新浏览器上下文检查 `http://127.0.0.1:8765` 的生产构建、网络请求、控制台、尺寸和弹窗；该检查仅限只读或夹具路径，不能触发真实私信编辑器操作。
+
+## 下一位维护者的起点
+
+1. 先阅读根目录 `AGENTS.md` 与本文件，再只读取当前任务直接相关的文件。
+2. 先确认 8765 的 PID、命令行、工作目录、导入包路径和 `/api/service-identity`；确认属于本仓库后才可重启。
+3. 版本不一致时检查 `/api/modules`、模块清单、当前捆绑 ZIP 的路径/哈希和启动器来源；不要先假定浏览器缓存。
+4. 任何与真实浏览器交互相关的任务均以安全停止为默认结果；不确定即停止、不重试。
+5. 发布前等待主分支 CI，创建新的版本标签；不推送、不发布、不移动已存在标签，除非任务明确授权。
+
+## 文档入口
+
+- 使用说明：`README.md`
+- 工程架构与维护：`docs/AUTODY_ENGINEERING_MANUAL.md`
+- 用户可见待发布变更：`docs/RELEASE_NOTES.md`
+- 完整历史：`CHANGELOG.md`
