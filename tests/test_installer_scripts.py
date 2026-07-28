@@ -72,11 +72,13 @@ def test_dashboard_launcher_reuses_an_identified_project_service():
 
 
 def test_dashboard_powershell_launcher_waits_for_identity_and_preserves_failures():
-    text = Path("scripts/start-dashboard.ps1").read_text(encoding="utf-8")
+    launcher = Path("scripts/start-dashboard.ps1").read_text(encoding="utf-8")
+    text = Path("scripts/autody-tray.ps1").read_text(encoding="utf-8-sig")
 
-    assert "Set-StrictMode -Version Latest" in text
+    assert "autody-tray.ps1" in launcher
+    assert "Set-StrictMode -Version Latest" in launcher
     assert "/api/service-identity" in text
-    assert "Start-Process -FilePath $ProjectPython" in text
-    assert "Stop-Process -Id $connection.OwningProcess" in text
-    assert "Read-Host" in text
-    assert 'Start-Process "$Url"' in text
+    assert "Start-Process -FilePath $Python" in text
+    assert "Stop-Process -Id $ManagedPid" in text
+    assert "MessageBox" in text
+    assert "Start-Process $Url" in text

@@ -11,31 +11,49 @@ $Log = Join-Path $LogDir "scheduler.log"
 $NotificationDir = Join-Path $Root "data\notifications"
 $Alert = Join-Path $NotificationDir "need-attention.txt"
 $NotificationsEnabled = -not ((Get-Content -Raw $Config -ErrorAction SilentlyContinue) -match '(?m)^completion_notifications_enabled:\s*false\s*$')
+$RetryPendingExitCode = 10
+$RetryDelaysSeconds = @(120, 300, 600)
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 New-Item -ItemType Directory -Force -Path $NotificationDir | Out-Null
 $started = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 "[$started] 开始每日发送任务" | Add-Content -Encoding UTF8 $Log
-$stdout = Join-Path $env:TEMP "autody-run-stdout-$PID.log"
-$stderr = Join-Path $env:TEMP "autody-run-stderr-$PID.log"
-$process = Start-Process `
-    -FilePath $Python `
-    -ArgumentList @("-m", "autody.cli", "run", "--config", "`"$Config`"", "--source", "scheduled") `
-    -WorkingDirectory $Root `
-    -Wait `
-    -PassThru `
-    -NoNewWindow `
-    -RedirectStandardOutput $stdout `
-    -RedirectStandardError $stderr
-foreach ($path in @($stdout, $stderr)) {
-    if (Test-Path $path) {
-        Get-Content -Raw -Encoding UTF8 $path | Add-Content -Encoding UTF8 $Log
-        Remove-Item -LiteralPath $path -Force
+function Invoke-AutoDyRun([string]$Source) {
+    $stdout = Join-Path $env:TEMP "autody-run-stdout-$PID-$Source.log"
+    $stderr = Join-Path $env:TEMP "autody-run-stderr-$PID-$Source.log"
+    $process = Start-Process `
+        -FilePath $Python `
+        -ArgumentList @("-m", "autody.cli", "run", "--config", "`"$Config`"", "--source", $Source) `
+        -WorkingDirectory $Root `
+        -Wait `
+        -PassThru `
+        -NoNewWindow `
+        -RedirectStandardOutput $stdout `
+        -RedirectStandardError $stderr
+    $output = ""
+    foreach ($path in @($stdout, $stderr)) {
+        if (Test-Path $path) {
+            $text = Get-Content -Raw -Encoding UTF8 $path
+            $text | Add-Content -Encoding UTF8 $Log
+            $output += $text
+            Remove-Item -LiteralPath $path -Force
+        }
     }
+    return [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $output }
 }
-$exitCode = $process.ExitCode
 
-if ($exitCode -ne 0) {
+$run = Invoke-AutoDyRun "scheduled"
+$exitCode = $run.ExitCode
+$combinedOutput = $run.Output
+foreach ($delay in $RetryDelaysSeconds) {
+    if ($exitCode -ne $RetryPendingExitCode) { break }
+    Start-Sleep -Seconds $delay
+    $run = Invoke-AutoDyRun "retry"
+    $exitCode = $run.ExitCode
+    $combinedOutput += $run.Output
+}
+
+if ($exitCode -ne 0 -and $combinedOutput -match "AUTODY_FINAL_NOTIFICATION=1") {
     $message = @"
 AutoDy 每日发送任务失败。
 时间：$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")

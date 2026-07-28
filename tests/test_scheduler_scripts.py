@@ -40,6 +40,13 @@ def test_scheduler_wrappers_log_and_notify():
         assert token in install
 
 
+def test_scheduled_send_waits_for_retry_pending_and_only_notifies_for_final_outcomes():
+    run = Path("scripts/run-scheduled.ps1").read_text(encoding="utf-8-sig")
+
+    for token in ["$RetryPendingExitCode = 10", "Start-Sleep", "AUTODY_FINAL_NOTIFICATION=1"]:
+        assert token in run
+
+
 def test_scheduler_wrappers_set_portable_playwright_environment():
     for path in [Path("scripts/run-scheduled.ps1"), Path("scripts/health-check.ps1")]:
         text = path.read_text(encoding="utf-8-sig")
@@ -55,8 +62,10 @@ def test_every_scheduled_task_uses_ignore_new_policy():
 
 def test_source_launchers_use_project_local_python_not_console_entrypoint():
     startup = Path("scripts/start-dashboard.ps1").read_text(encoding="utf-8-sig")
-    assert ".venv\\Scripts\\python.exe" in startup
-    assert "autody.cli" in startup
+    tray = Path("scripts/autody-tray.ps1").read_text(encoding="utf-8-sig")
+    assert "autody-tray.ps1" in startup
+    assert ".venv\\Scripts\\python.exe" in tray
+    assert "autody.cli" in tray
     for path in [Path("scripts/run-scheduled.ps1"), Path("scripts/health-check.ps1")]:
         text = path.read_text(encoding="utf-8-sig")
         assert ".venv\\Scripts\\python.exe" in text

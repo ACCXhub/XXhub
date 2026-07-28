@@ -184,8 +184,8 @@ def test_rejected_daily_run_keeps_existing_send_activity_marker(tmp_path: Path, 
     with SingleInstanceLock(tmp_path / "data" / "locks" / "autody.lock"):
         result = runner.invoke(app, ["run", "--config", str(config)])
 
-    assert result.exit_code == 0
-    assert "已有 AutoDy 任务正在运行，本次跳过。" in result.stdout
+    assert result.exit_code == 10
+    assert "安全重试已安排" in result.output
     assert marker.is_file()
 
 
@@ -342,7 +342,7 @@ def test_run_reports_completed_counts(tmp_path: Path, monkeypatch):
     assert "本次发送完成：成功 2 个，失败 0 个。" in result.stdout
 
 
-def test_run_reports_partial_failure_and_exit_code(tmp_path: Path, monkeypatch):
+def test_run_reports_retry_pending_without_a_failure_exit(tmp_path: Path, monkeypatch):
     (tmp_path / "messages.txt").write_text("早安\n", encoding="utf-8")
     config = tmp_path / "config.yaml"
     config.write_text(
@@ -362,7 +362,7 @@ def test_run_reports_partial_failure_and_exit_code(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(
         "autody.cli.run_daily",
         lambda *_args, **_kwargs: RunResult(
-            status=RunStatus.PARTIAL_FAILED,
+            status=RunStatus.RETRY_PENDING,
             total_targets=2,
             sent_count=1,
             skipped_count=0,
@@ -372,9 +372,9 @@ def test_run_reports_partial_failure_and_exit_code(tmp_path: Path, monkeypatch):
 
     result = runner.invoke(app, ["run", "--config", str(config)])
 
-    assert result.exit_code == 2
+    assert result.exit_code == 10
     assert "本次发送完成：成功 1 个，失败 1 个。" in result.stdout
-    assert "本次部分失败，再次运行将只补发失败目标。" in result.output
+    assert "安全重试已安排" in result.output
 
 
 def test_ui_starts_local_server(tmp_path: Path, monkeypatch):

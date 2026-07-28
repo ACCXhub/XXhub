@@ -43,15 +43,16 @@ def test_dashboard_launcher_and_shortcut_are_portable_and_use_icon():
         assert token in launcher
 
     startup = Path("scripts/start-dashboard.ps1").read_text(encoding="utf-8-sig")
+    tray = Path("scripts/autody-tray.ps1").read_text(encoding="utf-8-sig")
+    assert "autody-tray.ps1" in startup
     for token in [
         "AUTODY_HOME",
         "PLAYWRIGHT_BROWSERS_PATH",
         "PLAYWRIGHT_SKIP_BROWSER_GC",
         ".venv\\Scripts\\python.exe",
         "-m\", \"autody.cli\", \"ui\"",
-        "Read-Host",
     ]:
-        assert token in startup
+        assert token in tray
 
     shortcut = Path("scripts/install-shortcut.ps1").read_text(encoding="utf-8-sig")
     for token in [

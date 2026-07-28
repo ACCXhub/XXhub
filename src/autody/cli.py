@@ -35,7 +35,8 @@ from autody.logging_setup import setup_logging
 from autody.messages import read_messages
 from autody.preflight import PlaywrightPreflightInspector, PreflightStore, global_failure, run_preflight
 from autody.recovery import recovery_due
-from autody.runner import RunStatus, run_daily
+from autody.retry_state import TaskOutcomeStore
+from autody.runner import RunResult, RunStatus, record_safe_pre_send_failure, run_daily
 from autody.runtime import configure_runtime, doctor_playwright, repair_playwright
 from autody.state import StateStore
 from autody.web_api import create_app
@@ -74,6 +75,36 @@ def _write_attention(config: AppConfig, message: str) -> None:
 
 def _clear_attention(config: AppConfig) -> None:
     (config.state_file.parent / "notifications" / "need-attention.txt").unlink(missing_ok=True)
+
+
+def _outcome_store(config: AppConfig) -> TaskOutcomeStore:
+    return TaskOutcomeStore(config.state_file.parent / "history" / "task-outcomes.json")
+
+
+def _report_daily_result(config: AppConfig, result: RunResult) -> None:
+    message = "当天所有目标此前已完成。" if result.status is RunStatus.ALREADY_DONE else f"本次发送完成：成功 {result.sent_count} 个，失败 {result.failed_count} 个。"
+    logging.info(message)
+    typer.echo(message)
+    if result.status is RunStatus.RETRY_PENDING:
+        detail = "安全重试已安排；在重试完成前不会显示最终失败通知。"
+        logging.warning(detail)
+        typer.echo(detail, err=True)
+        raise typer.Exit(10)
+    if result.status in {RunStatus.FINAL_FAILED, RunStatus.UNCERTAIN}:
+        detail = (
+            f"发送结果不确定，已禁止自动重试：{result.error or '请检查发送记录'}"
+            if result.status is RunStatus.UNCERTAIN
+            else f"安全重试已耗尽：{result.error or '发送前条件持续不可用'}"
+        )
+        notification_due = bool(result.run_id and _outcome_store(config).notification_due(result.run_id))
+        if notification_due:
+            _write_attention(config, detail)
+            _outcome_store(config).mark_notified(result.run_id)
+            typer.echo("AUTODY_FINAL_NOTIFICATION=1")
+        logging.error(detail)
+        typer.echo(detail, err=True)
+        raise typer.Exit(3 if result.status is RunStatus.UNCERTAIN else 2)
+    _clear_attention(config)
 
 
 def _run_friend_scan(
@@ -564,6 +595,7 @@ def run(
         enabled = sum(1 for target in loaded.targets if target.enabled)
         typer.echo(f"模拟运行已通过：将处理 {enabled} 个启用目标；未打开浏览器，未发送消息。")
         return
+    result: RunResult | None = None
     try:
         with SingleInstanceLock(loaded.lock_file):
             with _sending_activity(loaded):
@@ -586,36 +618,14 @@ def run(
                     )
                     result = run_daily(loaded, chat, trigger_source=source)
             _write_health(loaded, "success")
-            message = "当天所有目标此前已完成。" if result.status is RunStatus.ALREADY_DONE else f"本次发送完成：成功 {result.sent_count} 个，失败 {result.failed_count} 个。"
-            logging.info(message)
-            typer.echo(message)
-            if result.status is RunStatus.PARTIAL_FAILED:
-                detail = "本次部分失败，再次运行将只补发失败目标。"
-                logging.error(detail)
-                typer.echo(detail, err=True)
-                raise typer.Exit(2)
-            if result.status in {RunStatus.BLOCKED, RunStatus.BLOCKED_AMBIGUOUS_TARGET}:
-                detail = (
-                    "检测到重复昵称的启用目标，已阻止这些目标的自动发送。"
-                    if result.status is RunStatus.BLOCKED_AMBIGUOUS_TARGET
-                    else f"浏览器任务已安全停止：{result.error or '页面被阻止'}"
-                )
-                logging.error(detail)
-                typer.echo(detail, err=True)
-                raise typer.Exit(3)
-            _clear_attention(loaded)
+            _report_daily_result(loaded, result)
     except TaskAlreadyRunning:
-        _busy()
-        return
+        _report_daily_result(loaded, record_safe_pre_send_failure(loaded, "browser_busy"))
     except AuthenticationError as exc:
         _write_health(loaded, "failed", str(exc))
-        _write_attention(loaded, "抖音登录已失效，请打开 AutoDy 管理台完成扫码登录。")
-        typer.echo(f"浏览器任务已安全停止：{exc}", err=True)
-        raise typer.Exit(3) from exc
+        _report_daily_result(loaded, record_safe_pre_send_failure(loaded, f"login_unavailable:{exc}"))
     except FatalChatError as exc:
-        logging.error("浏览器任务已安全停止：%s", exc)
-        typer.echo(f"浏览器任务已安全停止：{exc}", err=True)
-        raise typer.Exit(3) from exc
+        _report_daily_result(loaded, record_safe_pre_send_failure(loaded, f"browser_unavailable:{exc}"))
     except typer.Exit:
         raise
     except Exception as exc:
