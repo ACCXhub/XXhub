@@ -35,7 +35,13 @@ from autody.friend_discovery import is_discovery_stale, load_discovered_friends
 from autody.history import TaskHistoryStore, bootstrap_legacy_daily_history, dashboard_statistics, stable_target_id
 from autody.log_center import archive_historical_logs, archive_logs, automatic_cleanup_once_daily, cleanup_logs, log_storage_summary, log_summary, query_logs, record_cleanup_result
 from autody.message_packs import ImportMode, MessagePackError, MessagePackService
-from autody.modules import MODULE_FILENAME, MODULE_ID, ModuleManager, ModulePackageError, build_module_archive
+from autody.modules import (
+    MODULE_ID,
+    OFFICIAL_TEST_CENTER_VERSION,
+    ModuleManager,
+    ModulePackageError,
+    ensure_official_module_archive,
+)
 from autody.messages import read_messages
 from autody.preflight import PreflightStore
 from autody.recovery import recovery_due
@@ -513,7 +519,13 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
     # marker; it must never prevent the dashboard from starting.
     initial_config = load_config(config_path)
     manager.module_data_root = initial_config.state_file.parent / "modules" / MODULE_ID / "data"
-    module_manager = ModuleManager(initial_config.state_file.parent, core_version="1.3.0")
+    module_manager = ModuleManager(initial_config.state_file.parent, core_version=_application_version())
+    try:
+        bundled_module = ensure_official_module_archive(root)
+        bundled_module_error = None
+    except ModulePackageError as exc:
+        bundled_module = None
+        bundled_module_error = str(exc)
 
     def module_overrides() -> dict[str, dict]:
         path = module_manager.module_root / "data" / "overrides.json"
@@ -619,6 +631,9 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
             "package_path": str(package_path),
             "project_path": str(root),
             "frontend_build_version": _application_version(),
+            "frontend_static_path": str(Path(__file__).parent / "web" / "static"),
+            "bundled_module": bundled_module,
+            "startup_error": bundled_module_error,
         }
 
     @app.get("/api/status")
@@ -812,21 +827,24 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
 
     @app.get("/api/modules")
     def module_status():
-        bundled = root / "optional-modules" / MODULE_FILENAME
-        return {"modules": [{**module_manager.status(), "bundled_available": True, "bundled_version": "1.1.0"}]}
+        bundled_version = bundled_module["module_version"] if bundled_module else OFFICIAL_TEST_CENTER_VERSION
+        status = module_manager.status()
+        status["bundled_available"] = bundled_module is not None
+        status["bundled_version"] = bundled_version
+        status["core_version"] = module_manager.core_version
+        status["update_available"] = bool(status["installed"] and status.get("version") != bundled_version)
+        status["bundled_package"] = bundled_module
+        status["load_error"] = bundled_module_error or status["load_error"]
+        return {"modules": [status]}
 
     @app.post("/api/modules/autody-test-center/install")
     async def install_test_center(file: UploadFile | None = File(default=None)):
-        bundled = root / "optional-modules" / MODULE_FILENAME
         temporary: Path | None = None
         try:
             if file is None:
-                if bundled.is_file():
-                    package = bundled
-                else:
-                    temporary = initial_config.state_file.parent / f".{uuid.uuid4().hex}.autody-module.zip"
-                    build_module_archive(temporary, version="1.1.0", core_version="1.3.0")
-                    package = temporary
+                if bundled_module is None:
+                    raise ModulePackageError(bundled_module_error or "官方模块包不可用")
+                package = Path(bundled_module["path"])
             else:
                 suffix = ".autody-module.zip"
                 temporary = initial_config.state_file.parent / f".{uuid.uuid4().hex}{suffix}"

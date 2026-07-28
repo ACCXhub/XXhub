@@ -10,7 +10,7 @@ from autody.web_api import create_app
 from autody.history import TaskHistoryStore, TaskRunRecord
 from autody.config import Target, load_config, save_config
 from autody.preflight import PreflightStore
-from autody.modules import ModuleManager, build_module_archive
+from autody.modules import OFFICIAL_TEST_CENTER_CORE_RANGE, OFFICIAL_TEST_CENTER_VERSION, MODULE_ID, ModuleManager, build_module_archive
 
 
 def make_project(tmp_path: Path) -> Path:
@@ -98,6 +98,11 @@ def test_service_identity_reports_local_runtime_without_private_browser_data(tmp
     assert data["version"]
     assert data["python_executable"]
     assert data["package_path"].endswith("src\\autody") or data["package_path"].endswith("src/autody")
+    assert data["frontend_static_path"].endswith("web\\static") or data["frontend_static_path"].endswith("web/static")
+    assert data["bundled_module"]["module_version"] == "1.2.0"
+    assert data["bundled_module"]["module_api_version"] == "1"
+    assert data["bundled_module"]["required_autody_version"] == ">=1.3.0,<2.0.0"
+    assert len(data["bundled_module"]["sha256"]) == 64
     assert "cookie" not in str(data).lower()
     assert "browser-profile" not in str(data).lower()
 
@@ -178,6 +183,21 @@ def test_preflight_routes_validate_target_ids_and_return_masked_persistence(tmp_
 def _install_test_center(config_path: Path) -> None:
     archive = build_module_archive(config_path.parent / "AutoDy-Test-Center.autody-module.zip", version="1.1.0", core_version="1.3.0")
     ModuleManager(config_path.parent / "data", core_version="1.3.0").install(archive)
+
+
+def test_official_module_status_and_generated_install_share_the_version_policy(tmp_path: Path):
+    config = make_project(tmp_path)
+    client = TestClient(create_app(config))
+
+    status = client.get("/api/modules").json()["modules"][0]
+    installed = client.post("/api/modules/autody-test-center/install").json()
+    manifest = __import__("json").loads((tmp_path / "data" / "modules" / MODULE_ID / "manifest.json").read_text(encoding="utf-8"))
+
+    assert status["bundled_version"] == OFFICIAL_TEST_CENTER_VERSION
+    assert status["core_version"] == "1.4.0"
+    assert installed["version"] == OFFICIAL_TEST_CENTER_VERSION
+    assert manifest["module_version"] == OFFICIAL_TEST_CENTER_VERSION
+    assert manifest["required_autody_version"] == OFFICIAL_TEST_CENTER_CORE_RANGE
 
 
 def test_target_settings_and_today_plan_are_test_center_routes(tmp_path: Path):

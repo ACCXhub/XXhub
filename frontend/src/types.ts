@@ -199,6 +199,11 @@ export interface OptionalModuleStatus {
   version: string | null;
   compatible: boolean;
   bundled_available?: boolean;
+  bundled_version?: string | null;
+  core_version?: string | null;
+  required_autody_version?: string | null;
+  compatibility_reason?: string | null;
+  update_available?: boolean;
   load_error?: string | null;
 }
 
@@ -252,6 +257,8 @@ export interface FriendDiscovery {
     new_candidates?: number;
     avatars_updated?: number;
     avatars_failed?: number;
+    removed_stale_candidates?: number;
+    completed_bottom_reached?: boolean;
     error?: string;
   };
   progress?: { running?: boolean; message?: string; current?: number; total?: number | null; status?: string };

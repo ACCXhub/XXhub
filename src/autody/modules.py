@@ -22,6 +22,8 @@ MODULE_ID = "autody-test-center"
 MODULE_FILENAME = "AutoDy-Test-Center.autody-module.zip"
 MODULE_API_VERSION = "1"
 MODULE_PUBLISHER = "AutoDy"
+OFFICIAL_TEST_CENTER_VERSION = "1.2.0"
+OFFICIAL_TEST_CENTER_CORE_RANGE = ">=1.3.0,<2.0.0"
 _MANIFEST_NAME = "manifest.json"
 _MAX_FILE_COUNT = 16
 _MAX_ARCHIVE_BYTES = 512 * 1024
@@ -34,6 +36,104 @@ _ALLOWED_FILES = {
     "frontend/module.css",
     "README.md",
 }
+
+
+def _project_source_present(root: Path) -> bool:
+    """Whether ``root`` is a source checkout which can generate its package."""
+    return (root / "src" / "autody" / "modules.py").is_file()
+
+
+def official_module_archive_path(root: Path) -> Path:
+    """Return the sole package location for this installation.
+
+    Source installations generate a runtime copy under their own data directory;
+    portable installations use the package copied into their own root.  In
+    particular, an ``output`` directory is never an input at runtime.
+    """
+    root = root.resolve()
+    if _project_source_present(root):
+        return root / "data" / "module-cache" / MODULE_FILENAME
+    return root / "optional-modules" / MODULE_FILENAME
+
+
+def inspect_module_archive(path: Path) -> dict:
+    """Read the non-sensitive package identity used by startup diagnostics."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            files = _safe_members(archive)
+        manifest = _read_manifest(files, "1.4.0")
+    except (OSError, zipfile.BadZipFile, ModulePackageError) as exc:
+        raise ModulePackageError(f"官方模块包无效：{exc}") from exc
+    return {
+        "path": str(path.resolve()),
+        "sha256": sha256(path.read_bytes()).hexdigest(),
+        "modified_at": path.stat().st_mtime,
+        "module_version": manifest["module_version"],
+        "module_api_version": manifest["module_api_version"],
+        "required_autody_version": manifest["required_autody_version"],
+        "package_checksum": manifest["package_checksum"],
+    }
+
+
+def ensure_official_module_archive(root: Path) -> dict:
+    """Create or validate the authoritative first-party module package.
+
+    This deliberately refuses a stale portable package.  A source checkout
+    rewrites only its generated cache atomically; installed module data and
+    registries are never touched here.
+    """
+    root = root.resolve()
+    package = official_module_archive_path(root)
+    if _project_source_present(root) or not package.is_file():
+        # A test/project fixture (or a partial portable repair) has no bundled
+        # archive yet.  Generate a local cache from this exact code; never fall
+        # back to a release/output directory.
+        package = root / "data" / "module-cache" / MODULE_FILENAME
+        temporary = package.with_suffix(".tmp")
+        build_official_module_archive(temporary)
+        package.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(temporary, package)
+    info = inspect_module_archive(package)
+    expected = (OFFICIAL_TEST_CENTER_VERSION, MODULE_API_VERSION, OFFICIAL_TEST_CENTER_CORE_RANGE)
+    actual = (info["module_version"], info["module_api_version"], info["required_autody_version"])
+    if actual != expected:
+        raise ModulePackageError(
+            "官方模块包版本不匹配："
+            f"期望 {OFFICIAL_TEST_CENTER_VERSION}/{MODULE_API_VERSION}/{OFFICIAL_TEST_CENTER_CORE_RANGE}，"
+            f"实际 {actual[0]}/{actual[1]}/{actual[2]}。"
+        )
+    return info
+
+
+def _version_parts(value: str) -> tuple[int, int, int]:
+    """Parse the deliberately small semver subset accepted by module packages."""
+    pieces = value.strip().split(".")
+    if len(pieces) != 3 or any(not piece.isdigit() for piece in pieces):
+        raise ValueError("invalid version")
+    return tuple(int(piece) for piece in pieces)  # type: ignore[return-value]
+
+
+def _supports_core(requirement: str, core_version: str) -> bool:
+    """Evaluate comma-separated ``>=``, ``>``, ``<=``, ``<`` and exact bounds."""
+    try:
+        current = _version_parts(core_version)
+        clauses = [item.strip() for item in requirement.split(",") if item.strip()]
+        if not clauses:
+            return False
+        for clause in clauses:
+            operator = next((item for item in (">=", "<=", ">", "<", "=") if clause.startswith(item)), "=")
+            expected = _version_parts(clause[len(operator):] if clause.startswith(operator) else clause)
+            if not {
+                ">=": current >= expected,
+                "<=": current <= expected,
+                ">": current > expected,
+                "<": current < expected,
+                "=": current == expected,
+            }[operator]:
+                return False
+        return True
+    except ValueError:
+        return False
 
 
 class ModulePackageError(ValueError):
@@ -89,7 +189,6 @@ def _read_manifest(files: dict[str, bytes], core_version: str) -> dict:
         "module_id": MODULE_ID,
         "display_name": "测试中心",
         "publisher": MODULE_PUBLISHER,
-        "required_autody_version": core_version,
         "module_api_version": MODULE_API_VERSION,
         "backend_entry": "backend.py",
         "frontend_entry": "frontend/index.html",
@@ -99,7 +198,11 @@ def _read_manifest(files: dict[str, bytes], core_version: str) -> dict:
         if manifest.get(key) != value:
             label = "发布者" if key == "publisher" else "模块标识" if key == "module_id" else "兼容性"
             raise ModulePackageError(f"{label}不匹配")
-    if manifest.get("module_version") != "1.1.0":
+    if not isinstance(manifest.get("required_autody_version"), str) or not _supports_core(manifest["required_autody_version"], core_version):
+        raise ModulePackageError("兼容性不匹配")
+    try:
+        _version_parts(str(manifest.get("module_version", "")))
+    except ValueError:
         raise ModulePackageError("模块版本无效")
     if not isinstance(manifest.get("permissions"), list):
         raise ModulePackageError("模块权限声明无效")
@@ -113,7 +216,7 @@ def _read_manifest(files: dict[str, bytes], core_version: str) -> dict:
     return manifest
 
 
-def build_module_archive(destination: Path, *, version: str, core_version: str = "1.3.0", mutate: str | None = None) -> Path:
+def build_module_archive(destination: Path, *, version: str, core_version: str = ">=1.3.0,<2.0.0", mutate: str | None = None) -> Path:
     """Build the official first-party package used by release and tests."""
     payload = {
         "backend.py": b"# Routes are registered by the bounded AutoDy host.\n",
@@ -149,6 +252,15 @@ def build_module_archive(destination: Path, *, version: str, core_version: str =
         if mutate == "traversal":
             archive.writestr("../escape.txt", "invalid")
     return destination
+
+
+def build_official_module_archive(destination: Path) -> Path:
+    """Build the one official Test Center package from the release policy."""
+    return build_module_archive(
+        destination,
+        version=OFFICIAL_TEST_CENTER_VERSION,
+        core_version=OFFICIAL_TEST_CENTER_CORE_RANGE,
+    )
 
 
 class ModuleManager:
@@ -198,12 +310,26 @@ class ModuleManager:
     def status(self) -> dict:
         entry = self._registry()["modules"].get(MODULE_ID)
         installed = bool(entry and self.module_root.is_dir() and (self.module_root / _MANIFEST_NAME).is_file())
+        manifest: dict = {}
+        if installed:
+            try:
+                manifest = json.loads((self.module_root / _MANIFEST_NAME).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                installed = False
+        requirement = str(manifest.get("required_autody_version", "")) if installed else None
+        compatible = bool(requirement and _supports_core(requirement, self.core_version))
+        reason = None
+        if installed and not compatible:
+            reason = f"已安装模块要求 AutoDy {requirement or '未知版本'}，当前核心为 {self.core_version}。"
         return {
             "id": MODULE_ID,
             "display_name": "测试中心",
             "installed": installed,
             "version": entry.get("version") if installed else None,
-            "compatible": True,
+            "compatible": compatible if installed else True,
+            "required_autody_version": requirement,
+            "compatibility_reason": reason,
+            "update_available": False,
             "load_error": None if installed or entry is None else "模块加载失败",
         }
 
@@ -239,8 +365,9 @@ class ModuleManager:
             registry["modules"][MODULE_ID] = {"version": manifest["module_version"]}
             self._write_registry(registry)
         except Exception:
-            if self.module_root.exists() and backup.exists():
-                shutil.rmtree(self.module_root)
+            if backup.exists():
+                if self.module_root.exists():
+                    shutil.rmtree(self.module_root)
                 os.replace(backup, self.module_root)
             self._write_registry(previous_registry)
             raise
