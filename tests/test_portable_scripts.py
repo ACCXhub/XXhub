@@ -86,3 +86,10 @@ def test_portable_builder_excludes_sensitive_data():
     assert "data/discovered_friends.json" in Path(".gitignore").read_text(encoding="utf-8")
     assert "data/account-profile.json" in Path(".gitignore").read_text(encoding="utf-8")
     assert "data/account-avatar/" in Path(".gitignore").read_text(encoding="utf-8")
+
+
+def test_portable_builder_uses_ci_python_when_project_venv_is_absent():
+    text = Path("scripts/build-portable.ps1").read_text(encoding="utf-8-sig")
+    assert "Get-Command python" in text
+    assert "if (-not (Test-Path $Python))" in text
+    assert "sys.path.insert" in text

@@ -48,7 +48,10 @@ if (Test-Path $fixtureAppStage) { Remove-Item -LiteralPath $fixtureAppStage -For
 Get-ChildItem -LiteralPath $Stage -Recurse -Force -Directory -Filter __pycache__ | Remove-Item -Recurse -Force
 Get-ChildItem -LiteralPath $Stage -Recurse -Force -File -Filter *.pyc | Remove-Item -Force
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
-& $Python -c "from pathlib import Path; from autody.modules import build_module_archive; build_module_archive(Path(r'$ModuleArchive'), version='1.1.0', core_version='1.3.0')"
+if (-not (Test-Path $Python)) {
+    $Python = (Get-Command python -ErrorAction Stop).Source
+}
+& $Python -c "from pathlib import Path; import sys; sys.path.insert(0, str(Path(r'$Root') / 'src')); from autody.modules import build_module_archive; build_module_archive(Path(r'$ModuleArchive'), version='1.1.0', core_version='1.3.0')"
 if ($LASTEXITCODE -ne 0) { throw "Optional module package build failed." }
 $moduleStage = Join-Path $Stage "optional-modules"
 New-Item -ItemType Directory -Force -Path $moduleStage | Out-Null
