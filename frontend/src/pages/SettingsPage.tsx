@@ -35,15 +35,6 @@ export function SettingsPage({ notify, onOpenTestCenter = () => undefined, onTes
       notify("测试中心已安装，可从设置中打开。");
     } catch (error) { notify(error instanceof Error ? error.message : "测试中心安装失败"); }
   };
-  const uninstallTestCenter = async () => {
-    if (!window.confirm("卸载测试中心后，所有测试历史和测试模块设置将被永久删除。")) return;
-    try {
-      const result = await api.uninstallTestCenter();
-      setTestCenter(result);
-      onTestCenterStateChange(false);
-      notify("测试中心已卸载，模块数据已删除。");
-    } catch (error) { notify(error instanceof Error ? error.message : "测试中心卸载失败"); }
-  };
   return (
     <section className="editor-page">
       <header className="page-header"><div><h1>设置</h1><p>控制延迟、超时、文案选择和本地通知；定时任务请在“定时任务”页配置。</p></div><button className="action-button primary" onClick={save}><Save size={17} />保存设置</button></header>
@@ -72,7 +63,7 @@ export function SettingsPage({ notify, onOpenTestCenter = () => undefined, onTes
       </div>
       <section className="panel">
         <div className="panel-heading"><div><h2>可选模块</h2><small>官方模块默认不安装；卸载会永久删除模块自己的测试历史和设置。</small></div></div>
-        {testCenter ? <div className="module-row"><div><strong>{testCenter.display_name}</strong><small>{testCenter.installed ? `已安装 · ${testCenter.version || "未知版本"}` : "未安装 · 官方模块 1.0.0"}{testCenter.compatible ? " · 兼容当前 AutoDy" : " · 当前版本不兼容"}{testCenter.load_error ? ` · ${testCenter.load_error}` : ""}</small></div>{testCenter.installed ? <div className="inline-actions"><button className="action-button" onClick={onOpenTestCenter}>打开测试中心</button><label className="action-button">修复或重新安装<input aria-label="选择测试中心模块包" type="file" accept=".zip,.autody-module.zip" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void installTestCenter(file); event.currentTarget.value = ""; }} /></label><button className="action-button danger" onClick={() => void uninstallTestCenter()}>卸载测试中心</button></div> : <div className="inline-actions"><button className="action-button" disabled={!testCenter.compatible} onClick={() => void installTestCenter()}>安装测试中心</button><label className="action-button">选择官方 ZIP<input aria-label="选择测试中心模块包" type="file" accept=".zip,.autody-module.zip" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void installTestCenter(file); event.currentTarget.value = ""; }} /></label></div>}</div> : <div className="empty-state compact">正在读取可选模块状态…</div>}
+        {testCenter ? <div className="module-row"><div><strong>{testCenter.display_name}</strong><small>{testCenter.installed ? `已安装 · ${testCenter.version || "未知版本"}` : "未安装 · 官方模块 1.1.0"}{testCenter.compatible ? " · 兼容当前 AutoDy" : " · 当前版本不兼容"}{testCenter.load_error ? ` · ${testCenter.load_error}` : ""}</small></div>{testCenter.installed ? <div className="inline-actions"><button className="action-button" onClick={onOpenTestCenter}>打开测试中心</button><label className="action-button">修复或重新安装<input aria-label="选择测试中心模块包" type="file" accept=".zip,.autody-module.zip" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void installTestCenter(file); event.currentTarget.value = ""; }} /></label></div> : <div className="inline-actions"><button className="action-button" disabled={!testCenter.compatible} onClick={() => void installTestCenter()}>安装测试中心</button><label className="action-button">选择官方 ZIP<input aria-label="选择测试中心模块包" type="file" accept=".zip,.autody-module.zip" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void installTestCenter(file); event.currentTarget.value = ""; }} /></label></div>}</div> : <div className="empty-state compact">正在读取可选模块状态…</div>}
       </section>
     </section>
   );

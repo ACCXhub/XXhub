@@ -35,13 +35,20 @@ foreach ($item in $items) {
         Copy-Item -LiteralPath $source -Destination $Stage -Recurse -Force
     }
 }
+# Documentation screenshot fixtures are development-only.  They are excluded
+# from portable packages so their generated runtime tree cannot be mistaken for
+# user data by the release privacy scan.
+$fixtureStage = Join-Path $Stage "docs\fixtures"
+if (Test-Path $fixtureStage) { Remove-Item -LiteralPath $fixtureStage -Recurse -Force }
+$fixtureAppStage = Join-Path $Stage "docs\fixture_app.py"
+if (Test-Path $fixtureAppStage) { Remove-Item -LiteralPath $fixtureAppStage -Force }
 # Python bytecode is generated locally and is neither needed nor appropriate in
 # a portable source package.  Removing it from the staging tree also prevents
 # stale machine-local artifacts from being distributed.
 Get-ChildItem -LiteralPath $Stage -Recurse -Force -Directory -Filter __pycache__ | Remove-Item -Recurse -Force
 Get-ChildItem -LiteralPath $Stage -Recurse -Force -File -Filter *.pyc | Remove-Item -Force
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
-& $Python -c "from pathlib import Path; from autody.modules import build_module_archive; build_module_archive(Path(r'$ModuleArchive'), version='1.0.0')"
+& $Python -c "from pathlib import Path; from autody.modules import build_module_archive; build_module_archive(Path(r'$ModuleArchive'), version='1.1.0', core_version='1.3.0')"
 if ($LASTEXITCODE -ne 0) { throw "Optional module package build failed." }
 $moduleStage = Join-Path $Stage "optional-modules"
 New-Item -ItemType Directory -Force -Path $moduleStage | Out-Null

@@ -1,0 +1,15 @@
+targets:
+  - name: 好友A
+    stable_id: fixture-a
+  - name: 好友B
+    stable_id: fixture-b
+  - name: 好友C
+    stable_id: fixture-c
+messages_file: documentation-messages.fixture
+profile_dir: runtime/browser-profile
+state_file: runtime/state.json
+lock_file: runtime/autody.lock
+artifact_dir: runtime/artifacts
+retry_count: 3
+timeout_ms: 30000
+headless: true

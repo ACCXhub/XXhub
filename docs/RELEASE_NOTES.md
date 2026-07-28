@@ -1,9 +1,8 @@
-# AutoDy v1.2.0
+# AutoDy v1.3.0
 
-- 普通总览和好友管理恢复为稳定的日常管理界面；测试功能移入可选测试中心。
-- 新增官方可选模块 `autody-test-center` 1.0.0，通过“设置 > 可选模块”安装并在 iframe 中隔离运行。
-- 模块包增加校验、路径限制、原子安装和安全卸载；模块数据只保存在 `data/modules/autody-test-center`。
-- 源码安装会重建前端，入口页面禁止缓存旧 HTML；便携包不要求 Node.js。
+- 测试中心 1.1.0 在“设置”下作为完整子页，宽度填满工作区，并以受限同源高度协商避免裁切。
+- 完成模块内的移除确认、模块数据清理、夹具和受控失败历史。
+- 整合用户、开发、软件工程与隐私安全截图文档。
 
 - Repairs the desktop dashboard launcher for Windows command-shell encoding and quoting.
 - Waits for the local dashboard identity endpoint before opening the browser.

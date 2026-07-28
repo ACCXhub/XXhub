@@ -168,22 +168,22 @@ def _sending_active(config: AppConfig) -> bool:
     return True
 
 
-def _preflight_store(config: AppConfig) -> PreflightStore:
-    return PreflightStore(config.state_file.parent / "preflight")
+def _preflight_store(config: AppConfig, data_root: Path | None = None) -> PreflightStore:
+    return PreflightStore((data_root or config.state_file.parent) / "preflight")
 
 
-def _preflight_request_path(config: AppConfig) -> Path:
-    return config.state_file.parent / "preflight" / "request.json"
+def _preflight_request_path(config: AppConfig, data_root: Path | None = None) -> Path:
+    return (data_root or config.state_file.parent) / "preflight" / "request.json"
 
 
-def _preflight_cancelled(config: AppConfig) -> bool:
-    return (config.state_file.parent / "preflight" / "cancel.json").is_file()
+def _preflight_cancelled(config: AppConfig, data_root: Path | None = None) -> bool:
+    return ((data_root or config.state_file.parent) / "preflight" / "cancel.json").is_file()
 
 
 def _run_preflight_with_page(
-    loaded: AppConfig, page, *, target_ids: list[str] | None, trigger_source: str
+    loaded: AppConfig, page, *, target_ids: list[str] | None, trigger_source: str, data_root: Path | None = None
 ) -> dict:
-    store = _preflight_store(loaded)
+    store = _preflight_store(loaded, data_root)
     inspector = PlaywrightPreflightInspector(page, friend_timeout_ms=loaded.friend_search_timeout_ms)
     enabled_count = sum(
         target.enabled and (not target_ids or (target.stable_id or target.candidate_id) in target_ids)
@@ -197,7 +197,7 @@ def _run_preflight_with_page(
         inspector.chat_ready()
         result = run_preflight(
             loaded, inspector, target_ids=target_ids, trigger_source=trigger_source,
-            cancelled=lambda: _preflight_cancelled(loaded),
+            cancelled=lambda: _preflight_cancelled(loaded, data_root),
             on_progress=store.save_progress,
         )
     except RuntimeError as exc:
@@ -385,11 +385,14 @@ def health_check(config: Path = typer.Option(Path("config.yaml"), "--config")):
 
 
 @app.command("preflight")
-def preflight(config: Path = typer.Option(Path("config.yaml"), "--config")):
+def preflight(
+    config: Path = typer.Option(Path("config.yaml"), "--config"),
+    module_data: Path | None = typer.Option(None, "--module-data"),
+):
     """只读检查聊天页面；绝不选择、输入或发送文案。"""
     loaded = load_config(config)
-    store = _preflight_store(loaded)
-    request_path = _preflight_request_path(loaded)
+    store = _preflight_store(loaded, module_data)
+    request_path = _preflight_request_path(loaded, module_data)
     cancel_path = request_path.parent / "cancel.json"
     try:
         requested = json.loads(request_path.read_text(encoding="utf-8")).get("target_ids") if request_path.is_file() else None
@@ -409,7 +412,10 @@ def preflight(config: Path = typer.Option(Path("config.yaml"), "--config")):
                 loaded.profile_dir, loaded.page_load_timeout_ms, loaded.headless,
                 home=_project_root(config),
             ) as page:
-                result = _run_preflight_with_page(loaded, page, target_ids=requested, trigger_source="manual")
+                result = _run_preflight_with_page(
+                    loaded, page, target_ids=requested,
+                    trigger_source="test_center" if module_data else "manual", data_root=module_data,
+                )
             logging.info("发送前自检完成：可用 %s，异常 %s", result["ready_count"], result["failed_count"] + result["blocked_count"])
             typer.echo(f"发送前自检完成：可用 {result['ready_count']}，异常 {result['failed_count'] + result['blocked_count']}。")
     except TaskAlreadyRunning:

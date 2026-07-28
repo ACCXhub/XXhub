@@ -4,6 +4,7 @@ import {
   Clock3,
   FileText,
   Flame,
+  FlaskConical,
   LayoutDashboard,
   ScrollText,
   Settings,
@@ -36,12 +37,16 @@ export function Sidebar({
   active,
   onChange,
   account,
-  onRefreshAccount
+  onRefreshAccount,
+  testCenterInstalled = false,
+  onOpenTestCenter = () => undefined
 }: {
   active: ViewName;
   onChange: (view: ViewName) => void;
   account: AccountProfile | null;
   onRefreshAccount: () => void;
+  testCenterInstalled?: boolean;
+  onOpenTestCenter?: () => void;
 }) {
   const verified = account?.profile_status === "verified" && account.is_self;
   return (
@@ -56,16 +61,16 @@ export function Sidebar({
       </div>
       <button className="account-refresh" onClick={onRefreshAccount} disabled={Boolean(account?.refresh_running)}>刷新当前账号资料</button>
       <nav aria-label="主导航">
-        {navigation.map(([value, label, Icon]) => (
-          <button
-            className={active === value ? "nav-item active" : "nav-item"}
-            key={value}
-            onClick={() => onChange(value)}
-          >
+        {navigation.map(([value, label, Icon]) => <div key={value} className="nav-group">
+          <button className={active === value ? "nav-item active" : "nav-item"} onClick={() => onChange(value)}>
             <Icon size={20} />
             <span>{label}</span>
           </button>
-        ))}
+          {value === "settings" && testCenterInstalled && <button className={active === "settings" ? "nav-item nav-item-child active" : "nav-item nav-item-child"} onClick={onOpenTestCenter}>
+            <FlaskConical size={18} />
+            <span>测试中心</span>
+          </button>}
+        </div>)}
       </nav>
       <div className="sidebar-footer">
         <span className="service-dot" />

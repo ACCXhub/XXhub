@@ -81,7 +81,7 @@ export default function App() {
   if (!status) return <div className="app-loading">正在连接 AutoDy 本地服务…</div>;
   return (
     <div className="app-shell">
-      <Sidebar active={view === "test-center" ? "settings" : view} onChange={setView} account={account} onRefreshAccount={() => void refreshAccount()} />
+      <Sidebar active={view === "test-center" ? "settings" : view} onChange={setView} account={account} onRefreshAccount={() => void refreshAccount()} testCenterInstalled={testCenterInstalled} onOpenTestCenter={() => setView("test-center")} />
       <main className="workspace">
         {view === "dashboard" && <DashboardPage status={status} busy={busy} onAction={action} onNavigate={setView as (view: ViewName) => void} />}
         {view === "friends" && <FriendsPage notify={notify} />}

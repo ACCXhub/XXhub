@@ -512,7 +512,8 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
     # Log maintenance is deliberately best-effort and limited by its local date
     # marker; it must never prevent the dashboard from starting.
     initial_config = load_config(config_path)
-    module_manager = ModuleManager(initial_config.state_file.parent, core_version="1.2.0")
+    manager.module_data_root = initial_config.state_file.parent / "modules" / MODULE_ID / "data"
+    module_manager = ModuleManager(initial_config.state_file.parent, core_version="1.3.0")
 
     def module_overrides() -> dict[str, dict]:
         path = module_manager.module_root / "data" / "overrides.json"
@@ -539,6 +540,20 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
         "last_attempt": None,
     }
     preflight_job_id: str | None = None
+    module_preflight_job_id: str | None = None
+
+    def module_data_path(name: str) -> Path:
+        root_path = module_manager.module_root / "data"
+        path = (root_path / name).resolve()
+        if not name or path == root_path.resolve() or root_path.resolve() not in path.parents:
+            raise HTTPException(400, "模块数据路径不安全")
+        return path
+
+    def append_module_history(title: str) -> None:
+        path = module_data_path("history.jsonl")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"title": title, "created_at": datetime.now().isoformat(timespec="seconds")}, ensure_ascii=False) + "\n")
 
     def preflight_payload(config: AppConfig, result: dict | None) -> dict:
         if not result:
@@ -798,7 +813,7 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
     @app.get("/api/modules")
     def module_status():
         bundled = root / "optional-modules" / MODULE_FILENAME
-        return {"modules": [{**module_manager.status(), "bundled_available": True, "bundled_version": "1.0.0"}]}
+        return {"modules": [{**module_manager.status(), "bundled_available": True, "bundled_version": "1.1.0"}]}
 
     @app.post("/api/modules/autody-test-center/install")
     async def install_test_center(file: UploadFile | None = File(default=None)):
@@ -810,7 +825,7 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
                     package = bundled
                 else:
                     temporary = initial_config.state_file.parent / f".{uuid.uuid4().hex}.autody-module.zip"
-                    build_module_archive(temporary, version="1.0.0")
+                    build_module_archive(temporary, version="1.1.0", core_version="1.3.0")
                     package = temporary
             else:
                 suffix = ".autody-module.zip"
@@ -828,6 +843,9 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
     def uninstall_test_center(payload: dict):
         if payload.get("confirmed") is not True:
             raise HTTPException(422, "卸载测试中心后，所有测试历史、测试设置和测试目标覆盖将被永久删除。AutoDy 的正常好友、文案、发送记录和浏览器数据不会受到影响。")
+        cancel_path = module_manager.module_root / "data" / "preflight" / "cancel.json"
+        if cancel_path.parent.is_dir():
+            cancel_path.write_text(json.dumps({"requested_at": datetime.now().isoformat()}), encoding="utf-8")
         try:
             module_manager.uninstall()
         except ModulePackageError as exc:
@@ -858,29 +876,67 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
         _require_test_center()
         return {"environment": "本机环境已加载；测试中心仅执行只读检查。", "launcher": "使用项目本地运行时。", "history": "暂无模块测试历史"}
 
+    @app.get("/api/modules/autody-test-center/history")
+    def test_center_history():
+        _require_test_center()
+        path = module_data_path("history.jsonl")
+        items = []
+        if path.is_file():
+            for line in path.read_text(encoding="utf-8").splitlines()[-30:]:
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(item, dict) and isinstance(item.get("title"), str):
+                    items.append({"title": item["title"], "created_at": str(item.get("created_at", ""))})
+        return {"items": list(reversed(items))}
+
+    @app.post("/api/modules/autody-test-center/fixtures")
+    def test_center_fixtures():
+        _require_test_center()
+        path = module_data_path("fixtures/safe-fixture.json")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"targets": ["好友A", "好友B"], "source": "documentation-safe-fixture"}, ensure_ascii=False), encoding="utf-8")
+        append_module_history("已生成安全夹具数据")
+        return {"created": True}
+
+    @app.post("/api/modules/autody-test-center/simulate-failure")
+    def test_center_simulate_failure():
+        _require_test_center()
+        append_module_history("已完成受控失败模拟（未调用真实发送）")
+        return {"simulated": True, "send_actions": 0}
+
     @app.get("/api/modules/autody-test-center/preflight/status")
     def test_center_preflight_status():
         _require_test_center()
         config = load_config(config_path)
         store = PreflightStore(module_manager.module_root / "data" / "preflight")
-        return {"running": False, "progress": store.load_progress(), **preflight_payload(config, store.load_latest())}
+        job = manager.get(module_preflight_job_id) if module_preflight_job_id else None
+        return {"running": bool(job and job["status"] == "running"), "job": job, "progress": store.load_progress(), **preflight_payload(config, store.load_latest())}
 
     @app.post("/api/modules/autody-test-center/preflight/run", status_code=202)
     def test_center_preflight_run(payload: PreflightRunRequest):
+        nonlocal module_preflight_job_id
         _require_test_center()
         config = load_config(config_path)
         valid_ids = {target.stable_id or target.candidate_id for target in config.targets if target.enabled}
         if payload.target_ids is not None and (not payload.target_ids or any(item not in valid_ids for item in payload.target_ids)):
             raise HTTPException(422, "续火目标无效或已停用")
-        request_path = module_manager.module_root / "data" / "preflight" / "request.json"
+        request_path = module_data_path("preflight/request.json")
         request_path.parent.mkdir(parents=True, exist_ok=True)
         request_path.write_text(json.dumps({"target_ids": payload.target_ids}, ensure_ascii=False), encoding="utf-8")
-        return {"id": f"module-preflight-{uuid.uuid4().hex}", "action": "preflight", "status": "queued"}
+        try:
+            job = run_action("module-preflight")
+        except ActionAlreadyRunning as exc:
+            raise HTTPException(409, str(exc)) from exc
+        module_preflight_job_id = str(job["id"])
+        append_module_history("已启动只读发送前自检")
+        return job
 
     @app.post("/api/modules/autody-test-center/preflight/cancel")
     def test_center_preflight_cancel():
         _require_test_center()
-        path = module_manager.module_root / "data" / "preflight" / "cancel.json"
+        path = module_data_path("preflight/cancel.json")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"requested_at": datetime.now().isoformat()}), encoding="utf-8")
         return {"cancelled": True}

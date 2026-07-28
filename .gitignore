@@ -22,6 +22,8 @@ data/
 /PROJECT_PROFILE.md
 /TASK_QUEUE.md
 /scripts/autody-dashboard.cmd
+/docs/fixtures/runtime/
+/docs/fixtures/data/
 # Local avatar screenshots are personal data and are never packaged or backed up.
 data/avatar-cache/
 data/discovered_friends.json

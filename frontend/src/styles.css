@@ -23,9 +23,12 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .account-refresh { margin: 4px 10px 0; border: 0; color: #a9c9f1; background: transparent; text-align: left; font-size: 12px; cursor: pointer; }
 .account-refresh:hover { color: white; }
 .sidebar nav { display: grid; gap: 5px; margin-top: 25px; }
+.nav-group { display: grid; gap: 3px; }
 .nav-item { width: 100%; height: 46px; border: 0; border-radius: 8px; padding: 0 14px; display: flex; align-items: center; gap: 13px; color: #cbd8ea; background: transparent; cursor: pointer; font-size: 15px; text-align: left; }
 .nav-item:hover { background: #0d294d; color: white; }
 .nav-item.active { color: white; background: #1168eb; box-shadow: 0 8px 20px rgba(17,104,235,.25); }
+.nav-item-child { height: 40px; margin-left: 18px; width: calc(100% - 18px); padding-left: 14px; font-size: 14px; gap: 11px; color: #afc3dc; }
+.nav-item-child:focus-visible { outline: 2px solid #9cc8ff; outline-offset: 2px; }
 .sidebar-footer { margin-top: auto; padding: 18px 10px 0; border-top: 1px solid #27405f; display: grid; grid-template-columns: 9px 1fr; gap: 4px 8px; font-size: 13px; }
 .sidebar-footer small { grid-column: 2; color: #7890ad; }
 .service-dot { width: 8px; height: 8px; border-radius: 50%; background: #31d07c; margin-top: 5px; box-shadow: 0 0 0 4px rgba(49,208,124,.1); }
@@ -96,6 +99,10 @@ td { height: 43px; padding: 0 14px; border-top: 1px solid #edf1f5; color: #26344
 .muted { color: #8793a5; }
 
 .editor-page { max-width: 1180px; margin: 0 auto; }
+.module-host-page { max-width: 1240px; }
+.module-host-header { margin-bottom: 16px; }
+.page-breadcrumb { margin: 0 0 8px !important; color: #8895a8 !important; font-size: 12px !important; }
+.module-host { display: block; width: 100%; min-height: 760px; border: 1px solid #dbe4ee; border-radius: 12px; background: #f6f9fc; box-shadow: 0 10px 28px rgba(26, 53, 87, .07); }
 .form-panel { padding-bottom: 16px; }
 .text-button { display: inline-flex; align-items: center; gap: 5px; border: 0; color: #1769e8; background: transparent; cursor: pointer; font-size: 12px; font-weight: 650; }
 .friend-editor-list { padding: 8px 16px; display: grid; gap: 8px; }

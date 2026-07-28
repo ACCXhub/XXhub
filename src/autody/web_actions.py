@@ -18,6 +18,7 @@ BROWSER_ACTIONS = {
     "repair-playwright",
     "refresh-account-profile",
     "preflight",
+    "module-preflight",
 }
 
 
@@ -42,6 +43,7 @@ class ActionManager:
         self.jobs: dict[str, ActionJob] = {}
         self._lock = threading.Lock()
         self._executor = executor or subprocess.run
+        self.module_data_root: Path | None = None
 
     def start(self, action: str) -> dict:
         with self._lock:
@@ -65,6 +67,17 @@ class ActionManager:
             return asdict(job) if job else None
 
     def _command(self, action: str) -> list[str]:
+        if action == "module-preflight":
+            return [
+                sys.executable,
+                "-m",
+                "autody.cli",
+                "preflight",
+                "--config",
+                str(self.config_path),
+                "--module-data",
+                str(self.module_data_root or self.root / "data" / "modules" / "autody-test-center" / "data"),
+            ]
         if action == "startup-recovery":
             return [
                 sys.executable,
@@ -93,7 +106,7 @@ class ActionManager:
             "scan-friends",
             "refresh-friend-avatars",
             "repair-playwright",
-            "refresh-account-profile", "preflight",
+            "refresh-account-profile", "preflight", "module-preflight",
         }:
             return [
                 sys.executable,

@@ -1,6 +1,18 @@
-# AutoDy
+# AutoDy v1.3.0
 
-AutoDy 续火助手是一个仅在 Windows 本机运行的管理台，用于管理浏览器自动化、续火目标、文案库、定时任务和运行记录。所有账号资料、浏览器登录状态、好友缓存、头像、日志和个人文案均只保存在本机。
+AutoDy 是仅在 Windows 本机运行的续火管理台，用于管理浏览器自动化、目标、文案、定时任务和运行记录。账号资料、浏览器登录状态、好友缓存、头像、日志和个人文案均只保存在本机。
+
+![AutoDy 演示总览](docs/screenshots/dashboard.png)
+
+图：安全夹具生成的演示总览，不包含真实账号或好友资料。
+
+![AutoDy 演示好友管理](docs/screenshots/friends.png)
+
+图：紧凑配置好友卡片与候选好友区域。
+
+![AutoDy 测试中心](docs/screenshots/test-center.png)
+
+图：安装后作为“设置”的子页面显示；预检始终只读。
 
 ## 功能概览
 
@@ -12,7 +24,7 @@ AutoDy 续火助手是一个仅在 Windows 本机运行的管理台，用于管�
 - 可筛选、脱敏、按日期保存和可归档的日志中心；支持安全备份与迁移。
 - 运行环境中心可查看本机服务身份、Chromium、登录、计划任务和运行状态，并提供安全修复入口。
 
-测试中心默认未安装。需要只读预检、受控失败夹具或运行环境诊断时，可在“设置 > 可选模块”安装官方 `AutoDy-Test-Center.autody-module.zip`，安装后从“设置 > 测试中心”打开。卸载会永久删除模块自己的测试历史、设置和目标覆盖，不会影响普通好友、文案、发送记录或浏览器资料。
+测试中心 1.1.0 默认未安装。需要只读预检、受控失败夹具或运行环境诊断时，可在“设置 > 可选模块”安装官方 `AutoDy-Test-Center.autody-module.zip`，安装后从“设置 > 测试中心”打开。卸载会永久删除模块自己的测试历史、设置和目标覆盖，不会影响普通好友、文案、发送记录或浏览器资料。详细说明见 [文档索引](docs/INDEX.md)。
 
 ## Windows 安装与首次启动
 
@@ -82,4 +94,4 @@ cd ..
 
 参见 [LICENSE](LICENSE) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
-Maintained as part of the AutoDy Project.
+当前版本：AutoDy 1.3.0 / Test Center 1.1.0。完整版本记录见 [CHANGELOG](CHANGELOG.md)，安全说明见 [SECURITY](SECURITY.md)。

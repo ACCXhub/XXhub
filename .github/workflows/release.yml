@@ -32,4 +32,6 @@ jobs:
           files: |
             output/AutoDy-Windows-Portable.zip
             output/AutoDy-Windows-Portable.zip.sha256
+            output/AutoDy-Test-Center.autody-module.zip
+            output/AutoDy-Test-Center.autody-module.zip.sha256
           body_path: docs/RELEASE_NOTES.md

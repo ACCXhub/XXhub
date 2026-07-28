@@ -176,8 +176,8 @@ def test_preflight_routes_validate_target_ids_and_return_masked_persistence(tmp_
 
 
 def _install_test_center(config_path: Path) -> None:
-    archive = build_module_archive(config_path.parent / "AutoDy-Test-Center.autody-module.zip", version="1.0.0")
-    ModuleManager(config_path.parent / "data", core_version="1.2.0").install(archive)
+    archive = build_module_archive(config_path.parent / "AutoDy-Test-Center.autody-module.zip", version="1.1.0", core_version="1.3.0")
+    ModuleManager(config_path.parent / "data", core_version="1.3.0").install(archive)
 
 
 def test_target_settings_and_today_plan_are_test_center_routes(tmp_path: Path):
