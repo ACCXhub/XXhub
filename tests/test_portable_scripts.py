@@ -63,7 +63,9 @@ def test_dashboard_launcher_and_shortcut_are_portable_and_use_icon():
         "('{0},0' -f $Icon)",
     ]:
         assert token in shortcut
-    assert "start-dashboard.cmd" in shortcut or "autody-dashboard.cmd" in shortcut
+    assert "start-dashboard.vbs" in shortcut
+    assert "wscript.exe" in shortcut
+    assert "start-dashboard.cmd" not in shortcut
     assert "C:\\Users\\Administrator" not in shortcut
 
 

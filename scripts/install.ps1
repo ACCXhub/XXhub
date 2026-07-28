@@ -195,7 +195,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $Root "messages.txt"))) {
 }
 
 Invoke-NativeChecked -Stage "Verify AutoDy installation" -FilePath $Python -Arguments @("-m", "autody.cli", "doctor", "--config", $Config)
-$Shortcut = & (Join-Path $Root "scripts\install-shortcut.ps1")
+$Shortcut = & (Join-Path $Root "scripts\install-shortcut.ps1") -ProjectRoot $Root
 if (-not $Shortcut) {
     throw "Shortcut installer returned no shortcut path."
 }
