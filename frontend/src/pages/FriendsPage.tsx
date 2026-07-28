@@ -41,6 +41,7 @@ export function FriendsPage({ notify }: { notify: (message: string) => void }) {
       setConfig(nextConfig);
       setFriends(nextFriends.friends);
       setDiscovery(nextDiscovery.scanned_at ? nextDiscovery : null);
+      return nextDiscovery;
     } catch (error) {
       notify(error instanceof Error ? error.message : "好友配置加载失败");
     }
@@ -57,9 +58,9 @@ export function FriendsPage({ notify }: { notify: (message: string) => void }) {
       refreshWasRunning.current = true;
       return;
     }
-    if (refreshWasRunning.current && discovery?.last_result?.status === "completed") {
+    if (refreshWasRunning.current && discovery?.last_result?.completed_bottom_reached) {
       const result = discovery.last_result;
-      notify(`扫描完成：发现 ${result.candidates_found ?? 0} 个聊天对象，新增候选 ${result.new_candidates ?? 0} 个，更新头像 ${result.avatars_updated ?? 0} 个，失败 ${result.avatars_failed ?? 0} 个。`);
+      notify(`扫描完成：识别 ${result.candidates_found ?? 0} 个，新增 ${result.new_candidates ?? 0} 个，更新 ${result.avatars_updated ?? 0} 个，移除过期缓存 ${result.removed_stale_candidates ?? 0} 个。`);
       refreshWasRunning.current = false;
     }
   }, [discovery?.last_result, discovery?.refresh_running, notify]);
@@ -72,8 +73,9 @@ export function FriendsPage({ notify }: { notify: (message: string) => void }) {
       const job = await api.scanFriends();
       const finished = await api.waitForAction(job.id);
       if (finished.status === "failed") throw new Error("好友识别失败，请查看运行日志");
-      await load();
-      notify("好友识别完成，候选列表已更新");
+      const nextDiscovery = await load();
+      const result = nextDiscovery?.last_result;
+      notify(result?.completed_bottom_reached ? `扫描完成：识别 ${result.candidates_found ?? 0} 个，新增 ${result.new_candidates ?? 0} 个，更新 ${result.avatars_updated ?? 0} 个，移除过期缓存 ${result.removed_stale_candidates ?? 0} 个。` : "好友识别完成，候选列表已更新");
     } catch (error) {
       notify(error instanceof Error ? error.message : "好友识别失败");
     } finally {

@@ -192,6 +192,9 @@ input:focus, textarea:focus, select:focus { border-color: #5797ef; box-shadow: 0
 .log-panel > pre { min-height: 520px; max-height: 70vh; margin: 0; padding: 20px; overflow: auto; color: #d8e4f4; background: #0c1c31; font: 12px/1.65 ui-monospace, "Cascadia Code", monospace; white-space: pre-wrap; }
 .log-filters { padding: 12px 16px; display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 10px; border-bottom: 1px solid #e8edf3; }
 .log-filters label { display: grid; gap: 5px; color: #66748a; font-size: 11px; }
+.filter-summary { display: flex; gap: 10px; align-items: center; padding: 9px 16px; color: #66748a; font-size: 12px; border-bottom: 1px solid #edf1f5; }
+.text-button { display: inline-flex; align-items: center; gap: 5px; padding: 0; border: 0; color: #1769e8; background: transparent; font: inherit; cursor: pointer; }
+.diagnostic-copy { margin-top: 9px; }
 .structured-logs { display: grid; }
 .log-entry { padding: 13px 16px; border-bottom: 1px solid #edf1f5; }
 .log-entry.error { background: #fffafa; }
@@ -230,6 +233,18 @@ input:focus, textarea:focus, select:focus { border-color: #5797ef; box-shadow: 0
 .issue-item strong { font-size: 12px; font-weight: 600; white-space: pre-wrap; }
 .issue-item small { color: #8b97a8; font-size: 10px; }
 .empty-state.compact { padding: 28px; }
+.module-card { display: flex; gap: 20px; justify-content: space-between; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; background: #fbfdff; }
+.module-card-main { min-width: 0; }
+.module-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.module-title strong { font-size: 16px; }
+.module-card p { margin: 8px 0; color: #66748a; }
+.module-facts { display: flex; gap: 22px; margin: 14px 0 0; flex-wrap: wrap; }
+.module-facts div { display: grid; gap: 2px; }
+.module-facts dt { color: #7d899b; font-size: 12px; }
+.module-facts dd { margin: 0; font-size: 13px; }
+.module-actions { display: flex; align-items: flex-start; justify-content: flex-end; gap: 8px; flex-wrap: wrap; min-width: 230px; }
+.module-notice { color: #1769e8 !important; }
+.module-error { color: #c53d3d !important; }
 
 @media (max-width: 1050px) {
   .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -263,4 +278,6 @@ input:focus, textarea:focus, select:focus { border-color: #5797ef; box-shadow: 0
   .pack-preview ol { columns: 1; }
   .settings-form label { align-items: flex-start; flex-direction: column; }
   .settings-form input:not([type="checkbox"]), .settings-form select, .preview-setting code { width: 100%; }
+  .module-card { flex-direction: column; }
+  .module-actions { min-width: 0; justify-content: flex-start; }
 }

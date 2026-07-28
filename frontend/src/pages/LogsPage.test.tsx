@@ -28,15 +28,26 @@ test("shows masked summaries and keeps traceback details collapsed", async () =>
   expect(screen.queryByText("小明")).not.toBeInTheDocument();
 });
 
+test("reloads when filters change and can reset all active filters", async () => {
+  render(<LogsPage />);
+  const { api } = await import("../api");
+  await screen.findByText("发送失败：好友#1234");
+  fireEvent.change(screen.getByLabelText("日志级别"), { target: { value: "ERROR" } });
+  await waitFor(() => expect(api.logs).toHaveBeenLastCalledWith(expect.objectContaining({ level: "ERROR" })));
+  expect(screen.getByText(/筛选条件：ERROR/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "重置筛选" }));
+  await waitFor(() => expect(api.logs).toHaveBeenLastCalledWith(expect.objectContaining({ level: "" })));
+});
+
 test("previews cleanup, allows cancel, and confirms only explicitly", async () => {
   const alert = vi.spyOn(window, "alert").mockImplementation(() => undefined);
   render(<LogsPage />);
 
-  fireEvent.click(await screen.findByText("立即整理日志"));
+  fireEvent.click(await screen.findByText("整理预览"));
   expect(await screen.findByRole("dialog", { name: "日志整理确认" })).toBeInTheDocument();
   fireEvent.click(screen.getByText("取消"));
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-  fireEvent.click(screen.getByText("立即整理日志"));
+  fireEvent.click(screen.getByText("整理预览"));
   fireEvent.click(await screen.findByText("确认整理"));
   await waitFor(() => expect(alert).toHaveBeenCalledWith(expect.stringContaining("已归档 2 个日志文件")));
   alert.mockRestore();
