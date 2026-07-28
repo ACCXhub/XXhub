@@ -39,6 +39,7 @@ export function Sidebar({
   account,
   onRefreshAccount,
   testCenterInstalled = false,
+  testCenterActive = false,
   onOpenTestCenter = () => undefined
 }: {
   active: ViewName;
@@ -46,6 +47,7 @@ export function Sidebar({
   account: AccountProfile | null;
   onRefreshAccount: () => void;
   testCenterInstalled?: boolean;
+  testCenterActive?: boolean;
   onOpenTestCenter?: () => void;
 }) {
   const verified = account?.profile_status === "verified" && account.is_self;
@@ -62,11 +64,11 @@ export function Sidebar({
       <button className="account-refresh" onClick={onRefreshAccount} disabled={Boolean(account?.refresh_running)}>刷新当前账号资料</button>
       <nav aria-label="主导航">
         {navigation.map(([value, label, Icon]) => <div key={value} className="nav-group">
-          <button className={active === value ? "nav-item active" : "nav-item"} onClick={() => onChange(value)}>
+          <button className={active === value ? `nav-item ${value === "settings" && testCenterActive ? "parent-active" : "active"}` : "nav-item"} onClick={() => onChange(value)}>
             <Icon size={20} />
             <span>{label}</span>
           </button>
-          {value === "settings" && testCenterInstalled && <button className={active === "settings" ? "nav-item nav-item-child active" : "nav-item nav-item-child"} onClick={onOpenTestCenter}>
+          {value === "settings" && testCenterInstalled && <button className={testCenterActive ? "nav-item nav-item-child test-center-active" : "nav-item nav-item-child"} onClick={onOpenTestCenter}>
             <FlaskConical size={18} />
             <span>测试中心</span>
           </button>}
