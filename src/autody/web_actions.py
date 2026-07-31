@@ -6,9 +6,11 @@ import sys
 import threading
 import uuid
 
+from autody.failures import failure_detail
 
 BROWSER_ACTIONS = {
     "run",
+    "run-target",
     "login",
     "health-check",
     "scan-friends",
@@ -34,6 +36,8 @@ class ActionJob:
     started_at: str = ""
     finished_at: str | None = None
     exit_code: int | None = None
+    target_id: str | None = None
+    failure: dict | None = None
 
 
 class ActionManager:
@@ -45,7 +49,7 @@ class ActionManager:
         self._executor = executor or subprocess.run
         self.module_data_root: Path | None = None
 
-    def start(self, action: str) -> dict:
+    def start(self, action: str, *, target_id: str | None = None) -> dict:
         with self._lock:
             if action in BROWSER_ACTIONS and any(
                 job.status == "running" and job.action in BROWSER_ACTIONS
@@ -56,6 +60,7 @@ class ActionManager:
                 id=uuid.uuid4().hex,
                 action=action,
                 started_at=datetime.now().isoformat(timespec="seconds"),
+                target_id=target_id,
             )
             self.jobs[job.id] = job
         threading.Thread(target=self._execute, args=(job,), daemon=True).start()
@@ -66,7 +71,29 @@ class ActionManager:
             job = self.jobs.get(job_id)
             return asdict(job) if job else None
 
-    def _command(self, action: str) -> list[str]:
+    def browser_action_running(self) -> bool:
+        with self._lock:
+            return any(
+                job.status == "running" and job.action in BROWSER_ACTIONS
+                for job in self.jobs.values()
+            )
+
+    def _command(self, action: str, target_id: str | None = None) -> list[str]:
+        if action == "run-target":
+            if not target_id:
+                raise ValueError("target_id is required for run-target")
+            return [
+                sys.executable,
+                "-m",
+                "autody.cli",
+                "run",
+                "--config",
+                str(self.config_path),
+                "--source",
+                "retry",
+                "--target-id",
+                target_id,
+            ]
         if action == "module-preflight":
             return [
                 sys.executable,
@@ -134,17 +161,34 @@ class ActionManager:
     def _execute(self, job: ActionJob) -> None:
         try:
             completed = self._executor(
-                self._command(job.action),
+                self._command(job.action, job.target_id),
                 cwd=self.root,
                 check=False,
             )
             with self._lock:
                 job.exit_code = completed.returncode
                 job.status = "success" if completed.returncode == 0 else "failed"
-        except Exception:
+                if completed.returncode != 0:
+                    job.failure = failure_detail(
+                        "unknown_exception",
+                        stage="browser_opened",
+                        diagnostic_details={
+                            "action": job.action,
+                            "exit_code": completed.returncode,
+                        },
+                    ).model_dump(mode="json")
+        except Exception as exc:
             with self._lock:
                 job.exit_code = 1
                 job.status = "failed"
+                job.failure = failure_detail(
+                    "unknown_exception",
+                    stage="browser_opened",
+                    diagnostic_details={
+                        "action": job.action,
+                        "exception_type": type(exc).__name__,
+                    },
+                ).model_dump(mode="json")
         finally:
             with self._lock:
                 job.finished_at = datetime.now().isoformat(timespec="seconds")

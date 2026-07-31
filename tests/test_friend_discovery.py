@@ -19,6 +19,29 @@ from autody.friend_discovery import (
 )
 
 
+def write_account_profile(root: Path, scope: str) -> None:
+    (root / "data" / "account-avatar").mkdir(parents=True, exist_ok=True)
+    (root / "data" / "account-avatar" / "profile.png").write_bytes(b"avatar")
+    (root / "data" / "account-profile.json").write_text(
+        json.dumps(
+            {
+                "account_profile_id": scope,
+                "account_id_digest": f"digest-{scope}",
+                "display_name": "测试账号",
+                "avatar_cache_key": "profile",
+                "avatar_version": "v1",
+                "is_self": True,
+                "verification_source": "test_fixture",
+                "profile_status": "verified",
+                "verified_at": "2026-07-30T08:00:00",
+                "last_updated_at": "2026-07-30T08:00:00",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
 class FakeNamesLocator:
     def __init__(self, page):
         self.page = page
@@ -499,11 +522,13 @@ def test_failed_scan_records_failure_without_erasing_previous_candidates(tmp_pat
     assert cached is not None
     assert [item.display_name for item in cached.candidates] == ["保留候选"]
     assert cached.scanned_at == "2026-07-04T08:00:00"
-    assert cached.last_result == {
-        "status": "failed",
-        "finished_at": "2026-07-05T08:00:00",
-        "error": "chat list unavailable",
-    }
+    assert cached.last_result["status"] == "failed"
+    assert cached.last_result["finished_at"] == "2026-07-05T08:00:00"
+    assert cached.last_result["error"] == "好友候选刷新未能完成"
+    assert cached.last_result["failure"]["reason_code"] == "friend_discovery_failed"
+    assert cached.last_result["failure"]["stage"] == "conversation_located"
+    assert cached.last_result["failure"]["suggested_action_zh"] == "重新刷新候选"
+    assert "chat list unavailable" not in output.read_text(encoding="utf-8")
 
 
 def test_discovery_cache_freshness_uses_a_24_hour_window():
@@ -584,7 +609,7 @@ def test_automatic_scan_does_not_recapture_a_fresh_cached_avatar(tmp_path: Path)
     assert screenshot_calls == []
 
 
-def test_configured_target_is_kept_when_a_later_scan_does_not_find_it(tmp_path: Path):
+def test_completed_scan_replaces_candidate_snapshot_but_preserves_target(tmp_path: Path):
     selectors = ChatSelectors.test_defaults()
     config = AppConfig(targets=[Target(name="已配置目标")])
     output = tmp_path / "data" / "discovered_friends.json"
@@ -603,10 +628,74 @@ def test_configured_target_is_kept_when_a_later_scan_does_not_find_it(tmp_path: 
         now=lambda: datetime(2026, 7, 5, 8, 0, 0),
     )
 
-    candidate = next(item for item in result.candidates if item.display_name == "已配置目标")
     assert [target.name for target in config.targets] == ["已配置目标"]
-    assert candidate.match_status == "configured"
-    assert candidate.presence_status == "stale"
+    assert result.candidates == []
+    assert result.last_result["removed_stale_candidates"] == 1
+
+
+def test_bound_current_candidate_wins_and_stale_same_name_identity_is_removed(tmp_path: Path):
+    selectors = ChatSelectors.test_defaults()
+    config = AppConfig(targets=[Target(name="同名目标")])
+    output = tmp_path / "data" / "discovered_friends.json"
+    first = discover_friends(
+        config,
+        FakePage(
+            selectors,
+            [[
+                FakeConversationItem(selectors, "同名目标", b"a", "stable-a"),
+                FakeConversationItem(selectors, "同名目标", b"b", "stable-b"),
+            ]],
+        ),
+        selectors,
+        output,
+    )
+    config.targets[0].candidate_id = first.candidates[0].candidate_id
+
+    current = discover_friends(
+        config,
+        FakePage(
+            selectors,
+            [[FakeConversationItem(selectors, "同名目标", b"a2", "stable-a")]],
+        ),
+        selectors,
+        output,
+        force_avatar_refresh=True,
+    )
+
+    assert len(current.candidates) == 1
+    assert current.candidates[0].candidate_id == config.targets[0].candidate_id
+    assert current.candidates[0].match_status == "configured"
+
+
+def test_account_switch_replaces_snapshot_and_scopes_candidate_identity(tmp_path: Path):
+    selectors = ChatSelectors.test_defaults()
+    output = tmp_path / "data" / "discovered_friends.json"
+    write_account_profile(tmp_path, "account-scope-a")
+    first = discover_friends(
+        AppConfig(),
+        FakePage(
+            selectors,
+            [[FakeConversationItem(selectors, "候选", b"a", "same-row-id")]],
+        ),
+        selectors,
+        output,
+    )
+    write_account_profile(tmp_path, "account-scope-b")
+    second = discover_friends(
+        AppConfig(),
+        FakePage(
+            selectors,
+            [[FakeConversationItem(selectors, "候选", b"b", "same-row-id")]],
+        ),
+        selectors,
+        output,
+        force_avatar_refresh=True,
+    )
+
+    assert first.account_scope == "account-scope-a"
+    assert second.account_scope == "account-scope-b"
+    assert len(second.candidates) == 1
+    assert second.candidates[0].candidate_id != first.candidates[0].candidate_id
 
 
 def test_scan_progress_records_the_browser_lock_release_stage(tmp_path: Path):

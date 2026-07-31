@@ -7,7 +7,7 @@ $env:PLAYWRIGHT_SKIP_BROWSER_GC = "1"
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
 $Config = Join-Path $Root "config.yaml"
 $LogDir = Join-Path $Root "data\logs"
-$Log = Join-Path $LogDir "scheduler.log"
+$Log = Join-Path $LogDir ("scheduler-{0}.log" -f (Get-Date -Format "yyyy-MM-dd"))
 $NotificationDir = Join-Path $Root "data\notifications"
 $Alert = Join-Path $NotificationDir "need-attention.txt"
 $NotificationsEnabled = -not ((Get-Content -Raw $Config -ErrorAction SilentlyContinue) -match '(?m)^completion_notifications_enabled:\s*false\s*$')
@@ -54,17 +54,12 @@ foreach ($delay in $RetryDelaysSeconds) {
 }
 
 if ($exitCode -ne 0 -and $combinedOutput -match "AUTODY_FINAL_NOTIFICATION=1") {
-    $message = @"
-AutoDy 每日发送任务失败。
-时间：$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-退出码：$exitCode
-
-请查看：
-$Log
-
-如果提示登录失效，请打开桌面的 AutoDy 管理台查看“需要处理”。
-"@
-    $message | Set-Content -Encoding UTF8 $Alert
+    if (Test-Path -LiteralPath $Alert) {
+        $message = (Get-Content -Raw -Encoding UTF8 -LiteralPath $Alert).Trim()
+    } else {
+        $message = "AutoDy 每日发送任务未完成，请打开管理台查看中文原因和处理建议。"
+        $message | Set-Content -Encoding UTF8 $Alert
+    }
     if ($NotificationsEnabled) {
         Add-Type -AssemblyName PresentationFramework
         [System.Windows.MessageBox]::Show(

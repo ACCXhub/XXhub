@@ -21,7 +21,13 @@ from autody.chat import (
     login as browser_login,
     open_chat,
 )
-from autody.account_profile import AccountProfileUnavailable, resolve_account_profile
+from autody.account_profile import (
+    AccountProfileUnavailable,
+    bindings_revalidation_required,
+    complete_binding_revalidation,
+    mark_bindings_for_revalidation,
+    resolve_account_profile,
+)
 from autody.config import AppConfig, load_config, save_config
 from autody.friend_discovery import (
     ScanProgress,
@@ -81,6 +87,26 @@ def _outcome_store(config: AppConfig) -> TaskOutcomeStore:
     return TaskOutcomeStore(config.state_file.parent / "history" / "task-outcomes.json")
 
 
+def _final_failure_message(result: RunResult) -> str:
+    primary = next(
+        (detail for detail in result.target_failures.values() if detail.uncertain_send),
+        next(iter(result.target_failures.values()), None),
+    )
+    if primary is not None:
+        prefix = (
+            "发送结果不确定，已禁止自动重试"
+            if result.status is RunStatus.UNCERTAIN
+            else "安全重试已耗尽"
+        )
+        return (
+            f"{prefix}：{primary.user_summary_zh}。"
+            f"建议：{primary.suggested_action_zh}。"
+        )
+    if result.status is RunStatus.UNCERTAIN:
+        return "发送结果无法确认，为防止重复发送已停止。建议：查看详情。"
+    return "安全重试已耗尽，发送前条件仍不可用。建议：查看详情。"
+
+
 def _report_daily_result(config: AppConfig, result: RunResult) -> None:
     message = "当天所有目标此前已完成。" if result.status is RunStatus.ALREADY_DONE else f"本次发送完成：成功 {result.sent_count} 个，失败 {result.failed_count} 个。"
     logging.info(message)
@@ -91,11 +117,7 @@ def _report_daily_result(config: AppConfig, result: RunResult) -> None:
         typer.echo(detail, err=True)
         raise typer.Exit(10)
     if result.status in {RunStatus.FINAL_FAILED, RunStatus.UNCERTAIN}:
-        detail = (
-            f"发送结果不确定，已禁止自动重试：{result.error or '请检查发送记录'}"
-            if result.status is RunStatus.UNCERTAIN
-            else f"安全重试已耗尽：{result.error or '发送前条件持续不可用'}"
-        )
+        detail = _final_failure_message(result)
         notification_due = bool(result.run_id and _outcome_store(config).notification_due(result.run_id))
         if notification_due:
             _write_attention(config, detail)
@@ -151,6 +173,18 @@ def _run_friend_scan(
                     )
                     if result.config_changed:
                         save_config(config_path, loaded)
+                    complete_binding_revalidation(
+                        loaded.state_file.parent,
+                        account_scope=result.account_scope,
+                        target_candidate_ids=[
+                            target.candidate_id for target in loaded.targets
+                        ],
+                        current_candidate_ids={
+                            candidate.candidate_id
+                            for candidate in result.candidates
+                            if candidate.presence_status == "current"
+                        },
+                    )
             finally:
                 progress.update("releasing_browser_lock")
         progress.finish(
@@ -284,6 +318,8 @@ def login(config: Path = typer.Option(Path("config.yaml"), "--config")):
                 nonlocal scan_message
                 try:
                     profile = resolve_account_profile(page, _project_root(config))
+                    if profile.switched:
+                        mark_bindings_for_revalidation(loaded.state_file.parent)
                     logging.info("当前账号资料已验证并刷新，账号切换=%s", profile.switched)
                 except AccountProfileUnavailable as exc:
                     logging.warning("当前账号资料未验证：%s", exc)
@@ -298,6 +334,18 @@ def login(config: Path = typer.Option(Path("config.yaml"), "--config")):
                     )
                     if result.config_changed:
                         save_config(config, loaded)
+                    complete_binding_revalidation(
+                        loaded.state_file.parent,
+                        account_scope=result.account_scope,
+                        target_candidate_ids=[
+                            target.candidate_id for target in loaded.targets
+                        ],
+                        current_candidate_ids={
+                            candidate.candidate_id
+                            for candidate in result.candidates
+                            if candidate.presence_status == "current"
+                        },
+                    )
                     scan_message = f"候选好友已刷新：发现 {len(result.candidates)} 个记录。"
                     logging.info(scan_message)
                 except Exception as exc:
@@ -339,6 +387,8 @@ def refresh_account_profile(config: Path = typer.Option(Path("config.yaml"), "--
                 home=_project_root(config),
             ) as page:
                 profile = resolve_account_profile(page, _project_root(config))
+            if profile.switched:
+                mark_bindings_for_revalidation(loaded.state_file.parent)
             typer.echo("检测到登录账号已切换，账号资料已更新。" if profile.switched else "当前账号资料已刷新。")
     except AccountProfileUnavailable as exc:
         typer.echo(f"当前账号资料未验证：{exc}")
@@ -365,6 +415,11 @@ def health_check(config: Path = typer.Option(Path("config.yaml"), "--config")):
                 should_recover = loaded.startup_recovery_enabled and recovery_due(
                     loaded, StateStore(loaded.state_file).load(), datetime.now()
                 )
+                if should_recover and bindings_revalidation_required(
+                    loaded.state_file.parent
+                ):
+                    should_recover = False
+                    logging.warning("账号绑定待重新验证，同日恢复发送已暂停。")
                 if should_recover:
                     logging.info("检测到今日任务错过，启动同日恢复运行。")
                     chat = DouyinChat(
@@ -387,6 +442,18 @@ def health_check(config: Path = typer.Option(Path("config.yaml"), "--config")):
                             )
                             if result.config_changed:
                                 save_config(config, loaded)
+                            complete_binding_revalidation(
+                                loaded.state_file.parent,
+                                account_scope=result.account_scope,
+                                target_candidate_ids=[
+                                    target.candidate_id for target in loaded.targets
+                                ],
+                                current_candidate_ids={
+                                    candidate.candidate_id
+                                    for candidate in result.candidates
+                                    if candidate.presence_status == "current"
+                                },
+                            )
                             logging.info("登录健康检查已刷新候选好友：发现 %s 个记录。", len(result.candidates))
                         except Exception as exc:
                             record_discovery_failure(discovery_path, str(exc))
@@ -586,15 +653,35 @@ def ui(
 def run(
     config: Path = typer.Option(Path("config.yaml"), "--config"),
     source: str = typer.Option("manual", "--source"),
+    target_id: str | None = typer.Option(
+        None,
+        "--target-id",
+        help="仅重试具有当前稳定绑定的指定目标",
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="只检查任务可启动性，不打开浏览器或发送消息"),
 ):
     if source not in TRIGGER_SOURCES:
         raise typer.BadParameter(f"未知任务来源：{source}")
     loaded = load_config(config)
+    if target_id is not None and not any(
+        target.enabled and target.stable_id == target_id
+        for target in loaded.targets
+    ):
+        raise typer.BadParameter("定向重试目标不存在、未启用或缺少稳定标识")
     if dry_run:
-        enabled = sum(1 for target in loaded.targets if target.enabled)
+        enabled = (
+            1
+            if target_id is not None
+            else sum(1 for target in loaded.targets if target.enabled)
+        )
         typer.echo(f"模拟运行已通过：将处理 {enabled} 个启用目标；未打开浏览器，未发送消息。")
         return
+    if bindings_revalidation_required(loaded.state_file.parent):
+        typer.echo(
+            "账号绑定待重新验证，定时发送已暂停。请登录并重新扫描好友。",
+            err=True,
+        )
+        raise typer.Exit(4)
     result: RunResult | None = None
     try:
         with SingleInstanceLock(loaded.lock_file):
@@ -616,7 +703,12 @@ def run(
                         confirmation_delay_ms=max(250, loaded.confirmation_timeout_ms // 3),
                         friend_search_timeout_ms=loaded.friend_search_timeout_ms,
                     )
-                    result = run_daily(loaded, chat, trigger_source=source)
+                    result = run_daily(
+                        loaded,
+                        chat,
+                        trigger_source=source,
+                        target_ids={target_id} if target_id is not None else None,
+                    )
             _write_health(loaded, "success")
             _report_daily_result(loaded, result)
     except TaskAlreadyRunning:

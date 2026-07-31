@@ -10,6 +10,8 @@ import uuid
 
 from pydantic import BaseModel, Field
 
+from autody.failures import FailureDetail
+
 
 TaskType = Literal["daily_send", "health_check", "login", "friend_scan", "system"]
 TriggerSource = Literal["scheduled", "manual", "startup_recovery", "retry"]
@@ -34,6 +36,7 @@ class TaskRunRecord(BaseModel):
     error_summary: str | None = None
     failed_target_ids: list[str] = Field(default_factory=list)
     confirmation_results: dict[str, str] = Field(default_factory=dict)
+    target_failures: dict[str, FailureDetail] = Field(default_factory=dict)
 
 
 class HistoryPage(BaseModel):

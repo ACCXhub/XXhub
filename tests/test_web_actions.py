@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 import threading
 
 import pytest
@@ -24,3 +25,57 @@ def test_action_manager_rejects_second_browser_action_while_first_runs(tmp_path:
             manager.start(action)
 
     release.set()
+
+
+def test_targeted_retry_action_uses_stable_target_id_argument(tmp_path: Path):
+    commands = []
+
+    def execute(command, **_kwargs):
+        commands.append(command)
+        return type("Completed", (), {"returncode": 0})()
+
+    manager = ActionManager(tmp_path, tmp_path / "config.yaml", executor=execute)
+    job = manager.start("run-target", target_id="target-stable")
+
+    for _attempt in range(100):
+        completed = manager.get(job["id"])
+        if completed and completed["status"] != "running":
+            break
+        threading.Event().wait(0.01)
+
+    assert commands == [[
+        sys.executable,
+        "-m",
+        "autody.cli",
+        "run",
+        "--config",
+        str(tmp_path / "config.yaml"),
+        "--source",
+        "retry",
+        "--target-id",
+        "target-stable",
+    ]]
+
+
+def test_failed_action_job_exposes_structured_chinese_failure(tmp_path: Path):
+    def execute(_command, **_kwargs):
+        return type("Completed", (), {"returncode": 7})()
+
+    manager = ActionManager(tmp_path, tmp_path / "config.yaml", executor=execute)
+    job = manager.start("run")
+
+    for _attempt in range(100):
+        completed = manager.get(job["id"])
+        if completed and completed["status"] != "running":
+            break
+        threading.Event().wait(0.01)
+
+    assert completed["status"] == "failed"
+    assert completed["failure"]["stage"] == "browser_opened"
+    assert completed["failure"]["reason_code"] == "unknown_exception"
+    assert completed["failure"]["user_summary_zh"]
+    assert completed["failure"]["suggested_action_zh"]
+    assert completed["failure"]["diagnostic_details"] == {
+        "action": "run",
+        "exit_code": 7,
+    }

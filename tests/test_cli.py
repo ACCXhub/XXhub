@@ -1,10 +1,15 @@
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from typer.testing import CliRunner
 
 from autody.cli import app
+from autody.config import load_config
+from autody.failures import failure_detail
 from autody.friend_discovery import AvatarRefreshResult, FriendDiscoveryResult
+from autody.account_profile import mark_bindings_for_revalidation
 from autody.locking import SingleInstanceLock
+from autody.retry_state import TaskOutcomeStore
 from autody.runner import RunResult, RunStatus
 
 
@@ -189,6 +194,29 @@ def test_rejected_daily_run_keeps_existing_send_activity_marker(tmp_path: Path, 
     assert marker.is_file()
 
 
+def test_daily_run_is_blocked_before_browser_until_account_bindings_are_revalidated(
+    tmp_path: Path, monkeypatch
+):
+    (tmp_path / "messages.txt").write_text("早安\n", encoding="utf-8")
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "targets:\n  - name: 小明\nmessages_file: messages.txt\n",
+        encoding="utf-8",
+    )
+    mark_bindings_for_revalidation(tmp_path / "data")
+    monkeypatch.setattr(
+        "autody.cli.open_chat",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("blocked run must not open the browser")
+        ),
+    )
+
+    result = runner.invoke(app, ["run", "--config", str(config)])
+
+    assert result.exit_code == 4
+    assert "账号绑定待重新验证" in result.output
+
+
 def test_refresh_friend_avatars_uses_identity_safe_discovery_correction(
     tmp_path: Path, monkeypatch
 ):
@@ -342,6 +370,49 @@ def test_run_reports_completed_counts(tmp_path: Path, monkeypatch):
     assert "本次发送完成：成功 2 个，失败 0 个。" in result.stdout
 
 
+def test_completed_run_keeps_zero_exit_code_when_log_append_fails(
+    tmp_path: Path, monkeypatch
+):
+    (tmp_path / "messages.txt").write_text("早安\n", encoding="utf-8")
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "targets:\n  - name: 小明\nmessages_file: messages.txt\n",
+        encoding="utf-8",
+    )
+
+    class Context:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr("autody.cli.open_chat", lambda *_args, **_kwargs: Context())
+    monkeypatch.setattr("autody.cli.DouyinChat", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        "autody.cli.run_daily",
+        lambda *_args, **_kwargs: RunResult(
+            status=RunStatus.COMPLETED,
+            total_targets=1,
+            sent_count=1,
+            skipped_count=0,
+            failed_count=0,
+        ),
+    )
+    monkeypatch.setattr(
+        "autody.logging_setup.os.open",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            PermissionError("locked test log")
+        ),
+    )
+
+    result = runner.invoke(app, ["run", "--config", str(config)])
+
+    assert result.exit_code == 0
+    assert "本次发送完成：成功 1 个，失败 0 个。" in result.stdout
+    assert "--- Logging error ---" not in result.output
+
+
 def test_run_reports_retry_pending_without_a_failure_exit(tmp_path: Path, monkeypatch):
     (tmp_path / "messages.txt").write_text("早安\n", encoding="utf-8")
     config = tmp_path / "config.yaml"
@@ -375,6 +446,135 @@ def test_run_reports_retry_pending_without_a_failure_exit(tmp_path: Path, monkey
     assert result.exit_code == 10
     assert "本次发送完成：成功 1 个，失败 1 个。" in result.stdout
     assert "安全重试已安排" in result.output
+
+
+def test_final_failure_notification_uses_target_reason_and_action(
+    tmp_path: Path,
+    monkeypatch,
+):
+    (tmp_path / "messages.txt").write_text("早安\n", encoding="utf-8")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "targets:\n"
+        "  - name: 目标\n"
+        "    stable_id: target-one\n"
+        "    candidate_id: candidate-one\n"
+        "messages_file: messages.txt\n",
+        encoding="utf-8",
+    )
+    loaded = load_config(config_path)
+    now = datetime(2026, 7, 30, 7, 30)
+    outcome_store = TaskOutcomeStore(
+        loaded.state_file.parent / "history" / "task-outcomes.json"
+    )
+    outcome_store.schedule("run-final", now.date().isoformat(), now + timedelta(hours=1))
+    outcome_store.start("run-final", now)
+    outcome_store.safe_failure(
+        "run-final",
+        now,
+        "conversation_not_found",
+        max_retries=0,
+    )
+    detail = failure_detail(
+        "conversation_not_found",
+        stage="conversation_located",
+        run_id="run-final",
+        target_stable_id="target-one",
+        binding_valid=True,
+        account_scope_matches=True,
+    )
+
+    class Context:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr("autody.cli.open_chat", lambda *_args, **_kwargs: Context())
+    monkeypatch.setattr("autody.cli.DouyinChat", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        "autody.cli.run_daily",
+        lambda *_args, **_kwargs: RunResult(
+            status=RunStatus.FINAL_FAILED,
+            total_targets=1,
+            sent_count=0,
+            skipped_count=0,
+            failed_count=1,
+            error="conversation_not_found",
+            run_id="run-final",
+            target_failures={"target-one": detail},
+        ),
+    )
+
+    result = runner.invoke(app, ["run", "--config", str(config_path)])
+
+    notice = (
+        loaded.state_file.parent / "notifications" / "need-attention.txt"
+    ).read_text(encoding="utf-8")
+    assert result.exit_code == 2
+    assert "无法在当前会话列表中找到目标" in notice
+    assert "建议：仅重试此目标" in notice
+    assert "conversation_not_found" not in notice
+
+
+def test_run_target_id_passes_only_current_stable_binding_to_runner(
+    tmp_path: Path,
+    monkeypatch,
+):
+    (tmp_path / "messages.txt").write_text("早安\n", encoding="utf-8")
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "\n".join(
+            [
+                "targets:",
+                "  - name: 目标",
+                "    stable_id: target-current",
+                "    candidate_id: candidate-current",
+                "messages_file: messages.txt",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    captured = {}
+
+    class Context:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr("autody.cli.open_chat", lambda *_args, **_kwargs: Context())
+    monkeypatch.setattr("autody.cli.DouyinChat", lambda *_args, **_kwargs: object())
+
+    def fake_run_daily(*_args, **kwargs):
+        captured.update(kwargs)
+        return RunResult(
+            status=RunStatus.ALREADY_DONE,
+            total_targets=1,
+            sent_count=0,
+            skipped_count=1,
+            failed_count=0,
+        )
+
+    monkeypatch.setattr("autody.cli.run_daily", fake_run_daily)
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--config",
+            str(config),
+            "--source",
+            "retry",
+            "--target-id",
+            "target-current",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["target_ids"] == {"target-current"}
 
 
 def test_ui_starts_local_server(tmp_path: Path, monkeypatch):

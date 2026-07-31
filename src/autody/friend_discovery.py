@@ -22,7 +22,9 @@ from autody.chat import (
     conversation_row_identity,
     opaque_conversation_identity,
 )
+from autody.account_profile import load_account_profile
 from autody.config import AppConfig, Target
+from autody.failures import failure_detail
 
 
 _SAFE_LOCAL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
@@ -68,6 +70,7 @@ class FriendDiscoveryResult:
     config_changed: bool = False
     scan_id: str | None = None
     last_result: dict[str, object] = field(default_factory=dict)
+    account_scope: str | None = None
 
 
 @dataclass(frozen=True)
@@ -490,7 +493,17 @@ def discover_friends(
     progress: Callable[[str, int, int | None], None] | None = None,
 ) -> FriendDiscoveryResult:
     cache_dir = avatar_cache_dir or output_path.parent / "avatar-cache"
-    previous = load_discovered_friends(output_path)
+    previous_cache = load_discovered_friends(output_path)
+    profile = load_account_profile(output_path.parent.parent)
+    account_scope = profile.account_profile_id if profile else None
+    previous = previous_cache
+    if (
+        previous_cache
+        and previous_cache.account_scope
+        and account_scope
+        and previous_cache.account_scope != account_scope
+    ):
+        previous = None
     scanned_now = (now or datetime.now)()
     fresh_avatar_identities = (
         set()
@@ -552,12 +565,20 @@ def discover_friends(
             candidate_id = (
                 prior.candidate_id
                 if prior and _SAFE_LOCAL_ID.fullmatch(prior.candidate_id)
-                else _candidate_id(item.identity_key)
+                else _candidate_id(
+                    f"{account_scope}\0{item.identity_key}"
+                    if account_scope and item.identity_key
+                    else item.identity_key
+                )
             )
             target = targets_by_candidate_id.get(candidate_id)
             legacy_target = targets_by_id.get(candidate_id)
             if target is None and legacy_target is not None and not legacy_target.candidate_id:
-                candidate_id = _candidate_id(item.identity_key)
+                candidate_id = _candidate_id(
+                    f"{account_scope}\0{item.identity_key}"
+                    if account_scope and item.identity_key
+                    else item.identity_key
+                )
                 legacy_target.candidate_id = candidate_id
                 targets_by_candidate_id[candidate_id] = legacy_target
                 target = legacy_target
@@ -582,16 +603,9 @@ def discover_friends(
             # Cache ownership belongs to the candidate row, never to a
             # permanent target.  Targets resolve through their candidate_id.
             cache_id = candidate_id
-            uncertain = (
-                target is None
-                and scanned_name_counts[item.name] == 1
-                and any(
-                    prior_candidate.display_name == item.name
-                    and prior_candidate.candidate_id in targets_by_candidate_id
-                    for prior_candidate in (previous.candidates if previous else [])
-                )
-            )
-            match_status = "configured" if target else "needs_reassociation" if uncertain else "unconfigured"
+            # Nicknames and avatars may suggest a relink in the API, but a scan
+            # never silently changes a stable target binding.
+            match_status = "configured" if target else "unconfigured"
             if target:
                 configured_matched += 1
             if item.association_uncertain:
@@ -666,10 +680,9 @@ def discover_friends(
 
     removed_stale_candidates = 0
     if completed_bottom_reached and not partial_timeout:
-        linked_candidate_ids = set(targets_by_candidate_id)
         kept: list[FriendCandidate] = []
         for candidate in candidates:
-            if candidate.presence_status == "stale" and candidate.candidate_id not in linked_candidate_ids:
+            if candidate.presence_status == "stale":
                 removed_stale_candidates += 1
                 continue
             kept.append(candidate)
@@ -679,7 +692,7 @@ def discover_friends(
             for candidate in candidates
             if candidate.avatar_cache_key or candidate.candidate_id
         }
-        for candidate in previous.candidates if previous else []:
+        for candidate in previous_cache.candidates if previous_cache else []:
             key = candidate.avatar_cache_key or candidate.candidate_id
             if candidate.candidate_id not in {item.candidate_id for item in candidates} and key not in referenced_avatar_keys:
                 _avatar_path(cache_dir, key).unlink(missing_ok=True)
@@ -708,11 +721,12 @@ def discover_friends(
             "scanned_at": scanned_at,
             "scan_id": scan_id,
             "last_result": last_result,
+            "account_scope": account_scope,
             "candidates": [asdict(candidate) for candidate in candidates],
         },
     )
     return FriendDiscoveryResult(
-        scanned_at, candidates, output_path, config_changed, scan_id, last_result
+        scanned_at, candidates, output_path, config_changed, scan_id, last_result, account_scope
     )
 
 
@@ -799,6 +813,7 @@ def load_discovered_friends(path: Path) -> FriendDiscoveryResult | None:
             path,
             scan_id=str(payload["scan_id"]) if payload.get("scan_id") else None,
             last_result=last_result if isinstance(last_result, dict) else {},
+            account_scope=str(payload["account_scope"]) if payload.get("account_scope") else None,
         )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None
@@ -841,10 +856,24 @@ def record_discovery_failure(
     candidates = previous.candidates if previous else []
     scanned_at = previous.scanned_at if previous else None
     scan_id = previous.scan_id if previous else None
+    reason_code, stage = {
+        "lock_busy": ("browser_busy", "browser_opened"),
+        "login_unavailable": ("login_required", "account_verified"),
+        "page_load_failed": ("page_load_timeout", "browser_opened"),
+        "partial_timeout": ("friend_discovery_failed", "conversation_located"),
+        "cancelled": ("operation_cancelled", "conversation_located"),
+    }.get(status, ("friend_discovery_failed", "conversation_located"))
+    failure = failure_detail(
+        reason_code,
+        stage=stage,
+        account_scope=previous.account_scope if previous else None,
+        diagnostic_details={"discovery_status": status},
+    )
     last_result: dict[str, object] = {
         "status": status,
         "finished_at": finished_at,
-        "error": error,
+        "error": failure.user_summary_zh,
+        "failure": failure.model_dump(mode="json"),
         **(details or {}),
     }
     _write_discovery_payload(
@@ -854,7 +883,15 @@ def record_discovery_failure(
             "scanned_at": scanned_at,
             "scan_id": scan_id,
             "last_result": last_result,
+            "account_scope": previous.account_scope if previous else None,
             "candidates": [asdict(candidate) for candidate in candidates],
         },
     )
-    return FriendDiscoveryResult(scanned_at, candidates, path, scan_id=scan_id, last_result=last_result)
+    return FriendDiscoveryResult(
+        scanned_at,
+        candidates,
+        path,
+        scan_id=scan_id,
+        last_result=last_result,
+        account_scope=previous.account_scope if previous else None,
+    )

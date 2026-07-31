@@ -4,6 +4,7 @@ This module intentionally reads only the page's explicit current-login store.
 It never inspects friend candidates, conversation rows, or message content.
 """
 
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from hashlib import sha256
@@ -11,8 +12,17 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+from typing import NewType
 
 from PIL import Image
+
+
+MANAGED_DOUYIN_ORIGINS = ("https://www.douyin.com",)
+_BINDING_STATE_FILE = "account-binding-state.json"
+
+PlatformAccountIdDigest = NewType("PlatformAccountIdDigest", str)
+LocalProfileId = NewType("LocalProfileId", str)
+RunAccountScope = NewType("RunAccountScope", str)
 
 
 class AccountProfileUnavailable(RuntimeError):
@@ -34,6 +44,76 @@ class AccountProfile:
     switched: bool = False
 
 
+@dataclass(frozen=True)
+class AccountScopeEvaluation:
+    compatible: bool | None
+    reason_code: str | None
+    account_comparison: str
+    run_scope_comparison: str | None = None
+
+
+def _scope_comparison(
+    scope: str | None,
+    *,
+    local_profile_id: LocalProfileId,
+    platform_account_id_digest: PlatformAccountIdDigest,
+    prefix: str,
+) -> str:
+    if not scope:
+        return f"missing_{prefix}"
+    if scope == local_profile_id:
+        return f"{prefix}_matches_local_profile_id"
+    if scope == platform_account_id_digest:
+        return f"{prefix}_matches_platform_account_id_digest"
+    return f"{prefix}_matches_neither_current_namespace"
+
+
+def evaluate_account_scope(
+    profile: AccountProfile | None,
+    *,
+    binding_scope: str | None,
+    run_scope: RunAccountScope | str | None = None,
+) -> AccountScopeEvaluation:
+    """Compare current binding identity without treating account namespaces as strings."""
+    if profile is None:
+        return AccountScopeEvaluation(
+            compatible=False,
+            reason_code="login_required",
+            account_comparison="missing_authenticated_profile",
+            run_scope_comparison=None,
+        )
+    local_profile_id = LocalProfileId(profile.account_profile_id)
+    platform_digest = PlatformAccountIdDigest(profile.account_id_digest)
+    account_comparison = _scope_comparison(
+        binding_scope,
+        local_profile_id=local_profile_id,
+        platform_account_id_digest=platform_digest,
+        prefix="binding_scope",
+    )
+    run_scope_comparison = _scope_comparison(
+        str(run_scope) if run_scope else None,
+        local_profile_id=local_profile_id,
+        platform_account_id_digest=platform_digest,
+        prefix="run_scope",
+    )
+    if not binding_scope:
+        return AccountScopeEvaluation(
+            compatible=None,
+            reason_code=None,
+            account_comparison=account_comparison,
+            run_scope_comparison=run_scope_comparison,
+        )
+    compatible = account_comparison != (
+        "binding_scope_matches_neither_current_namespace"
+    )
+    return AccountScopeEvaluation(
+        compatible=compatible,
+        reason_code=None if compatible else "account_scope_mismatch",
+        account_comparison=account_comparison,
+        run_scope_comparison=run_scope_comparison,
+    )
+
+
 def _paths(root: Path) -> tuple[Path, Path]:
     data = root / "data"
     return data / "account-profile.json", data / "account-avatar" / "profile.png"
@@ -44,6 +124,142 @@ def _atomic_json(path: Path, payload: dict) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(temporary, path)
+
+
+def _binding_state_path(data_root: Path) -> Path:
+    return data_root / _BINDING_STATE_FILE
+
+
+def mark_bindings_for_revalidation(data_root: Path) -> None:
+    _atomic_json(
+        _binding_state_path(data_root),
+        {
+            "status": "revalidation_required",
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        },
+    )
+
+
+def bindings_revalidation_required(data_root: Path) -> bool:
+    try:
+        payload = json.loads(_binding_state_path(data_root).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return False
+    return payload.get("status") == "revalidation_required"
+
+
+def complete_binding_revalidation(
+    data_root: Path,
+    *,
+    account_scope: str | None,
+    target_candidate_ids: list[str | None],
+    current_candidate_ids: set[str],
+) -> bool:
+    """Clear the logout guard only after a verified account scan resolves every target."""
+    if not bindings_revalidation_required(data_root):
+        return True
+    if not account_scope:
+        return False
+    if any(
+        not candidate_id or candidate_id not in current_candidate_ids
+        for candidate_id in target_candidate_ids
+    ):
+        return False
+    _binding_state_path(data_root).unlink(missing_ok=True)
+    return True
+
+
+@contextmanager
+def _managed_browser_context(profile_dir: Path, root: Path):
+    from playwright.sync_api import sync_playwright
+    from autody.runtime import configure_runtime
+
+    configure_runtime(root)
+    playwright = sync_playwright().start()
+    context = None
+    try:
+        context = playwright.chromium.launch_persistent_context(
+            str(profile_dir),
+            headless=True,
+        )
+        yield context
+    finally:
+        if context is not None:
+            context.close()
+        playwright.stop()
+
+
+def _is_managed_douyin_cookie(domain: str) -> bool:
+    normalized = domain.lstrip(".").casefold()
+    return normalized == "douyin.com" or normalized.endswith(".douyin.com")
+
+
+def clear_managed_authentication(
+    profile_dir: Path,
+    *,
+    root: Path,
+    data_root: Path,
+    context_factory=None,
+) -> None:
+    """Clear Douyin authentication in one AutoDy-managed browser profile only."""
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    # Guard sending before touching authentication. If Chromium fails midway,
+    # partially cleared credentials can never be treated as a verified session.
+    mark_bindings_for_revalidation(data_root)
+    supplied = context_factory(profile_dir) if context_factory else None
+    context_manager = (
+        nullcontext(supplied)
+        if supplied is not None
+        else _managed_browser_context(profile_dir, root)
+    )
+    with context_manager as context:
+        for cookie in context.cookies():
+            domain = str(cookie.get("domain", ""))
+            if not _is_managed_douyin_cookie(domain):
+                continue
+            context.clear_cookies(
+                name=str(cookie.get("name", "")),
+                domain=domain,
+                path=str(cookie.get("path", "/")),
+            )
+        page = context.pages[0] if context.pages else context.new_page()
+        cdp = context.new_cdp_session(page)
+        for origin in MANAGED_DOUYIN_ORIGINS:
+            cdp.send(
+                "Storage.clearDataForOrigin",
+                {
+                    "origin": origin,
+                    "storageTypes": (
+                        "local_storage,indexeddb,websql,cache_storage,"
+                        "service_workers"
+                    ),
+                },
+            )
+
+
+def logout_managed_account(
+    profile_dir: Path,
+    *,
+    root: Path,
+    data_root: Path,
+    context_factory=None,
+) -> None:
+    """Legacy single-account logout, including its account-scoped cache cleanup."""
+    clear_managed_authentication(
+        profile_dir,
+        root=root,
+        data_root=data_root,
+        context_factory=context_factory,
+    )
+    for path in (
+        data_root / "account-profile.json",
+        data_root / "account-avatar" / "profile.png",
+        data_root / "discovered_friends.json",
+        data_root / "ignored-friend-bindings.json",
+        data_root / "health.json",
+        data_root / "friend_scan_progress.json",
+    ):
+        path.unlink(missing_ok=True)
 
 
 def load_account_profile(root: Path) -> AccountProfile | None:

@@ -11,6 +11,8 @@ from autody.history import TaskHistoryStore, TaskRunRecord
 from autody.config import Target, load_config, save_config
 from autody.preflight import PreflightStore
 from autody.modules import OFFICIAL_TEST_CENTER_CORE_RANGE, OFFICIAL_TEST_CENTER_VERSION, MODULE_ID, ModuleManager, build_module_archive
+from autody.account_profile import mark_bindings_for_revalidation
+from autody.failures import failure_detail
 
 
 def make_project(tmp_path: Path) -> Path:
@@ -75,6 +77,33 @@ headless: true
     return tmp_path / "config.yaml"
 
 
+def write_verified_account(tmp_path: Path, suffix: str = "a") -> str:
+    profile_id = "account-" + suffix * 24
+    data = tmp_path / "data"
+    (data / "account-avatar").mkdir(parents=True, exist_ok=True)
+    (data / "account-avatar" / "profile.png").write_bytes(b"avatar")
+    (data / "account-profile.json").write_text(
+        json.dumps(
+            {
+                "account_profile_id": profile_id,
+                "account_id_digest": suffix * 64,
+                "display_name": f"本地账号{suffix}",
+                "avatar_cache_key": "profile",
+                "avatar_version": "v1",
+                "is_self": True,
+                "verification_source": "test",
+                "profile_status": "verified",
+                "verified_at": "2026-07-30T08:00:00",
+                "last_updated_at": "2026-07-30T08:00:00",
+                "switched": False,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return profile_id
+
+
 def test_status_returns_dashboard_summary(tmp_path: Path):
     client = TestClient(create_app(make_project(tmp_path)))
     response = client.get("/api/status?today=2026-06-24")
@@ -85,6 +114,46 @@ def test_status_returns_dashboard_summary(tmp_path: Path):
     assert data["today"]["message"] == "早安"
     assert data["friends"][1]["status"] == "failed"
     assert data["login"]["status"] == "unknown"
+
+
+def test_status_reads_legacy_state_and_skips_malformed_history_without_rewrite(
+    tmp_path: Path,
+):
+    config = make_project(tmp_path)
+    state_path = tmp_path / "data" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["rotation"]["next_index"] = 4
+    state["rotation"]["future_optional_field"] = True
+    state["daily"]["malformed-record"] = ["not", "a", "mapping"]
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    before = (state_path.read_bytes(), state_path.stat().st_mtime_ns)
+    history = tmp_path / "data" / "history" / "task-runs.jsonl"
+    history.parent.mkdir(parents=True)
+    history.write_text("{malformed historical record\n", encoding="utf-8")
+
+    response = TestClient(create_app(config)).get(
+        "/api/status?today=2026-06-24"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["today"]["succeeded"] == 1
+    assert (state_path.read_bytes(), state_path.stat().st_mtime_ns) == before
+
+
+def test_status_degrades_when_an_optional_scheduler_section_fails(
+    tmp_path: Path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "autody.web_api._task_rows",
+        lambda: (_ for _ in ()).throw(RuntimeError("fixture scheduler failure")),
+    )
+
+    response = TestClient(create_app(make_project(tmp_path))).get("/api/status")
+
+    assert response.status_code == 200
+    assert response.json()["scheduler"] == []
+    assert response.json()["statistics"]["next_daily_send"] is None
 
 
 def test_service_identity_reports_local_runtime_without_private_browser_data(tmp_path: Path):
@@ -399,7 +468,7 @@ def test_target_settings_and_today_plan_are_test_center_routes(tmp_path: Path):
     assert (tmp_path / "data" / "state.json").read_bytes() == before
 
 
-def test_failed_target_center_is_available_only_inside_test_center(tmp_path: Path):
+def test_failed_target_center_is_shared_by_overview_and_test_center(tmp_path: Path):
     config_path = make_project(tmp_path)
     config = load_config(config_path)
     config.targets[0].stable_id = "target-one"
@@ -414,7 +483,7 @@ def test_failed_target_center_is_available_only_inside_test_center(tmp_path: Pat
     state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
     started: list[str] = []
     core_client = TestClient(create_app(config_path, action_runner=lambda action: started.append(action) or {"id": "job", "status": "running"}))
-    assert core_client.get("/api/failed-targets?today=2026-06-24").status_code == 404
+    assert core_client.get("/api/failed-targets?today=2026-06-24").status_code == 200
     _install_test_center(config_path)
     client = TestClient(create_app(config_path, action_runner=lambda action: started.append(action) or {"id": "job", "status": "running"}))
 
@@ -425,9 +494,514 @@ def test_failed_target_center_is_available_only_inside_test_center(tmp_path: Pat
     assert data["summary"] == {"success": 0, "failed": 2, "uncertain": 1, "needs_attention": 2}
     assert uncertain["safe_retry_available"] is False
     assert uncertain["no_send_action_definitely_occurred"] is False
-    assert safe["safe_retry_available"] is False  # an uncertain peer blocks the shared protected run
+    assert safe["safe_retry_available"] is False
     assert client.post("/api/modules/autody-test-center/failed-targets/target-two/retry", json={}).status_code == 409
     assert started == []
+
+
+def test_status_exposes_target_failure_detail_in_overview_and_history(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets[0].stable_id = "target-one"
+    config.targets[0].candidate_id = "candidate-one"
+    save_config(config_path, config)
+    account_id = write_verified_account(tmp_path)
+    (tmp_path / "data" / "discovered_friends.json").write_text(
+        json.dumps(
+            {
+                "scanned_at": "2026-06-24T07:20:00",
+                "account_scope": account_id,
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-one",
+                        "display_name": "候选一",
+                        "avatar_status": "missing",
+                        "discovered_at": "2026-06-24T07:20:00",
+                        "match_status": "configured",
+                        "presence_status": "current",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    detail = failure_detail(
+        "conversation_not_found",
+        stage="conversation_located",
+        run_id="run-one",
+        target_stable_id="target-one",
+        account_scope="account-one",
+        binding_valid=True,
+        account_scope_matches=True,
+    )
+    state_path = tmp_path / "data" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    daily = state["daily"]["2026-06-24"]
+    daily["succeeded"] = ["小红"]
+    daily["failures"] = {"小明": "target not found"}
+    daily["target_failures"] = {
+        "target-one": detail.model_dump(mode="json")
+    }
+    state_path.write_text(
+        json.dumps(state, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    TaskHistoryStore(tmp_path / "data" / "history" / "task-runs.jsonl").append(
+        TaskRunRecord(
+            run_id="run-one",
+            date="2026-06-24",
+            task_type="daily_send",
+            trigger_source="scheduled",
+            start_time="2026-06-24T07:30:00",
+            end_time="2026-06-24T07:31:00",
+            total_targets=2,
+            success_count=1,
+            failed_count=1,
+            final_status="retry_pending",
+            failed_target_ids=["target-one"],
+            target_failures={"target-one": detail},
+        )
+    )
+
+    status = TestClient(create_app(config_path)).get(
+        "/api/status?today=2026-06-24"
+    ).json()
+
+    failed_friend = next(
+        item for item in status["friends"] if item["status"] == "failed"
+    )
+    assert failed_friend["failure"]["stage"] == "conversation_located"
+    assert failed_friend["failure"]["user_summary_zh"] == (
+        "无法在当前会话列表中找到目标"
+    )
+    assert status["history"][0]["target_failures"]["target-one"][
+        "suggested_action_zh"
+    ] == "仅重试此目标"
+
+
+def test_status_enriches_matching_legacy_history_with_stable_target_failure(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets[0].stable_id = "target-one"
+    config.targets[0].candidate_id = "candidate-one"
+    save_config(config_path, config)
+    account_id = write_verified_account(tmp_path)
+    (tmp_path / "data" / "discovered_friends.json").write_text(
+        json.dumps(
+            {
+                "scanned_at": "2026-06-24T07:20:00",
+                "account_scope": account_id,
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-one",
+                        "display_name": "候选一",
+                        "avatar_status": "missing",
+                        "discovered_at": "2026-06-24T07:20:00",
+                        "match_status": "configured",
+                        "presence_status": "current",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    state_path = tmp_path / "data" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    daily = state["daily"]["2026-06-24"]
+    daily["task_run_id"] = "run-legacy-detail"
+    daily["succeeded"] = ["小红"]
+    daily["failures"] = {"小明": "target not found"}
+    daily.pop("target_failures", None)
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    history_store = TaskHistoryStore(
+        tmp_path / "data" / "history" / "task-runs.jsonl"
+    )
+    history_store.append(
+        TaskRunRecord(
+            run_id="run-legacy-detail",
+            date="2026-06-24",
+            task_type="daily_send",
+            trigger_source="scheduled",
+            start_time="2026-06-24T07:30:00",
+            end_time="2026-06-24T07:30:30",
+            total_targets=2,
+            success_count=1,
+            failed_count=1,
+            final_status="retry_pending",
+        )
+    )
+    history_store.append(
+        TaskRunRecord(
+            run_id="run-legacy-detail",
+            date="2026-06-24",
+            task_type="daily_send",
+            trigger_source="scheduled",
+            start_time="2026-06-24T07:30:00",
+            end_time="2026-06-24T07:31:00",
+            total_targets=2,
+            success_count=1,
+            failed_count=1,
+            final_status="partial_failed",
+            failed_target_ids=["target-one"],
+        )
+    )
+
+    status = TestClient(create_app(config_path)).get(
+        "/api/status?today=2026-06-24"
+    ).json()
+
+    failures = status["history"][0]["target_failures"]
+    assert list(failures) == ["target-one"]
+    assert failures["target-one"]["stage"] == "conversation_located"
+    assert failures["target-one"]["user_summary_zh"] == (
+        "无法在当前会话列表中找到目标"
+    )
+    assert failures["target-one"]["suggested_action_zh"] == "仅重试此目标"
+
+
+def test_status_uses_target_failure_instead_of_legacy_technical_notification(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets[0].stable_id = "target-one"
+    config.targets[0].candidate_id = "candidate-one"
+    save_config(config_path, config)
+    account_id = write_verified_account(tmp_path)
+    (tmp_path / "data" / "discovered_friends.json").write_text(
+        json.dumps(
+            {
+                "scanned_at": "2026-06-24T07:20:00",
+                "account_scope": account_id,
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-one",
+                        "display_name": "候选一",
+                        "avatar_status": "missing",
+                        "discovered_at": "2026-06-24T07:20:00",
+                        "match_status": "configured",
+                        "presence_status": "current",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    state_path = tmp_path / "data" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    daily = state["daily"]["2026-06-24"]
+    daily["succeeded"] = ["小红"]
+    daily["failures"] = {"小明": "target not found"}
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    notice = tmp_path / "data" / "notifications" / "need-attention.txt"
+    notice.parent.mkdir(parents=True)
+    notice.write_text(
+        "AutoDy 每日发送任务失败。\n退出码：3\n请查看：C:\\private\\scheduler.log",
+        encoding="utf-8",
+    )
+
+    status = TestClient(create_app(config_path)).get(
+        "/api/status?today=2026-06-24"
+    ).json()
+
+    issue = next(item for item in status["issues"] if item["id"] == "notification")
+    assert "无法在当前会话列表中找到目标" in issue["explanation"]
+    assert "建议：仅重试此目标" in issue["explanation"]
+    assert "退出码" not in issue["explanation"]
+    assert "scheduler.log" not in issue["explanation"]
+
+
+def test_overview_retry_endpoint_starts_only_the_current_safe_target(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets = [
+        Target(
+            name="安全失败目标",
+            stable_id="target-one",
+            candidate_id="candidate-one",
+        ),
+        Target(
+            name="不确定目标",
+            stable_id="target-two",
+            candidate_id="candidate-two",
+        ),
+    ]
+    save_config(config_path, config)
+    account_id = write_verified_account(tmp_path)
+    (tmp_path / "data" / "discovered_friends.json").write_text(
+        json.dumps(
+            {
+                "scanned_at": "2026-06-24T07:20:00",
+                "account_scope": account_id,
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-one",
+                        "display_name": "候选一",
+                        "avatar_status": "missing",
+                        "discovered_at": "2026-06-24T07:20:00",
+                        "match_status": "configured",
+                        "presence_status": "current",
+                    },
+                    {
+                        "candidate_id": "candidate-two",
+                        "display_name": "候选二",
+                        "avatar_status": "missing",
+                        "discovered_at": "2026-06-24T07:20:00",
+                        "match_status": "configured",
+                        "presence_status": "current",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    state_path = tmp_path / "data" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    daily = state["daily"]["2026-06-24"]
+    daily["succeeded"] = []
+    daily["failures"] = {
+        "安全失败目标": "target not found",
+        "不确定目标": "confirmation_failed_uncertain",
+    }
+    daily["target_failures"] = {
+        "target-one": failure_detail(
+            "conversation_not_found",
+            stage="conversation_located",
+            send_attempts=0,
+            run_id="run-one",
+            target_stable_id="target-one",
+            binding_valid=True,
+            account_scope_matches=True,
+        ).model_dump(mode="json"),
+        "target-two": failure_detail(
+            "confirmation_failed_uncertain",
+            stage="confirmation_observed",
+            send_attempts=1,
+            run_id="run-one",
+            target_stable_id="target-two",
+            binding_valid=True,
+            account_scope_matches=True,
+        ).model_dump(mode="json"),
+    }
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    started = []
+
+    def start_action(action: str, **kwargs):
+        started.append((action, kwargs))
+        return {"id": "job-target", "action": action, "status": "running"}
+
+    client = TestClient(create_app(config_path, action_runner=start_action))
+
+    failures = client.get("/api/failed-targets?today=2026-06-24")
+    retry = client.post(
+        "/api/failed-targets/target-one/retry?today=2026-06-24",
+        json={},
+    )
+    unsafe = client.post(
+        "/api/failed-targets/target-two/retry?today=2026-06-24",
+        json={},
+    )
+
+    assert failures.status_code == 200
+    safe = next(
+        item
+        for item in failures.json()["items"]
+        if item["target_id"] == "target-one"
+    )
+    assert safe["safe_retry_available"] is True
+    assert retry.status_code == 202
+    assert started == [("run-target", {"target_id": "target-one"})]
+    assert unsafe.status_code == 409
+
+
+def test_failed_target_rechecks_binding_before_offering_retry(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets = [
+        Target(
+            name="绑定已过期目标",
+            stable_id="target-one",
+            candidate_id="candidate-old",
+        )
+    ]
+    save_config(config_path, config)
+    account_id = write_verified_account(tmp_path)
+    (tmp_path / "data" / "discovered_friends.json").write_text(
+        json.dumps(
+            {
+                "scanned_at": "2026-06-24T07:20:00",
+                "account_scope": account_id,
+                "candidates": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    state_path = tmp_path / "data" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    daily = state["daily"]["2026-06-24"]
+    daily["succeeded"] = []
+    daily["failures"] = {"绑定已过期目标": "target not found"}
+    daily["target_failures"] = {
+        "target-one": failure_detail(
+            "conversation_not_found",
+            stage="conversation_located",
+            run_id="run-one",
+            target_stable_id="target-one",
+            binding_valid=True,
+            account_scope_matches=True,
+        ).model_dump(mode="json")
+    }
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    item = TestClient(create_app(config_path)).get(
+        "/api/failed-targets?today=2026-06-24"
+    ).json()["items"][0]
+
+    assert item["safe_retry_available"] is False
+    assert item["reason_code"] == "binding_stale"
+    assert item["suggested_action"] == "reassociate"
+
+
+def test_current_digest_scope_restores_retry_from_legacy_mismatch_and_key(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets = [
+        Target(
+            name="历史失败目标",
+            stable_id="target-current",
+            candidate_id="candidate-current",
+        )
+    ]
+    save_config(config_path, config)
+    write_verified_account(tmp_path)
+    (tmp_path / "data" / "discovered_friends.json").write_text(
+        json.dumps(
+            {
+                "scanned_at": "2026-06-24T07:20:00",
+                "account_scope": "a" * 64,
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-current",
+                        "display_name": "历史失败目标",
+                        "avatar_status": "missing",
+                        "discovered_at": "2026-06-24T07:20:00",
+                        "match_status": "configured",
+                        "presence_status": "current",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    state_path = tmp_path / "data" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    daily = state["daily"]["2026-06-24"]
+    daily["succeeded"] = []
+    daily["failures"] = {"历史失败目标": "account_scope_mismatch"}
+    daily["target_failures"] = {
+        "pre-migration-key": failure_detail(
+            "account_scope_mismatch",
+            stage="account_verified",
+            send_attempts=0,
+            run_id="legacy-run",
+            target_stable_id="pre-migration-key",
+            account_scope="legacy-run-scope",
+            binding_valid=False,
+            account_scope_matches=False,
+        ).model_dump(mode="json")
+    }
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    started = []
+
+    def start_action(action: str, **kwargs):
+        started.append((action, kwargs))
+        return {"id": "job-target", "action": action, "status": "running"}
+
+    client = TestClient(create_app(config_path, action_runner=start_action))
+    status = client.get("/api/status?today=2026-06-24").json()
+    failed_friend = next(item for item in status["friends"] if item["status"] == "failed")
+    retry = client.post(
+        "/api/failed-targets/target-current/retry?today=2026-06-24",
+        json={},
+    )
+
+    failure = failed_friend["failure"]
+    assert failure["reason_code"] == "send_failed_before_action"
+    assert failure["safe_retry_available"] is True
+    assert failure["suggested_action"] == "retry"
+    assert failure["diagnostic_details"]["account_comparison"] == (
+        "binding_scope_matches_platform_account_id_digest"
+    )
+    assert retry.status_code == 202
+    assert started == [("run-target", {"target_id": "target-current"})]
+
+
+def test_current_scope_revalidation_preserves_genuine_account_mismatch(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets = [
+        Target(
+            name="其他账号目标",
+            stable_id="target-current",
+            candidate_id="candidate-current",
+        )
+    ]
+    save_config(config_path, config)
+    write_verified_account(tmp_path)
+    (tmp_path / "data" / "discovered_friends.json").write_text(
+        json.dumps(
+            {
+                "scanned_at": "2026-06-24T07:20:00",
+                "account_scope": "account-" + "b" * 24,
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-current",
+                        "display_name": "其他账号目标",
+                        "avatar_status": "missing",
+                        "discovered_at": "2026-06-24T07:20:00",
+                        "match_status": "configured",
+                        "presence_status": "current",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    state_path = tmp_path / "data" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    daily = state["daily"]["2026-06-24"]
+    daily["succeeded"] = []
+    daily["failures"] = {"其他账号目标": "account_scope_mismatch"}
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    failure = TestClient(create_app(config_path)).get(
+        "/api/status?today=2026-06-24"
+    ).json()["friends"][0]["failure"]
+
+    assert failure["reason_code"] == "account_scope_mismatch"
+    assert failure["suggested_action"] == "switch_account"
+    assert failure["diagnostic_details"]["account_comparison"] == (
+        "binding_scope_matches_neither_current_namespace"
+    )
 
 
 def test_preflight_status_exposes_masked_progress(tmp_path: Path):
@@ -478,6 +1052,12 @@ def test_log_retention_config_validation_and_cleanup_api(tmp_path: Path):
 
 def test_logs_and_backup_exclude_browser_profile(tmp_path: Path):
     config = make_project(tmp_path)
+    (tmp_path / "data" / "logs" / "scheduler-2026-07-29.log").write_text(
+        "较早调度记录\n", encoding="utf-8"
+    )
+    (tmp_path / "data" / "logs" / "scheduler-2026-07-30.log").write_text(
+        "最新调度记录\n", encoding="utf-8"
+    )
     profile = tmp_path / "data" / "browser-profile"
     profile.mkdir(parents=True)
     (profile / "secret.cookie").write_text("secret", encoding="utf-8")
@@ -485,6 +1065,7 @@ def test_logs_and_backup_exclude_browser_profile(tmp_path: Path):
 
     logs = client.get("/api/logs").json()
     assert "发送成功" in logs["application"]
+    assert logs["scheduler"].splitlines() == ["较早调度记录", "最新调度记录"]
 
     response = client.get("/api/backup")
     assert response.status_code == 200
@@ -951,6 +1532,258 @@ def test_candidate_add_is_idempotent_by_candidate_id_and_keeps_duplicate_names_s
     assert [candidate["configured"] for candidate in discovered_after_add] == [True, True]
     assert removed.json()["affected"] == 1
     assert [candidate["configured"] for candidate in discovered_after_remove] == [False, True]
+
+
+def test_orphan_binding_requires_explicit_candidate_relink_and_can_be_ignored(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets = [
+        Target(name="待关联目标", stable_id="target-one", candidate_id="candidate-old")
+    ]
+    save_config(config_path, config)
+    (tmp_path / "data" / "discovered_friends.json").write_text(
+        json.dumps(
+            {
+                "scanned_at": "2026-07-30T08:00:00",
+                "scan_id": "scan-current",
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-current",
+                        "display_name": "待关联目标",
+                        "avatar_status": "missing",
+                        "discovered_at": "2026-07-30T08:00:00",
+                        "match_status": "unconfigured",
+                        "presence_status": "current",
+                        "identity_key": "stable-current",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app(config_path))
+
+    before = client.get("/api/friends/discovered").json()
+    assert before["candidates"][0]["match_status"] == "needs_reassociation"
+    assert before["candidates"][0]["reassociation_target_id"] == "target-one"
+    assert before["orphans"] == [
+        {"target_id": "target-one", "display_name": "待关联目标", "enabled": True}
+    ]
+
+    relinked = client.post(
+        "/api/friends/candidate-current/relink",
+        json={"target_id": "target-one"},
+    )
+    assert relinked.status_code == 200
+    assert load_config(config_path).targets[0].candidate_id == "candidate-current"
+    assert client.get("/api/friends/discovered").json()["orphans"] == []
+
+    config = load_config(config_path)
+    config.targets[0].candidate_id = "candidate-old"
+    save_config(config_path, config)
+    ignored = client.post("/api/friends/target-one/ignore-orphan")
+    assert ignored.status_code == 200
+    after_ignore = client.get("/api/friends/discovered").json()
+    assert after_ignore["orphans"] == []
+    assert after_ignore["candidates"][0]["match_status"] == "ignored_reassociation"
+    blocked_after_ignore = client.post(
+        "/api/friends/candidate-current/add-to-targets"
+    )
+    assert blocked_after_ignore.status_code == 409
+
+
+def test_actionable_orphan_cannot_be_bypassed_by_direct_candidate_add(tmp_path: Path):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets = [
+        Target(name="待关联目标", stable_id="target-one", candidate_id="candidate-old")
+    ]
+    save_config(config_path, config)
+    (tmp_path / "data" / "discovered_friends.json").write_text(
+        json.dumps(
+            {
+                "scanned_at": "2026-07-30T08:00:00",
+                "candidates": [{
+                    "candidate_id": "candidate-current",
+                    "display_name": "待关联目标",
+                    "avatar_status": "missing",
+                    "discovered_at": "2026-07-30T08:00:00",
+                    "match_status": "unconfigured",
+                    "presence_status": "current",
+                }],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(create_app(config_path))
+
+    single = client.post("/api/friends/candidate-current/add-to-targets")
+    batch = client.post(
+        "/api/friends/discovered/batch",
+        json={"candidate_ids": ["candidate-current"]},
+    )
+
+    assert single.status_code == 409
+    assert batch.status_code == 200
+    assert batch.json() == {"added": 0, "skipped": 1}
+    assert len(load_config(config_path).targets) == 1
+
+
+def test_managed_logout_requires_browser_lock_and_returns_logged_out_profile(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    calls = []
+    client = TestClient(
+        create_app(
+            config_path,
+            account_logout_runner=lambda loaded: calls.append(loaded.profile_dir),
+        )
+    )
+
+    from autody.locking import SingleInstanceLock
+
+    not_confirmed = client.post(
+        "/api/account-profile/logout",
+        json={"confirmed": False},
+    )
+    with SingleInstanceLock(config.lock_file):
+        blocked = client.post(
+            "/api/account-profile/logout",
+            json={"confirmed": True},
+        )
+    completed = client.post(
+        "/api/account-profile/logout",
+        json={"confirmed": True},
+    )
+
+    assert not_confirmed.status_code == 400
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["reason_code"] == "account_operation_busy"
+    assert blocked.json()["detail"]["user_summary_zh"]
+    assert blocked.json()["detail"]["suggested_action_zh"]
+    assert completed.status_code == 200
+    assert calls == [config.profile_dir]
+    assert completed.json()["logged_in"] is False
+    assert completed.json()["profile_status"] == "unverified"
+
+
+def test_account_profile_api_migrates_adds_and_switches_isolated_profiles(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets = [
+        Target(
+            name="账号甲目标",
+            stable_id="target-a",
+            candidate_id="candidate-a",
+        )
+    ]
+    save_config(config_path, config)
+    active_id = write_verified_account(tmp_path)
+    actions = []
+
+    def run_action(name: str):
+        actions.append(name)
+        return {
+            "id": f"job-{name}",
+            "action": name,
+            "status": "running",
+            "exit_code": None,
+        }
+
+    client = TestClient(create_app(config_path, action_runner=run_action))
+
+    initial = client.get("/api/account-profiles")
+    added = client.post("/api/account-profiles/add", json={})
+    after_add = client.get("/api/account-profiles")
+    targets_after_add = load_config(config_path).targets
+    switched = client.post(f"/api/account-profiles/{active_id}/switch", json={})
+
+    assert initial.status_code == 200
+    assert initial.json()["active_profile_id"] == active_id
+    assert initial.json()["migration_required"] is False
+    assert added.status_code == 202
+    assert actions == ["login"]
+    pending_id = added.json()["profile"]["profile_id"]
+    assert pending_id.startswith("pending-")
+    assert after_add.json()["active_profile_id"] == pending_id
+    assert targets_after_add == []
+    assert switched.status_code == 200
+    assert switched.json()["active_profile_id"] == active_id
+    assert [target.stable_id for target in load_config(config_path).targets] == [
+        "target-a"
+    ]
+
+
+def test_multi_account_logout_clears_only_active_auth_and_preserves_runtime(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    profile_id = write_verified_account(tmp_path)
+    preserved = {
+        tmp_path / "data" / "discovered_friends.json": b'{"candidates":[]}',
+        tmp_path / "data" / "state.json": (
+            tmp_path / "data" / "state.json"
+        ).read_bytes(),
+    }
+    for path, content in preserved.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    calls = []
+    client = TestClient(
+        create_app(
+            config_path,
+            account_logout_runner=lambda loaded: calls.append(loaded.profile_dir),
+        )
+    )
+    assert client.get("/api/account-profiles").status_code == 200
+
+    response = client.post(
+        "/api/account-profile/logout",
+        json={"confirmed": True},
+    )
+
+    assert response.status_code == 200
+    assert calls == [
+        tmp_path
+        / "data"
+        / "account-profiles"
+        / profile_id
+        / "browser-profile"
+    ]
+    for path, content in preserved.items():
+        assert path.read_bytes() == content
+    profiles = client.get("/api/account-profiles").json()
+    active = next(item for item in profiles["profiles"] if item["active"])
+    assert active["logged_in"] is False
+
+
+def test_account_binding_guard_clears_account_scoped_overview_count(tmp_path: Path):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets[1].enabled = False
+    save_config(config_path, config)
+    mark_bindings_for_revalidation(config.state_file.parent)
+
+    status = TestClient(create_app(config_path)).get("/api/status").json()
+
+    assert status["statistics"]["configured_friend_count"] == 2
+    assert status["statistics"]["enabled_friend_count"] == 0
+    assert all(
+        friend["binding_status"] == "revalidation_required"
+        for friend in status["friends"]
+    )
+    assert any(
+        issue["id"] == "account_bindings_revalidation_required"
+        for issue in status["issues"]
+    )
 
 
 def test_enabled_duplicate_names_are_flagged_for_safe_sending(tmp_path: Path):

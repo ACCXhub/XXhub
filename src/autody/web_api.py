@@ -30,7 +30,17 @@ from autody.config import (
     load_config,
     save_config,
 )
-from autody.account_profile import public_profile_payload
+from autody.account_profile import (
+    bindings_revalidation_required,
+    clear_managed_authentication,
+    complete_binding_revalidation,
+    evaluate_account_scope,
+    load_account_profile,
+    logout_managed_account,
+    public_profile_payload,
+)
+from autody.account_profiles import AccountProfileStoreError, MultiAccountStore
+from autody.failures import FailureDetail, failure_detail
 from autody.friend_discovery import is_discovery_stale, load_discovered_friends
 from autody.history import TaskHistoryStore, bootstrap_legacy_daily_history, dashboard_statistics, stable_target_id
 from autody.log_center import archive_historical_logs, archive_logs, automatic_cleanup_once_daily, cleanup_logs, log_storage_summary, log_summary, query_logs, record_cleanup_result
@@ -43,6 +53,7 @@ from autody.modules import (
     ensure_official_module_archive,
 )
 from autody.messages import read_messages
+from autody.locking import SingleInstanceLock, TaskAlreadyRunning
 from autody.preflight import PreflightStore
 from autody.recovery import recovery_due
 from autody.runner import preview_today_target_message
@@ -163,6 +174,14 @@ class DiscoveredFriendBatchAdd(BaseModel):
     candidate_ids: list[str] = Field(default_factory=list)
 
 
+class FriendRelinkRequest(BaseModel):
+    target_id: str = Field(min_length=1, max_length=80)
+
+
+class AccountLogoutRequest(BaseModel):
+    confirmed: bool = False
+
+
 class PreflightRunRequest(BaseModel):
     target_ids: list[str] | None = None
 
@@ -192,6 +211,17 @@ def _tail(path: Path, limit: int = 400) -> str:
         handle.seek(max(0, size - 131_072))
         text = handle.read().decode("utf-8", errors="replace")
     return "\n".join(text.splitlines()[-limit:])
+
+
+def _tail_scheduler_logs(log_dir: Path, limit: int = 400) -> str:
+    files = sorted(log_dir.glob("scheduler-????-??-??.log"))
+    legacy = log_dir / "scheduler.log"
+    if not files and legacy.is_file():
+        files = [legacy]
+    lines: list[str] = []
+    for path in files[-14:]:
+        lines.extend(_tail(path, limit).splitlines())
+    return "\n".join(lines[-limit:])
 
 
 def _json_bytes(value: object) -> bytes:
@@ -249,6 +279,7 @@ _SAFE_RETRY_CODES = {
     "composer_disabled",
     "send_control_missing",
     "send_failed_before_action",
+    "account_scope_mismatch",
 }
 
 _FAILURE_EXPLANATIONS = {
@@ -288,6 +319,220 @@ def _failure_code(value: object, confirmation: object) -> str:
     if "login" in text or "登录" in text:
         return "login_required"
     return "unexpected_error"
+
+
+def _legacy_failure_detail(
+    config: AppConfig,
+    target: Target,
+    *,
+    value: object,
+    confirmation: object,
+    run_id: str | None,
+) -> FailureDetail:
+    code = _failure_code(value, confirmation)
+    reason_code = {
+        "friend_not_found": "conversation_not_found",
+        "conversation_open_failed": "conversation_not_found",
+        "conversation_load_timeout": "page_load_timeout",
+        "send_control_missing": "composer_missing",
+        "send_failed_before_action": "send_failed_before_action",
+        "blocked_ambiguous_target": "blocked_ambiguous_target",
+        "confirmation_failed_uncertain": "confirmation_failed_uncertain",
+        "login_required": "login_required",
+        "account_scope_mismatch": "account_scope_mismatch",
+        "browser_busy": "browser_busy",
+    }.get(code, "unknown_exception")
+    stage = {
+        "conversation_not_found": "conversation_located",
+        "page_load_timeout": "browser_opened",
+        "composer_missing": "composer_found",
+        "send_failed_before_action": "message_prepared",
+        "blocked_ambiguous_target": "target_binding_resolved",
+        "confirmation_failed_uncertain": "confirmation_observed",
+        "login_required": "account_verified",
+        "account_scope_mismatch": "account_verified",
+        "browser_busy": "browser_opened",
+    }.get(reason_code, "conversation_located")
+    return failure_detail(
+        reason_code,
+        stage=stage,
+        send_attempts=int(reason_code == "confirmation_failed_uncertain"),
+        run_id=run_id,
+        target_stable_id=_target_id(target),
+        binding_valid=None,
+        account_scope_matches=None,
+        diagnostic_details={
+            "legacy_failure": True,
+            "confirmation_status": str(confirmation or ""),
+        },
+    )
+
+
+def _revalidate_failure_detail(
+    config: AppConfig,
+    target: Target,
+    detail: FailureDetail,
+) -> FailureDetail:
+    identity = _target_id(target)
+    discovered = load_discovered_friends(
+        config.state_file.parent / "discovered_friends.json"
+    )
+    profile = load_account_profile(config.state_file.parent.parent)
+    guarded = bindings_revalidation_required(config.state_file.parent)
+    evaluation = evaluate_account_scope(
+        profile,
+        binding_scope=discovered.account_scope if discovered else None,
+        run_scope=detail.account_scope,
+    )
+    diagnostics = {
+        **detail.diagnostic_details,
+        "account_comparison": evaluation.account_comparison,
+    }
+    if evaluation.run_scope_comparison:
+        diagnostics["run_scope_comparison"] = evaluation.run_scope_comparison
+    context = {
+        "run_id": detail.run_id,
+        "target_stable_id": identity,
+        "account_scope": discovered.account_scope
+        if discovered
+        else detail.account_scope,
+        "diagnostic_details": diagnostics,
+    }
+    if detail.uncertain_send or detail.send_attempts > 0:
+        return detail.model_copy(
+            update={
+                "target_stable_id": identity,
+                "diagnostic_details": diagnostics,
+            }
+        )
+    if evaluation.reason_code == "login_required":
+        return failure_detail(
+            "login_required",
+            stage="account_verified",
+            binding_valid=False,
+            account_scope_matches=False,
+            **context,
+        )
+    if guarded:
+        return failure_detail(
+            "binding_stale",
+            stage="target_binding_resolved",
+            binding_valid=False,
+            account_scope_matches=True if evaluation.compatible is True else None,
+            **context,
+        )
+    if evaluation.reason_code == "account_scope_mismatch":
+        return failure_detail(
+            "account_scope_mismatch",
+            stage="account_verified",
+            binding_valid=False,
+            account_scope_matches=False,
+            **context,
+        )
+    if evaluation.compatible is not True:
+        return failure_detail(
+            "binding_stale",
+            stage="target_binding_resolved",
+            binding_valid=False,
+            account_scope_matches=None,
+            **context,
+        )
+    if not target.stable_id or not target.candidate_id:
+        return failure_detail(
+            "binding_missing",
+            stage="target_binding_resolved",
+            binding_valid=False,
+            account_scope_matches=True,
+            **context,
+        )
+    current_candidate_ids = {
+        item.candidate_id
+        for item in discovered.candidates
+        if item.presence_status == "current"
+    }
+    if target.candidate_id not in current_candidate_ids:
+        return failure_detail(
+            "binding_stale",
+            stage="target_binding_resolved",
+            binding_valid=False,
+            account_scope_matches=True,
+            **context,
+        )
+    if (
+        detail.reason_code in {"account_scope_mismatch", "login_required"}
+        and detail.send_attempts == 0
+        and not detail.uncertain_send
+    ):
+        return failure_detail(
+            "send_failed_before_action",
+            stage=detail.stage,
+            binding_valid=True,
+            account_scope_matches=True,
+            **context,
+        )
+    return detail.model_copy(
+        update={
+            "target_stable_id": identity,
+            "account_scope": discovered.account_scope,
+            "binding_valid": True,
+            "account_scope_matches": True,
+            "diagnostic_details": diagnostics,
+        }
+    )
+
+
+def _daily_failure_detail(
+    config: AppConfig,
+    target: Target,
+    daily: dict,
+) -> FailureDetail | None:
+    identity = _target_id(target)
+    stored = daily.get("target_failures", {}).get(identity)
+    if stored:
+        try:
+            detail = FailureDetail.model_validate(stored)
+            return _revalidate_failure_detail(config, target, detail)
+        except (TypeError, ValueError):
+            pass
+    if target.name not in daily.get("failures", {}):
+        return None
+    return _revalidate_failure_detail(config, target, _legacy_failure_detail(
+        config,
+        target,
+        value=daily.get("failures", {}).get(target.name),
+        confirmation=daily.get("confirmation_results", {}).get(identity),
+        run_id=daily.get("task_run_id"),
+    ))
+
+
+def _history_target_failures(
+    config: AppConfig,
+    record,
+    daily_by_date: dict[str, dict],
+) -> dict[str, FailureDetail]:
+    failures = dict(record.target_failures)
+    daily = daily_by_date.get(record.date)
+    if (
+        not daily
+        or daily.get("task_run_id") != record.run_id
+        or record.task_type != "daily_send"
+    ):
+        return failures
+    failed_target_ids = set(record.failed_target_ids)
+    if failed_target_ids:
+        failures = {
+            target_id: detail
+            for target_id, detail in failures.items()
+            if target_id in failed_target_ids
+        }
+    for target in config.targets:
+        identity = _target_id(target)
+        if identity not in failed_target_ids:
+            continue
+        detail = _daily_failure_detail(config, target, daily)
+        if detail is not None:
+            failures[identity] = detail
+    return failures
 
 
 def _today_plan(config: AppConfig, state, day: date, overrides: dict[str, dict] | None = None) -> dict:
@@ -340,31 +585,28 @@ def _failed_targets(config: AppConfig, state, day: date) -> dict:
     daily = state.daily.get(day.isoformat(), {})
     succeeded = set(daily.get("succeeded", []))
     failures = daily.get("failures", {})
-    confirmation = daily.get("confirmation_results", {})
     rows = []
-    unresolved_codes = []
     for target in config.targets:
         if not target.enabled or target.name in succeeded or target.name not in failures:
             continue
         identity = _target_id(target)
-        code = _failure_code(failures.get(target.name), confirmation.get(identity))
-        unresolved_codes.append(code)
+        detail = _daily_failure_detail(config, target, daily)
+        if detail is None:
+            continue
         rows.append({
             "target_id": identity,
             "display_name": target.name,
             "failure_time": f"{day.isoformat()}T{config.daily_send_time}:00",
             "trigger_source": "retry" if daily.get("message") else "scheduled",
-            "reason_code": code,
-            "explanation": _FAILURE_EXPLANATIONS[code],
-            "no_send_action_definitely_occurred": code in _SAFE_RETRY_CODES,
-            "uncertain": code == "confirmation_failed_uncertain",
+            **detail.model_dump(mode="json"),
+            "explanation": detail.user_summary_zh,
+            "no_send_action_definitely_occurred": detail.send_attempts == 0,
+            "uncertain": detail.uncertain_send,
+            "safe_retry_available": detail.safe_retry_available,
             "latest_preflight_status": None,
-            "latest_send_status": confirmation.get(identity) or "failed_before_action",
+            "latest_send_status": daily.get("confirmation_results", {}).get(identity) or "failed_before_action",
             "resolved": False,
         })
-    shared_safe_retry = bool(rows) and all(code in _SAFE_RETRY_CODES for code in unresolved_codes)
-    for row in rows:
-        row["safe_retry_available"] = shared_safe_retry and row["no_send_action_definitely_occurred"]
     return {
         "items": rows,
         "summary": {
@@ -531,10 +773,16 @@ def _portable_config(config_path: Path, config: AppConfig) -> bytes:
     return yaml.safe_dump(data, allow_unicode=True, sort_keys=False).encode("utf-8")
 
 
-def create_app(config_path: Path, action_runner=None, now_provider=None) -> FastAPI:
+def create_app(
+    config_path: Path,
+    action_runner=None,
+    now_provider=None,
+    account_logout_runner=None,
+) -> FastAPI:
     config_path = config_path.resolve()
     root = config_path.parent
     manager = ActionManager(root, config_path)
+    account_store = MultiAccountStore(root, config_path)
     run_action = action_runner or manager.start
     current_time = now_provider or datetime.now
     app = FastAPI(title="AutoDy", docs_url=None, redoc_url=None)
@@ -565,6 +813,54 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
         temporary = path.with_suffix(".tmp")
         temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temporary, path)
+
+    def ignored_orphan_target_ids() -> set[str]:
+        path = initial_config.state_file.parent / "ignored-friend-bindings.json"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            return set()
+        values = payload.get("target_ids", []) if isinstance(payload, dict) else []
+        return {str(value) for value in values if isinstance(value, str)}
+
+    def save_ignored_orphan_target_ids(values: set[str]) -> None:
+        path = initial_config.state_file.parent / "ignored-friend-bindings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps({"target_ids": sorted(values)}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+
+    def actionable_orphan_names(config: AppConfig, discovered) -> set[str]:
+        current_ids = {
+            candidate.candidate_id
+            for candidate in (discovered.candidates if discovered else [])
+            if candidate.presence_status == "current"
+        }
+        return {
+            " ".join(target.name.split()).casefold()
+            for target in config.targets
+            if target.stable_id
+            and target.candidate_id
+            and target.candidate_id not in current_ids
+        }
+
+    def refresh_binding_guard(config: AppConfig, discovered=None) -> bool:
+        discovered = discovered or load_discovered_friends(
+            config.state_file.parent / "discovered_friends.json"
+        )
+        return complete_binding_revalidation(
+            config.state_file.parent,
+            account_scope=discovered.account_scope if discovered else None,
+            target_candidate_ids=[target.candidate_id for target in config.targets],
+            current_candidate_ids={
+                candidate.candidate_id
+                for candidate in (discovered.candidates if discovered else [])
+                if candidate.presence_status == "current"
+            },
+        )
     if initial_config.log_cleanup_enabled:
         automatic_cleanup_once_daily(initial_config.state_file.parent / "logs", active_days=initial_config.active_log_retention_days, archive_days=initial_config.archive_log_retention_days)
     task_cache: dict[str, object] = {"expires": 0.0, "rows": []}
@@ -762,7 +1058,10 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
     @app.get("/api/status")
     def status(today: str | None = None):
         config = load_config(config_path)
-        maybe_start_background_discovery(config)
+        try:
+            maybe_start_background_discovery(config)
+        except Exception:
+            pass
         state = StateStore(config.state_file).load()
         key = today or date.today().isoformat()
         daily = state.daily.get(
@@ -772,18 +1071,29 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
         failures = daily.get("failures", {})
         friends = []
         for target in config.targets:
+            detail = _daily_failure_detail(config, target, daily)
             friend_status = (
                 "success"
                 if target.name in succeeded
                 else "failed"
-                if target.name in failures
+                if detail is not None
                 else "pending"
             )
             friends.append(
                 {
+                    "target_id": _target_id(target),
                     "name": target.name,
                     "status": friend_status,
-                    "error": failures.get(target.name),
+                    "error": (
+                        detail.user_summary_zh
+                        if detail is not None
+                        else failures.get(target.name)
+                    ),
+                    "failure": (
+                        detail.model_dump(mode="json")
+                        if detail is not None
+                        else None
+                    ),
                 }
             )
         history_store = TaskHistoryStore(config.state_file.parent / "history" / "task-runs.jsonl")
@@ -803,10 +1113,19 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
                 "retry_count": item.retry_count,
                 "final_status": item.final_status,
                 "end_time": item.end_time,
+                "target_failures": {
+                    target_id: detail.model_dump(mode="json")
+                    for target_id, detail in _history_target_failures(
+                        config, item, state.daily
+                    ).items()
+                },
             }
             for item in history_page.items
         ]
-        tasks = cached_task_rows()
+        try:
+            tasks = cached_task_rows()
+        except Exception:
+            tasks = []
         message_count = _message_count(config.messages_file)
         next_run = next(
             (
@@ -830,6 +1149,15 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
                 "id": "login_expired", "status": "error",
                 "explanation": "抖音登录已失效或需要安全验证。",
                 "action": "login", "action_label": "扫码登录",
+            })
+        binding_guarded = bindings_revalidation_required(config.state_file.parent)
+        if binding_guarded:
+            issues.append({
+                "id": "account_bindings_revalidation_required",
+                "status": "warning",
+                "explanation": "当前账号的好友绑定待重新验证，定时发送已暂停。",
+                "action": "friends",
+                "action_label": "重新扫描好友",
             })
         if not _runtime_available(root):
             issues.append({
@@ -876,12 +1204,31 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
             })
         notice = config.state_file.parent / "notifications" / "need-attention.txt"
         if notice.exists():
+            failed_friends = [
+                (friend["name"], friend["failure"])
+                for friend in friends
+                if friend["failure"] is not None
+            ]
+            if failed_friends:
+                failed_name, failed_detail = failed_friends[0]
+                notification_explanation = (
+                    f"{failed_name}：{failed_detail['user_summary_zh']}。"
+                    f"建议：{failed_detail['suggested_action_zh']}。"
+                )
+            else:
+                notification_explanation = (
+                    "最近一次后台任务未完成，请查看日志中的中文原因和处理建议。"
+                )
             issues.append({
                 "id": "notification", "status": "error",
-                "explanation": _tail(notice, 8),
+                "explanation": notification_explanation,
                 "action": "logs", "action_label": "查看日志",
             })
         statistics = dashboard_statistics(records, date.fromisoformat(key))
+        for friend in friends:
+            friend["binding_status"] = (
+                "revalidation_required" if binding_guarded else "verified"
+            )
         try:
             pack_count = len(json.loads((root / "message-packs" / "index.json").read_text(encoding="utf-8")).get("packs", []))
         except (OSError, json.JSONDecodeError, TypeError):
@@ -890,7 +1237,9 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
             "successful_today": len(succeeded),
             "failed_today": len(failures),
             "configured_friend_count": len(config.targets),
-            "enabled_friend_count": len(config.targets),
+            "enabled_friend_count": (
+                0 if binding_guarded else sum(target.enabled for target in config.targets)
+            ),
             "local_message_count": message_count,
             "active_message_pack_count": pack_count,
             "next_health_check": next_health,
@@ -944,9 +1293,17 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
         if not target or not target["safe_retry_available"]:
             raise HTTPException(409, "该目标的发送结果不确定或未满足安全重试条件，已禁止自动重试。")
         try:
-            return run_action("run")
+            return run_action("run-target", target_id=target_id)
         except ActionAlreadyRunning as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/failed-targets")
+    def overview_failed_targets(today: str | None = None):
+        return failed_targets(today)
+
+    @app.post("/api/failed-targets/{target_id}/retry", status_code=202)
+    def overview_retry_failed_target(target_id: str, today: str | None = None):
+        return retry_failed_target(target_id, today)
 
     @app.get("/api/modules")
     def module_status():
@@ -1252,6 +1609,175 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
             "job": job,
         }
 
+    def account_change_guard(config: AppConfig, action_zh: str) -> None:
+        def busy() -> HTTPException:
+            return HTTPException(
+                409,
+                failure_detail(
+                    "account_operation_busy",
+                    stage="account_verified",
+                    diagnostic_details={"operation": action_zh},
+                ).model_dump(mode="json"),
+            )
+
+        send_marker = config.lock_file.parent / "daily-send-active.json"
+        if send_marker.is_file() or dry_run_controller.status().get("running"):
+            raise busy()
+        if action_runner is None and manager.browser_action_running():
+            raise busy()
+
+    @app.get("/api/account-profiles")
+    def account_profiles():
+        try:
+            if action_runner is None and not manager.browser_action_running():
+                registry = account_store._load_registry()
+                if (
+                    registry
+                    and str(registry.get("active_profile_id", "")).startswith(
+                        "pending-"
+                    )
+                    and load_account_profile(root) is not None
+                ):
+                    account_store.associate_active_verified_profile()
+            return account_store.public_payload_if_available()
+        except AccountProfileStoreError as exc:
+            raise HTTPException(
+                409,
+                failure_detail(
+                    "account_profile_unavailable",
+                    stage="account_verified",
+                    diagnostic_details={"exception_type": type(exc).__name__},
+                ).model_dump(mode="json"),
+            ) from exc
+
+    @app.post("/api/account-profiles/{profile_id}/switch")
+    def switch_account_profile(profile_id: str):
+        config = load_config(config_path)
+        account_change_guard(config, "切换账号")
+        try:
+            with SingleInstanceLock(config.lock_file):
+                account_store.activate(profile_id)
+        except TaskAlreadyRunning as exc:
+            raise HTTPException(
+                409,
+                failure_detail(
+                    "account_operation_busy",
+                    stage="account_verified",
+                    diagnostic_details={"exception_type": type(exc).__name__},
+                ).model_dump(mode="json"),
+            ) from exc
+        except AccountProfileStoreError as exc:
+            raise HTTPException(
+                409,
+                failure_detail(
+                    "account_switch_failed",
+                    stage="account_verified",
+                    diagnostic_details={"exception_type": type(exc).__name__},
+                ).model_dump(mode="json"),
+            ) from exc
+        return account_store.public_payload_if_available()
+
+    @app.post("/api/account-profiles/add", status_code=202)
+    def add_account_profile():
+        config = load_config(config_path)
+        account_change_guard(config, "添加账号")
+        previous_profile_id = account_store.public_payload_if_available().get(
+            "active_profile_id"
+        )
+        try:
+            with SingleInstanceLock(config.lock_file):
+                profile = account_store.create_empty_profile()
+                account_store.activate(profile["profile_id"])
+            job = run_action("login")
+        except TaskAlreadyRunning as exc:
+            raise HTTPException(
+                409,
+                failure_detail(
+                    "account_operation_busy",
+                    stage="account_verified",
+                    diagnostic_details={"exception_type": type(exc).__name__},
+                ).model_dump(mode="json"),
+            ) from exc
+        except ActionAlreadyRunning as exc:
+            if previous_profile_id:
+                with SingleInstanceLock(load_config(config_path).lock_file):
+                    account_store.activate(str(previous_profile_id))
+            raise HTTPException(
+                409,
+                failure_detail(
+                    "account_operation_busy",
+                    stage="account_verified",
+                    diagnostic_details={"exception_type": type(exc).__name__},
+                ).model_dump(mode="json"),
+            ) from exc
+        except AccountProfileStoreError as exc:
+            raise HTTPException(
+                409,
+                failure_detail(
+                    "account_profile_unavailable",
+                    stage="account_verified",
+                    diagnostic_details={"exception_type": type(exc).__name__},
+                ).model_dump(mode="json"),
+            ) from exc
+        return {
+            "profile": profile,
+            "job": job,
+            **account_store.public_payload_if_available(),
+        }
+
+    @app.post("/api/account-profile/logout")
+    def logout_account_profile(payload: AccountLogoutRequest):
+        if not payload.confirmed:
+            raise HTTPException(400, "必须明确确认退出账号")
+        config = load_config(config_path)
+        account_change_guard(config, "退出账号")
+        try:
+            with SingleInstanceLock(config.lock_file):
+                profiles = account_store.public_payload_if_available()
+                if profiles["profiles"]:
+                    def clear_active_authentication(profile_dir: Path) -> None:
+                        active_config = load_config(config_path)
+                        if account_logout_runner is not None:
+                            account_logout_runner(active_config)
+                        else:
+                            clear_managed_authentication(
+                                profile_dir,
+                                root=root,
+                                data_root=active_config.state_file.parent,
+                            )
+
+                    account_store.logout_active(clear_active_authentication)
+                elif account_logout_runner is not None:
+                    account_logout_runner(config)
+                else:
+                    logout_managed_account(
+                        config.profile_dir,
+                        root=root,
+                        data_root=config.state_file.parent,
+                    )
+        except TaskAlreadyRunning as exc:
+            raise HTTPException(
+                409,
+                failure_detail(
+                    "account_operation_busy",
+                    stage="account_verified",
+                    diagnostic_details={"exception_type": type(exc).__name__},
+                ).model_dump(mode="json"),
+            ) from exc
+        except AccountProfileStoreError as exc:
+            raise HTTPException(
+                409,
+                failure_detail(
+                    "account_logout_failed",
+                    stage="account_verified",
+                    diagnostic_details={"exception_type": type(exc).__name__},
+                ).model_dump(mode="json"),
+            ) from exc
+        return {
+            **public_profile_payload(root, logged_in=False),
+            "profile_status": "unverified",
+        }
+
     @app.get("/api/account-profile/avatar")
     def account_profile_avatar():
         _profile, avatar = (root / "data" / "account-profile.json", root / "data" / "account-avatar" / "profile.png")
@@ -1493,19 +2019,55 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
                 "last_result": {},
                 "progress": progress,
                 "candidates": [],
+                "orphans": [],
             }
         targets = {
             target.candidate_id: target
             for target in config.targets
             if target.candidate_id and target.stable_id and _avatar_id(target.stable_id)
         }
-        return {
-            "scanned_at": result.scanned_at,
-            "stale": stale,
-            "refresh_running": refresh_is_running,
-            "last_result": result.last_result,
-            "progress": progress,
-            "candidates": [
+        current_candidate_ids = {
+            candidate.candidate_id
+            for candidate in result.candidates
+            if candidate.presence_status == "current"
+        }
+        orphan_targets = [
+            target
+            for target in config.targets
+            if target.stable_id
+            and target.candidate_id
+            and target.candidate_id not in current_candidate_ids
+        ]
+        ignored_orphans = ignored_orphan_target_ids()
+        orphan_targets_by_name: dict[str, list[Target]] = defaultdict(list)
+        for target in orphan_targets:
+            orphan_targets_by_name[" ".join(target.name.split()).casefold()].append(target)
+        candidate_payloads = []
+        for candidate in result.candidates:
+            configured_target = targets.get(candidate.candidate_id)
+            normalized_name = " ".join(candidate.display_name.split()).casefold()
+            matching_orphans = orphan_targets_by_name.get(normalized_name, [])
+            actionable = [
+                target
+                for target in matching_orphans
+                if target.stable_id not in ignored_orphans
+            ]
+            if configured_target is not None:
+                match_status = "configured"
+                reassociation_target_id = None
+            elif len(actionable) == 1:
+                match_status = "needs_reassociation"
+                reassociation_target_id = actionable[0].stable_id
+            elif matching_orphans and not actionable:
+                match_status = "ignored_reassociation"
+                reassociation_target_id = None
+            elif len(actionable) > 1:
+                match_status = "ambiguous"
+                reassociation_target_id = None
+            else:
+                match_status = candidate.match_status
+                reassociation_target_id = None
+            candidate_payloads.append(
                 {
                     "candidate_id": candidate.candidate_id,
                     "display_name": candidate.display_name,
@@ -1513,12 +2075,13 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
                     "avatar_version": candidate.avatar_updated_at,
                     "avatar_status": candidate.avatar_status,
                     "discovered_at": candidate.discovered_at,
-                    "match_status": "configured" if candidate.candidate_id in targets else candidate.match_status,
-                    "configured": candidate.candidate_id in targets,
-                    "target_id": targets[candidate.candidate_id].stable_id if candidate.candidate_id in targets else None,
-                    "enabled": targets[candidate.candidate_id].enabled if candidate.candidate_id in targets else None,
-                    "configured_target_id": targets[candidate.candidate_id].stable_id if candidate.candidate_id in targets else None,
-                    "configured_enabled": targets[candidate.candidate_id].enabled if candidate.candidate_id in targets else None,
+                    "match_status": match_status,
+                    "configured": configured_target is not None,
+                    "target_id": configured_target.stable_id if configured_target else None,
+                    "enabled": configured_target.enabled if configured_target else None,
+                    "configured_target_id": configured_target.stable_id if configured_target else None,
+                    "configured_enabled": configured_target.enabled if configured_target else None,
+                    "reassociation_target_id": reassociation_target_id,
                     "avatar_updated_at": candidate.avatar_updated_at,
                     "avatar_cache_key": candidate.avatar_cache_key,
                     "first_discovered_at": candidate.first_discovered_at,
@@ -1527,7 +2090,22 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
                     "presence_status": candidate.presence_status,
                     "stale": candidate.presence_status == "stale",
                 }
-                for candidate in result.candidates
+            )
+        return {
+            "scanned_at": result.scanned_at,
+            "stale": stale,
+            "refresh_running": refresh_is_running,
+            "last_result": result.last_result,
+            "progress": progress,
+            "candidates": candidate_payloads,
+            "orphans": [
+                {
+                    "target_id": target.stable_id,
+                    "display_name": target.name,
+                    "enabled": target.enabled,
+                }
+                for target in orphan_targets
+                if target.stable_id not in ignored_orphans
             ],
         }
 
@@ -1548,6 +2126,9 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
     @app.get("/api/friends")
     def get_friends(today: str | None = None):
         config = load_config(config_path)
+        binding_guarded = bindings_revalidation_required(
+            config.state_file.parent
+        )
         state = StateStore(config.state_file).load()
         key = today or date.today().isoformat()
         daily = state.daily.get(key, {})
@@ -1587,6 +2168,9 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
                     "today_status": "success" if target.name in succeeded else "failed" if target.name in failures else "pending",
                     "last_success_date": _last_success_date(state, target.name),
                     "ambiguous_duplicate": target.enabled and normalized_names[" ".join(target.name.split()).casefold()] > 1,
+                    "binding_status": (
+                        "revalidation_required" if binding_guarded else "verified"
+                    ),
                 }
             )
         return {"friends": friends}
@@ -1630,6 +2214,7 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
         if result is None:
             raise HTTPException(409, "请先扫描好友")
         candidates = {candidate.candidate_id: candidate for candidate in result.candidates}
+        guarded_names = actionable_orphan_names(config, result)
         existing = {target.candidate_id for target in config.targets if target.candidate_id}
         added = skipped = 0
         for candidate_id in dict.fromkeys(payload.candidate_ids):
@@ -1640,6 +2225,7 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
                 or candidate.presence_status == "stale"
                 or candidate.candidate_id in existing
                 or not _avatar_id(candidate.candidate_id)
+                or " ".join(candidate.display_name.split()).casefold() in guarded_names
             ):
                 skipped += 1
                 continue
@@ -1649,7 +2235,73 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
             added += 1
         if added:
             save_config(config_path, config)
+            refresh_binding_guard(config, result)
         return {"added": added, "skipped": skipped}
+
+    @app.post("/api/friends/{candidate_id}/relink")
+    def relink_friend_candidate(candidate_id: str, payload: FriendRelinkRequest):
+        config = load_config(config_path)
+        discovered = load_discovered_friends(
+            config.state_file.parent / "discovered_friends.json"
+        )
+        candidate = next(
+            (
+                item
+                for item in (discovered.candidates if discovered else [])
+                if item.candidate_id == candidate_id
+                and item.presence_status == "current"
+            ),
+            None,
+        )
+        if candidate is None:
+            raise HTTPException(404, "未找到当前候选好友")
+        target = next(
+            (
+                item
+                for item in config.targets
+                if item.stable_id == payload.target_id
+            ),
+            None,
+        )
+        if target is None:
+            raise HTTPException(404, "待重新关联的续火目标不存在")
+        occupied = next(
+            (
+                item
+                for item in config.targets
+                if item is not target and item.candidate_id == candidate_id
+            ),
+            None,
+        )
+        if occupied is not None:
+            raise HTTPException(409, "该候选好友已关联到其他续火目标")
+        target.candidate_id = candidate.candidate_id
+        target.name = candidate.display_name
+        save_config(config_path, config)
+        refresh_binding_guard(config, discovered)
+        ignored = ignored_orphan_target_ids()
+        if target.stable_id in ignored:
+            ignored.remove(target.stable_id)
+            save_ignored_orphan_target_ids(ignored)
+        return {
+            "target_id": target.stable_id,
+            "candidate_id": candidate.candidate_id,
+            "display_name": target.name,
+        }
+
+    @app.post("/api/friends/{target_id}/ignore-orphan")
+    def ignore_friend_orphan(target_id: str):
+        config = load_config(config_path)
+        target = next(
+            (item for item in config.targets if item.stable_id == target_id),
+            None,
+        )
+        if target is None:
+            raise HTTPException(404, "续火目标不存在")
+        ignored = ignored_orphan_target_ids()
+        ignored.add(target_id)
+        save_ignored_orphan_target_ids(ignored)
+        return {"ignored": True}
 
     @app.post("/api/friends/{candidate_id}/add-to-targets")
     def add_candidate_to_targets(candidate_id: str):
@@ -1678,7 +2330,12 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
                     "enabled": existing.enabled,
                 },
             }
-        if candidate.match_status in {"ambiguous", "needs_reassociation"} or not _avatar_id(candidate.candidate_id):
+        if (
+            candidate.match_status in {"ambiguous", "needs_reassociation", "ignored_reassociation"}
+            or " ".join(candidate.display_name.split()).casefold()
+            in actionable_orphan_names(config, result)
+            or not _avatar_id(candidate.candidate_id)
+        ):
             raise HTTPException(409, "该候选好友缺少可安全使用的身份标识")
         target = Target(
             name=candidate.display_name,
@@ -1687,6 +2344,7 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
         )
         config.targets.append(target)
         save_config(config_path, config)
+        refresh_binding_guard(config, result)
         return {
             "created": True,
             "target": {
@@ -1724,6 +2382,7 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
                     target.enabled = enabled
                     affected += 1
         save_config(config_path, config)
+        refresh_binding_guard(config)
         return {"affected": affected}
 
     @app.get("/api/avatars/{friend_id}")
@@ -1773,7 +2432,7 @@ def create_app(config_path: Path, action_runner=None, now_provider=None) -> Fast
             f"{item.timestamp} {item.level} {item.summary}\n{item.detail}".strip()
             for item in reversed(page_result.items)
         )
-        payload["scheduler"] = _tail(log_dir / "scheduler.log")
+        payload["scheduler"] = _tail_scheduler_logs(log_dir)
         return payload
 
     @app.get("/api/logs/storage-summary")
