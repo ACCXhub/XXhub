@@ -42,6 +42,10 @@ $fixtureStage = Join-Path $Stage "docs\fixtures"
 if (Test-Path $fixtureStage) { Remove-Item -LiteralPath $fixtureStage -Recurse -Force }
 $fixtureAppStage = Join-Path $Stage "docs\fixture_app.py"
 if (Test-Path $fixtureAppStage) { Remove-Item -LiteralPath $fixtureAppStage -Force }
+$screenshotStage = Join-Path $Stage "docs\screenshots"
+if (Test-Path $screenshotStage) { Remove-Item -LiteralPath $screenshotStage -Recurse -Force }
+$screenshotToolStage = Join-Path $Stage "scripts\capture-doc-screenshots.py"
+if (Test-Path $screenshotToolStage) { Remove-Item -LiteralPath $screenshotToolStage -Force }
 # Python bytecode is generated locally and is neither needed nor appropriate in
 # a portable source package.  Removing it from the staging tree also prevents
 # stale machine-local artifacts from being distributed.
@@ -58,10 +62,11 @@ New-Item -ItemType Directory -Force -Path $moduleStage | Out-Null
 Copy-Item -LiteralPath $ModuleArchive -Destination $moduleStage -Force
 
 # Sensitive/runtime paths intentionally excluded: .venv, data, browser-profile,
-# avatar-cache, discovered_friends.json, account-profile.json, account-avatar,
+# avatar-cache, discovered_friends.json, account-profile.json, account-profiles,
+# account-avatar, screenshots,
 # config.yaml, messages.txt, node_modules, .git.
 Compress-Archive -Path (Join-Path $Stage "*") -DestinationPath $Archive -Force
-$forbidden = @("config.yaml", "messages.txt", ".venv", "node_modules", "browser-profile", "avatar-cache", "account-profile", "account-avatar", "discovered_friends", "data\logs", "data\history", "data\preflight")
+$forbidden = @("config.yaml", "messages.txt", ".venv", "node_modules", "browser-profile", "avatar-cache", "account-profile", "account-profiles", "account-avatar", "discovered_friends", "screenshots", "data\logs", "data\history", "data\preflight")
 $entries = Get-ChildItem -LiteralPath $Stage -Recurse -Force | ForEach-Object { $_.FullName.Substring($Stage.Length).TrimStart('\\') }
 foreach ($item in $forbidden) {
     if ($entries | Where-Object { $_ -like "*$item*" }) { throw "Portable archive staging contains excluded local data: $item" }

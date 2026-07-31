@@ -80,15 +80,17 @@ def test_custom_icon_exists_and_is_included_with_message_packs():
 
 def test_portable_builder_excludes_sensitive_data():
     text = Path("scripts/build-portable.ps1").read_text(encoding="utf-8-sig")
-    for token in [".venv", "browser-profile", "avatar-cache", "discovered_friends", "account-profile", "account-avatar", "config.yaml", "data", "node_modules"]:
+    for token in [".venv", "browser-profile", "avatar-cache", "discovered_friends", "account-profile", "account-profiles", "account-avatar", "screenshots", "config.yaml", "data", "node_modules"]:
         assert token in text
     assert "Compress-Archive" in text
+    assert "capture-doc-screenshots.py" in text
     assert "AutoDy-Windows-Portable.zip.sha256" in text
     assert "Get-FileHash" in text
     assert "data/avatar-cache/" in Path(".gitignore").read_text(encoding="utf-8")
     assert "data/discovered_friends.json" in Path(".gitignore").read_text(encoding="utf-8")
     assert "data/account-profile.json" in Path(".gitignore").read_text(encoding="utf-8")
     assert "data/account-avatar/" in Path(".gitignore").read_text(encoding="utf-8")
+    assert "data/account-profiles/" in Path(".gitignore").read_text(encoding="utf-8")
 
 
 def test_portable_builder_uses_ci_python_when_project_venv_is_absent():
