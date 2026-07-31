@@ -20,17 +20,25 @@ function candidateLabel(candidate: FriendDiscovery["candidates"][number]) {
   const { match_status: status, enabled } = candidate;
   if (status === "ambiguous") return "可能重名，未自动关联";
   if (status === "needs_reassociation") return "需要重新关联";
+  if (status === "ignored_reassociation") return "已忽略此缓存";
   if (candidate.configured || status === "configured") return enabled ? "已添加 · 已启用" : "已添加 · 已停用";
   return "点击添加到续火目标";
 }
 
-export function FriendsPage({ notify }: { notify: (message: string) => void }) {
+export function FriendsPage({
+  notify,
+  onDataChanged
+}: {
+  notify: (message: string) => void;
+  onDataChanged?: () => void;
+}) {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [friends, setFriends] = useState<ConfiguredFriend[]>([]);
   const [discovery, setDiscovery] = useState<FriendDiscovery | null>(null);
   const [batchSelected, setBatchSelected] = useState<Set<string>>(() => new Set());
   const [busyAction, setBusyAction] = useState<"scan" | "avatar" | null>(null);
   const [addingCandidateId, setAddingCandidateId] = useState<string | null>(null);
+  const [orphanSelections, setOrphanSelections] = useState<Record<string, string>>({});
   const refreshWasRunning = useRef(false);
 
   const load = async () => {
@@ -130,10 +138,38 @@ export function FriendsPage({ notify }: { notify: (message: string) => void }) {
         }
       ]);
       notify(result.created ? "已添加" : "已添加");
+      onDataChanged?.();
     } catch (error) {
       notify(error instanceof Error ? error.message : "添加候选好友失败");
     } finally {
       setAddingCandidateId(null);
+    }
+  };
+
+  const relinkCandidate = async (candidate: FriendDiscovery["candidates"][number], targetId?: string | null) => {
+    if (!targetId || addingCandidateId) return;
+    setAddingCandidateId(candidate.candidate_id);
+    try {
+      await api.relinkCandidate(candidate.candidate_id, targetId);
+      await load();
+      onDataChanged?.();
+      notify("已重新关联");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "重新关联失败");
+    } finally {
+      setAddingCandidateId(null);
+    }
+  };
+
+  const ignoreOrphan = async (targetId?: string | null) => {
+    if (!targetId) return;
+    try {
+      await api.ignoreFriendOrphan(targetId);
+      await load();
+      onDataChanged?.();
+      notify("已忽略此缓存");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "忽略缓存失败");
     }
   };
 
@@ -143,6 +179,7 @@ export function FriendsPage({ notify }: { notify: (message: string) => void }) {
     try {
       const result = await api.friendBatch([...batchSelected], action);
       await load();
+      onDataChanged?.();
       setBatchSelected(new Set());
       notify(`已处理 ${result.affected} 位好友`);
     } catch (error) {
@@ -174,10 +211,10 @@ export function FriendsPage({ notify }: { notify: (message: string) => void }) {
               <FriendAvatar name={friend.display_name} url={friend.avatar_url} />
               <div className="friend-editor-copy">
                 <strong>{friend.display_name}</strong>
-                <small><span className={friend.enabled ? "target-status" : "target-status paused"}>{friend.enabled ? "已启用" : "已停用"}</span>{todayLabel(friend.today_status)}{friend.last_success_date ? ` · 最近成功：${friend.last_success_date}` : ""}</small>
+                <small><span className={friend.enabled ? "target-status" : "target-status paused"}>{friend.enabled ? "已启用" : "已停用"}</span>{friend.binding_status === "revalidation_required" ? <span className="target-status paused">绑定待重新验证</span> : todayLabel(friend.today_status)}{friend.binding_status !== "revalidation_required" && friend.last_success_date ? ` · 最近成功：${friend.last_success_date}` : ""}</small>
               </div>
               {selected ? <span className="selection-indicator" aria-label="已选择"><Check size={13} /></span> : null}
-              <button className="icon-button danger" aria-label={`删除目标 ${friend.display_name}`} title="删除目标" onClick={(event) => { event.stopPropagation(); if (window.confirm(`删除目标「${friend.display_name}」？`)) void api.friendBatch([targetId], "delete").then(load); }}><Trash2 size={17} /></button>
+              <button className="icon-button danger" aria-label={`删除目标 ${friend.display_name}`} title="删除目标" onClick={(event) => { event.stopPropagation(); if (window.confirm(`删除目标「${friend.display_name}」？`)) void api.friendBatch([targetId], "delete").then(async () => { await load(); onDataChanged?.(); }); }}><Trash2 size={17} /></button>
             </div>;
           })}
         </div>
@@ -190,13 +227,25 @@ export function FriendsPage({ notify }: { notify: (message: string) => void }) {
           return group(left) - group(right);
         }).map((candidate) => {
           const configured = candidate.configured || candidate.match_status === "configured";
-          const canAdd = !configured && candidate.presence_status !== "stale" && !["ambiguous", "needs_reassociation"].includes(candidate.match_status);
+          const canAdd = !configured && candidate.presence_status !== "stale" && !["ambiguous", "needs_reassociation", "ignored_reassociation"].includes(candidate.match_status);
           const adding = addingCandidateId === candidate.candidate_id;
+          if (candidate.match_status === "needs_reassociation") {
+            return <div className="candidate configured candidate-reassociation" key={candidate.candidate_id}>
+              <FriendAvatar name={candidate.display_name} url={candidate.avatar_url} />
+              <span>{candidate.display_name}</span><small>{adding ? "关联中…" : "需要重新关联"}</small>
+              <span className="candidate-actions"><button className="text-button" aria-label={`重新关联 ${candidate.display_name}`} disabled={adding} onClick={() => void relinkCandidate(candidate, candidate.reassociation_target_id)}>重新关联</button><button className="text-button" aria-label={`忽略缓存 ${candidate.display_name}`} disabled={adding} onClick={() => void ignoreOrphan(candidate.reassociation_target_id)}>忽略此缓存</button></span>
+            </div>;
+          }
           return <button type="button" className={canAdd ? "candidate" : "candidate configured"} key={candidate.candidate_id} aria-label={`添加 ${candidate.display_name}`} disabled={!canAdd || adding} onClick={() => void addCandidate(candidate)}>
             <FriendAvatar name={candidate.display_name} url={candidate.avatar_url} />
             <span>{candidate.display_name}</span><small>{adding ? "添加中…" : configured ? "已添加" : candidateLabel(candidate)}</small>
           </button>;
         })}</div>
+        {discovery.orphans?.some((orphan) => !discovery.candidates.some((candidate) => candidate.reassociation_target_id === orphan.target_id)) ? <div className="orphan-bindings">{discovery.orphans.filter((orphan) => !discovery.candidates.some((candidate) => candidate.reassociation_target_id === orphan.target_id)).map((orphan) => {
+          const selectedId = orphanSelections[orphan.target_id] || "";
+          const selectedCandidate = discovery.candidates.find((candidate) => candidate.candidate_id === selectedId);
+          return <div className="orphan-binding" key={orphan.target_id}><span><strong>{orphan.display_name}</strong><small>当前绑定未在本次扫描中找到</small></span><select aria-label={`为 ${orphan.display_name} 选择候选`} value={selectedId} onChange={(event) => setOrphanSelections((current) => ({ ...current, [orphan.target_id]: event.target.value }))}><option value="">选择当前候选好友</option>{discovery.candidates.filter((candidate) => candidate.presence_status !== "stale" && !candidate.configured).map((candidate) => <option value={candidate.candidate_id} key={candidate.candidate_id}>{candidate.display_name}</option>)}</select><button className="text-button" disabled={!selectedCandidate} onClick={() => selectedCandidate && void relinkCandidate(selectedCandidate, orphan.target_id)}>重新关联</button><button className="text-button" onClick={() => void ignoreOrphan(orphan.target_id)}>忽略此缓存</button></div>;
+        })}</div> : null}
       </section> : null}
     </section>
   );

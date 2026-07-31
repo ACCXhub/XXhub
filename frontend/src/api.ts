@@ -1,6 +1,8 @@
 import type {
   AppConfig,
   AccountProfile,
+  LocalAccountProfile,
+  LocalAccountProfiles,
   BackupPreview,
   ConfiguredFriend,
   DashboardStatus,
@@ -22,6 +24,14 @@ type ActionJob = {
   action: string;
   status: "running" | "success" | "failed";
   exit_code?: number | null;
+  failure?: import("./types").FailureDetail | null;
+};
+
+type ErrorResponse = {
+  detail?: string | {
+    user_summary_zh?: string;
+    suggested_action_zh?: string;
+  };
 };
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -30,8 +40,18 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     ...init
   });
   if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(detail || `请求失败 (${response.status})`);
+    const raw = await response.text();
+    let payload: ErrorResponse | null = null;
+    try { payload = JSON.parse(raw) as ErrorResponse; } catch { payload = null; }
+    if (typeof payload?.detail === "object" && payload.detail?.user_summary_zh) {
+      throw new Error(
+        payload.detail.suggested_action_zh
+          ? `${payload.detail.user_summary_zh}；${payload.detail.suggested_action_zh}`
+          : payload.detail.user_summary_zh
+      );
+    }
+    if (typeof payload?.detail === "string") throw new Error(payload.detail);
+    throw new Error(raw || `请求失败 (${response.status})`);
   }
   return response.json() as Promise<T>;
 }
@@ -50,7 +70,22 @@ export const api = {
   failedTargets: () => request<FailedTargetCenter>("/api/failed-targets"),
   retryFailedTarget: (targetId: string) => request<ActionJob>(`/api/failed-targets/${encodeURIComponent(targetId)}/retry`, { method: "POST", body: JSON.stringify({}) }),
   accountProfile: () => request<AccountProfile>("/api/account-profile"),
+  accountProfiles: () => request<LocalAccountProfiles>("/api/account-profiles"),
+  switchAccountProfile: (profileId: string) =>
+    request<LocalAccountProfiles>(`/api/account-profiles/${encodeURIComponent(profileId)}/switch`, {
+      method: "POST",
+      body: JSON.stringify({})
+    }),
+  addAccountProfile: () =>
+    request<LocalAccountProfiles & { profile: LocalAccountProfile; job: ActionJob }>(
+      "/api/account-profiles/add",
+      { method: "POST", body: JSON.stringify({}) }
+    ),
   refreshAccountProfile: () => request<AccountProfile & { job?: ActionJob }>("/api/account-profile/refresh", { method: "POST" }),
+  logoutAccount: () => request<AccountProfile>("/api/account-profile/logout", {
+    method: "POST",
+    body: JSON.stringify({ confirmed: true })
+  }),
   config: () => request<AppConfig>("/api/config"),
   saveConfig: (config: AppConfig) =>
     request<AppConfig>("/api/config", { method: "PUT", body: JSON.stringify(config) }),
@@ -112,6 +147,13 @@ export const api = {
     request<{ created: boolean; target: { target_id: string; display_name: string; enabled: boolean } }>(`/api/friends/${encodeURIComponent(candidateId)}/add-to-targets`, {
       method: "POST"
     }),
+  relinkCandidate: (candidateId: string, targetId: string) =>
+    request<{ target_id: string; candidate_id: string; display_name: string }>(`/api/friends/${encodeURIComponent(candidateId)}/relink`, {
+      method: "POST",
+      body: JSON.stringify({ target_id: targetId })
+    }),
+  ignoreFriendOrphan: (targetId: string) =>
+    request<{ ignored: boolean }>(`/api/friends/${encodeURIComponent(targetId)}/ignore-orphan`, { method: "POST" }),
   addDiscoveredFriends: (candidateIds: string[]) =>
     request<{ added: number; skipped: number }>("/api/friends/discovered/batch", {
       method: "POST",

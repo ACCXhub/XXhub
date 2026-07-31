@@ -1,9 +1,34 @@
 export type FriendStatus = "success" | "failed" | "pending";
 
 export interface Friend {
+  target_id?: string;
   name: string;
   status: FriendStatus;
   error?: string | null;
+  failure?: FailureDetail | null;
+}
+
+export interface FailureDetail {
+  category: string;
+  stage: string;
+  reason_code: string;
+  user_summary_zh: string;
+  user_detail_zh: string;
+  retryable: boolean;
+  send_attempted: boolean;
+  send_attempts: number;
+  uncertain_send: boolean;
+  suggested_action: string;
+  suggested_action_zh: string;
+  timestamp: string;
+  run_id: string | null;
+  target_stable_id: string | null;
+  account_scope: string | null;
+  scheduler_execution_id?: string | null;
+  binding_valid: boolean | null;
+  account_scope_matches: boolean | null;
+  diagnostic_details: Record<string, unknown>;
+  safe_retry_available: boolean;
 }
 
 export interface HistoryRow {
@@ -18,6 +43,7 @@ export interface HistoryRow {
   retry_count: number;
   final_status: string;
   end_time: string;
+  target_failures?: Record<string, FailureDetail>;
 }
 
 export interface SchedulerTask {
@@ -105,6 +131,20 @@ export interface AccountProfile {
   cached: boolean;
   last_updated_at: string | null;
   refresh_running: boolean;
+}
+
+export interface LocalAccountProfile {
+  profile_id: string;
+  display_name: string | null;
+  active: boolean;
+  logged_in: boolean;
+  profile_status: "verified" | "unverified";
+}
+
+export interface LocalAccountProfiles {
+  active_profile_id: string | null;
+  profiles: LocalAccountProfile[];
+  migration_required?: boolean;
 }
 
 export type MessageSuffixStyle = "dash" | "bracket" | "newline" | "none";
@@ -234,7 +274,7 @@ export interface FriendCandidate {
   avatar_url: string;
   avatar_status: "cached" | "missing";
   discovered_at: string;
-  match_status: "configured" | "unconfigured" | "ambiguous" | "needs_reassociation";
+  match_status: "configured" | "unconfigured" | "ambiguous" | "needs_reassociation" | "ignored_reassociation";
   configured?: boolean;
   target_id?: string | null;
   enabled?: boolean | null;
@@ -247,6 +287,7 @@ export interface FriendCandidate {
   last_seen_at?: string | null;
   last_scan_id?: string | null;
   presence_status?: "current" | "stale";
+  reassociation_target_id?: string | null;
 }
 
 export interface FriendDiscovery {
@@ -266,6 +307,7 @@ export interface FriendDiscovery {
   };
   progress?: { running?: boolean; message?: string; current?: number; total?: number | null; status?: string };
   candidates: FriendCandidate[];
+  orphans?: Array<{ target_id: string; display_name: string; enabled: boolean }>;
 }
 
 export interface ConfiguredFriend {
@@ -279,6 +321,7 @@ export interface ConfiguredFriend {
   today_status: "success" | "failed" | "pending";
   last_success_date: string | null;
   ambiguous_duplicate?: boolean;
+  binding_status?: "verified" | "revalidation_required";
   settings?: TargetEffectiveSettings;
 }
 

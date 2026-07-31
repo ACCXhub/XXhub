@@ -1,7 +1,8 @@
+import { Fragment, useState } from "react";
 import { AlertTriangle, ArchiveRestore, CalendarPlus2, Download, Play, ScanLine, ShieldCheck, Wrench } from "lucide-react";
 import { ActionButton } from "../components/ActionButton";
 import { StatusRail } from "../components/StatusRail";
-import type { DashboardStatus } from "../types";
+import type { DashboardStatus, FailureDetail } from "../types";
 import type { ViewName } from "../components/Sidebar";
 
 const statusLabel = {
@@ -17,23 +18,110 @@ const triggerLabel = {
   retry: "补发"
 };
 
+const stageLabel: Record<string, string> = {
+  target_loaded: "目标载入",
+  target_binding_resolved: "目标绑定",
+  account_verified: "账号校验",
+  browser_opened: "浏览器打开",
+  conversation_located: "会话定位",
+  conversation_selected: "会话选择",
+  identity_verified: "身份验证",
+  composer_found: "输入框定位",
+  draft_state_checked: "草稿检查",
+  message_prepared: "消息准备",
+  send_boundary_reached: "发送边界",
+  confirmation_observed: "结果确认",
+  history_written: "历史写入"
+};
+
+interface FailureOccurrence {
+  rowIndex: number;
+  rowEndTime: string;
+  targetId: string;
+  failure: FailureDetail;
+}
+
+interface FailureGroup {
+  key: string;
+  items: FailureOccurrence[];
+}
+
+function groupedHistoryFailures(status: DashboardStatus): {
+  historyRows: DashboardStatus["history"];
+  groupByOccurrence: Map<string, FailureGroup>;
+} {
+  const historyRows = status.history.slice(0, 7);
+  const groups = new Map<string, FailureOccurrence[]>();
+  historyRows.forEach((row, rowIndex) => {
+    Object.entries(row.target_failures || {}).forEach(([targetId, failure]) => {
+      const key = JSON.stringify([
+        row.date,
+        failure.category,
+        failure.reason_code,
+        targetId,
+        failure.suggested_action
+      ]);
+      const items = groups.get(key) || [];
+      items.push({ rowIndex, rowEndTime: row.end_time, targetId, failure });
+      groups.set(key, items);
+    });
+  });
+  const groupByOccurrence = new Map<string, FailureGroup>();
+  groups.forEach((items, key) => {
+    items.sort((left, right) => (
+      right.failure.timestamp.localeCompare(left.failure.timestamp)
+      || right.rowEndTime.localeCompare(left.rowEndTime)
+    ));
+    const newest = items[0];
+    groupByOccurrence.set(
+      `${newest.rowIndex}\0${newest.targetId}`,
+      { key, items }
+    );
+  });
+  return { historyRows, groupByOccurrence };
+}
+
 export function DashboardPage({
   status,
   busy,
   onAction,
-  onNavigate
+  onNavigate,
+  onRetryTarget
 }: {
   status: DashboardStatus;
   busy: string | null;
   onAction: (action: string) => void;
   onNavigate: (view: ViewName) => void;
+  onRetryTarget?: (targetId: string) => void;
 }) {
+  const [expandedFailureGroups, setExpandedFailureGroups] = useState<Set<string>>(
+    () => new Set()
+  );
+  const { historyRows, groupByOccurrence } = groupedHistoryFailures(status);
   const handleIssue = (action: string) => {
     if (["friends", "messages", "packs", "scheduler", "logs", "backup", "settings"].includes(action)) {
       onNavigate(action as ViewName);
     } else {
       onAction(action);
     }
+  };
+  const targetName = (targetId: string) => (
+    status.friends.find((friend) => friend.target_id === targetId)?.name
+    || "失败目标"
+  );
+  const failureAction = (targetId: string, action: string) => {
+    if (action === "retry") onRetryTarget?.(targetId);
+    else if (action === "reassociate") onNavigate("friends");
+    else if (action === "switch_account") onAction("login");
+    else onNavigate("logs");
+  };
+  const toggleFailureGroup = (key: string) => {
+    setExpandedFailureGroups((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   };
   return (
     <>
@@ -60,14 +148,78 @@ export function DashboardPage({
             <table>
               <thead><tr><th>结束时间</th><th>来源</th><th>成功/总数</th><th>重试</th><th>状态</th></tr></thead>
               <tbody>
-                {status.history.slice(0, 7).map((row) => (
-                  <tr key={row.run_id}>
-                    <td>{new Date(row.end_time).toLocaleString("zh-CN")}</td>
-                    <td>{triggerLabel[row.trigger_source]}</td>
-                    <td>{row.success_count + row.skipped_count}/{row.total_targets}</td>
-                    <td>{row.retry_count}</td>
-                    <td><span className={row.final_status === "completed" || row.final_status === "already_done" ? "tag success" : "tag warning"}>{row.final_status === "completed" || row.final_status === "already_done" ? "成功" : "部分失败"}</span></td>
-                  </tr>
+                {historyRows.map((row, rowIndex) => (
+                  <Fragment key={`${row.run_id}-${row.end_time}-${rowIndex}`}>
+                    <tr>
+                      <td>{new Date(row.end_time).toLocaleString("zh-CN")}</td>
+                      <td>{triggerLabel[row.trigger_source]}</td>
+                      <td>{row.success_count + row.skipped_count}/{row.total_targets}</td>
+                      <td>{row.retry_count}</td>
+                      <td><span className={row.final_status === "completed" || row.final_status === "already_done" ? "tag success" : "tag warning"}>{row.final_status === "completed" || row.final_status === "already_done" ? "成功" : "部分失败"}</span></td>
+                    </tr>
+                    {Object.keys(row.target_failures || {}).map((targetId) => {
+                      const group = groupByOccurrence.get(`${rowIndex}\0${targetId}`);
+                      if (!group) return null;
+                      const expandable = group.items.length > 1;
+                      const expanded = expandable && expandedFailureGroups.has(group.key);
+                      const visibleItems = expanded ? group.items : group.items.slice(0, 1);
+                      const newest = group.items[0].failure;
+                      return (
+                        <tr className="history-failure-row" key={`${row.run_id}-${targetId}`}>
+                          <td colSpan={5}>
+                            <div
+                              className={expandable ? "history-failure-group expandable" : "history-failure-group"}
+                              role={expandable ? "button" : undefined}
+                              tabIndex={expandable ? 0 : undefined}
+                              aria-expanded={expandable ? expanded : undefined}
+                              aria-label={expandable ? `${targetName(targetId)} ${newest.user_summary_zh}` : undefined}
+                              onClick={expandable ? () => toggleFailureGroup(group.key) : undefined}
+                              onKeyDown={expandable ? (event) => {
+                                if (event.key === "Enter" || event.key === " ") {
+                                  event.preventDefault();
+                                  toggleFailureGroup(group.key);
+                                }
+                              } : undefined}
+                            >
+                              {visibleItems.map(({ targetId: occurrenceTargetId, failure }, failureIndex) => (
+                                <div className="history-failure" key={`${failure.run_id}-${failure.timestamp}-${failureIndex}`}>
+                                  {failureIndex === 0 && expandable ? (
+                                    <span className="history-failure-badge" aria-label={`共 ${group.items.length} 条重复通知`}>
+                                      {group.items.length}
+                                    </span>
+                                  ) : null}
+                                  <div>
+                                    <strong>
+                                      <span>{targetName(occurrenceTargetId)} · </span>
+                                      <b>{failure.user_summary_zh}</b>
+                                    </strong>
+                                    <small>
+                                      {new Date(failure.timestamp).toLocaleString("zh-CN")}
+                                      {" · "}
+                                      失败阶段：{stageLabel[failure.stage] || failure.stage}
+                                      {" · "}
+                                      {failure.safe_retry_available ? "可安全重试" : failure.uncertain_send ? "禁止自动重试" : "需要处理后再运行"}
+                                    </small>
+                                    <span>{failure.user_detail_zh}</span>
+                                  </div>
+                                  <button
+                                    className="action-button"
+                                    disabled={!!busy}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      failureAction(occurrenceTargetId, failure.suggested_action);
+                                    }}
+                                  >
+                                    {failure.safe_retry_available ? "仅重试此目标" : failure.suggested_action_zh}
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </Fragment>
                 ))}
               </tbody>
             </table>

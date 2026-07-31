@@ -8,7 +8,7 @@ const categories = [
   ["sending", "发送行为设置"], ["message_packs", "文案包选择"], ["settings", "非敏感应用设置"], ["rotation_state", "当天轮换状态（可选）"]
 ] as const;
 
-export function BackupPage({ notify }: { notify: (message: string) => void }) {
+export function BackupPage({ notify, onDataChanged }: { notify: (message: string) => void; onDataChanged?: () => void }) {
   const input = useRef<HTMLInputElement>(null);
   const [selected, setSelected] = useState<Set<string>>(() => new Set(categories.slice(0, -1).map(([key]) => key)));
   const [preview, setPreview] = useState<BackupPreview | null>(null);
@@ -27,7 +27,7 @@ export function BackupPage({ notify }: { notify: (message: string) => void }) {
   };
   const restore = async (mode: "merge" | "replace") => {
     if (!pendingFile) return;
-    try { const result = await api.importBackup(pendingFile, mode); notify(`备份已导入：${result.targets.length} 位好友，${result.messages} 条文案（${mode === "merge" ? "合并" : "替换"}）`); setPreview(null); setPendingFile(null); }
+    try { const result = await api.importBackup(pendingFile, mode); notify(`备份已导入：${result.targets.length} 位好友，${result.messages} 条文案（${mode === "merge" ? "合并" : "替换"}）`); setPreview(null); setPendingFile(null); onDataChanged?.(); }
     catch (error) { notify(error instanceof Error ? error.message : "备份恢复失败，原数据已保留"); }
   };
   return <section className="editor-page">

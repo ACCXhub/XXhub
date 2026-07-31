@@ -10,6 +10,9 @@ const apiMocks = vi.hoisted(() => ({
   refreshFriendAvatars: vi.fn(),
   waitForAction: vi.fn(),
   addCandidateToTargets: vi.fn(),
+  relinkCandidate: vi.fn(),
+  ignoreFriendOrphan: vi.fn(),
+  logoutAccount: vi.fn(),
   friendBatch: vi.fn(),
   saveConfig: vi.fn(),
   preflightLatest: vi.fn(),
@@ -72,6 +75,20 @@ beforeEach(() => {
     target: { target_id: "candidate-new", display_name: "新朋友", enabled: true }
   });
   apiMocks.friendBatch.mockResolvedValue({ affected: 1 });
+  apiMocks.relinkCandidate.mockResolvedValue({ target_id: "target-orphan", candidate_id: "candidate-new", display_name: "新朋友" });
+  apiMocks.ignoreFriendOrphan.mockResolvedValue({ ignored: true });
+  apiMocks.logoutAccount.mockResolvedValue({
+    display_name: null,
+    avatar_url: null,
+    avatar_version: null,
+    is_self: false,
+    profile_status: "unverified",
+    verification_source: null,
+    logged_in: false,
+    cached: false,
+    last_updated_at: null,
+    refresh_running: false
+  });
   apiMocks.saveConfig.mockResolvedValue(config);
   apiMocks.preflightLatest.mockResolvedValue({ result: null });
   apiMocks.runPreflight.mockResolvedValue({ id: "preflight-1", action: "preflight", status: "running" });
@@ -166,4 +183,48 @@ test("keeps advanced target overrides out of the normal friend page", async () =
   expect(screen.queryByRole("button", { name: "编辑目标设置 小明" })).not.toBeInTheDocument();
   expect(screen.queryByRole("dialog", { name: "编辑目标设置" })).not.toBeInTheDocument();
   expect(apiMocks.saveTargetSettings).not.toHaveBeenCalled();
+});
+
+test("offers explicit relink and ignore actions for a genuine orphan binding", async () => {
+  apiMocks.discoveredFriends.mockResolvedValueOnce({
+    ...discovered,
+    refresh_running: false,
+    candidates: [{
+      ...discovered.candidates[1],
+      match_status: "needs_reassociation",
+      reassociation_target_id: "target-orphan"
+    }],
+    orphans: [{ target_id: "target-orphan", display_name: "待关联目标", enabled: true }]
+  });
+  const onDataChanged = vi.fn();
+  render(<FriendsPage notify={vi.fn()} onDataChanged={onDataChanged} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "重新关联 新朋友" }));
+
+  await waitFor(() => expect(apiMocks.relinkCandidate).toHaveBeenCalledWith("candidate-new", "target-orphan"));
+  expect(onDataChanged).toHaveBeenCalled();
+});
+
+test("keeps account refresh, switching and logout out of Friend Management", async () => {
+  render(<FriendsPage notify={vi.fn()} onDataChanged={vi.fn()} />);
+
+  expect(await screen.findByRole("heading", { name: "好友管理" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /退出账号|退出当前账号/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "刷新当前账号资料" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "扫描好友" })).toBeInTheDocument();
+});
+
+test("shows configured targets as pending revalidation after managed logout", async () => {
+  apiMocks.friends.mockResolvedValueOnce({
+    friends: [{
+      id: "friend-xiaoming", display_name: "小明", enabled: true,
+      avatar_url: "/api/avatars/friend-xiaoming", avatar_status: "cached",
+      today_status: "pending", last_success_date: null, note: "",
+      binding_status: "revalidation_required"
+    }]
+  });
+
+  render(<FriendsPage notify={vi.fn()} />);
+
+  expect(await screen.findByText("绑定待重新验证")).toBeInTheDocument();
 });
