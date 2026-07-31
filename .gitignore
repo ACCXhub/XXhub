@@ -9,6 +9,8 @@ frontend/*.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
 output/
+packaging/wix/bin/
+packaging/wix/obj/
 optional-modules/
 .tools/
 config.yaml

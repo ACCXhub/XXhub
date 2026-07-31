@@ -1,4 +1,6 @@
 param(
+    [string]$ProgramRoot,
+    [string]$DataRoot,
     [ValidatePattern('^([01]\d|2[0-3]):[0-5]\d$')]
     [string]$DailyHealthCheckTime = "07:20",
     [ValidatePattern('^([01]\d|2[0-3]):[0-5]\d$')]
@@ -12,11 +14,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 $TaskName = "AutoDy-DailySpark"
-$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$Python = Join-Path $Root ".venv\Scripts\python.exe"
+$Root = if ($ProgramRoot) { [IO.Path]::GetFullPath($ProgramRoot) } else { (Resolve-Path (Join-Path $PSScriptRoot "..")).Path }
+$DataRoot = if ($DataRoot) { [IO.Path]::GetFullPath($DataRoot) } elseif ($env:AUTODY_HOME) { [IO.Path]::GetFullPath($env:AUTODY_HOME) } else { $Root }
+$Python = if (Test-Path -LiteralPath (Join-Path $Root "runtime\python\python.exe")) {
+    Join-Path $Root "runtime\python\python.exe"
+} else {
+    Join-Path $Root ".venv\Scripts\python.exe"
+}
 
 if (-not (Test-Path $Python)) { throw "Missing $Python. Create .venv and install the project first." }
-if (-not (Test-Path (Join-Path $Root "config.yaml"))) { throw "Missing config.yaml. Copy and edit config.example.yaml first." }
+if (-not (Test-Path (Join-Path $DataRoot "config.yaml"))) { throw "Missing config.yaml. Start AutoDy once before installing scheduled tasks." }
 
 $PowerShell = (Get-Command powershell.exe).Source
 $RunScript = Join-Path $Root "scripts\run-scheduled.ps1"
@@ -27,8 +34,9 @@ $Settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 20)
 $CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $Principal = New-ScheduledTaskPrincipal -UserId $CurrentUser -LogonType Interactive -RunLevel Limited
-$RunAction = New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$RunScript`"" -WorkingDirectory $Root
-$HealthAction = New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$HealthScript`"" -WorkingDirectory $Root
+$TaskArguments = "-ProgramRoot `"$Root`" -DataRoot `"$DataRoot`""
+$RunAction = New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$RunScript`" $TaskArguments" -WorkingDirectory $Root
+$HealthAction = New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$HealthScript`" $TaskArguments" -WorkingDirectory $Root
 
 Register-ScheduledTask `
     -TaskName $TaskName `

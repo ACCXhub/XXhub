@@ -653,7 +653,8 @@ def _message_count(path: Path) -> int:
 
 
 def _runtime_available(root: Path) -> bool:
-    browsers = root / "data" / "ms-playwright"
+    configured = os.environ.get("AUTODY_BROWSERS_PATH", "").strip()
+    browsers = Path(configured).resolve() if configured else root / "data" / "ms-playwright"
     return any(browsers.glob("chromium-*/chrome-win*/chrome.exe"))
 
 
@@ -781,7 +782,8 @@ def create_app(
 ) -> FastAPI:
     config_path = config_path.resolve()
     root = config_path.parent
-    manager = ActionManager(root, config_path)
+    program_root = Path(os.environ.get("AUTODY_PROGRAM_ROOT", root)).resolve()
+    manager = ActionManager(program_root, config_path)
     account_store = MultiAccountStore(root, config_path)
     run_action = action_runner or manager.start
     current_time = now_provider or datetime.now
@@ -1815,21 +1817,21 @@ def create_app(
         current = load_config(config_path)
         candidate = current.model_copy(update=payload.model_dump())
         candidate = AppConfig.model_validate(candidate.model_dump())
-        return SchedulerService(root).preview(current, candidate)
+        return SchedulerService(program_root, data_root=root).preview(current, candidate)
 
     @app.post("/api/scheduler/apply")
     def scheduler_apply(payload: ScheduleUpdate):
         current = load_config(config_path)
         candidate = AppConfig.model_validate(current.model_copy(update=payload.model_dump()).model_dump())
         try:
-            SchedulerService(root).apply(config_path, current, candidate)
+            SchedulerService(program_root, data_root=root).apply(config_path, current, candidate)
         except RuntimeError as exc:
             raise HTTPException(409, f"定时任务未更新：{exc}") from exc
         return {"config": _config_payload(candidate), "tasks": _task_rows(), "message": "定时任务已更新"}
 
     @app.post("/api/scheduler/{operation}")
     def scheduler_operation(operation: str):
-        service = SchedulerService(root)
+        service = SchedulerService(program_root, data_root=root)
         config = load_config(config_path)
         try:
             if operation in {"install", "update", "repair"}:

@@ -46,8 +46,14 @@ def validate_schedule_settings(settings: ScheduleSettings) -> ScheduleSettings:
 
 
 class SchedulerService:
-    def __init__(self, root: Path, install: Callable[[AppConfig], None] | None = None):
+    def __init__(
+        self,
+        root: Path,
+        install: Callable[[AppConfig], None] | None = None,
+        data_root: Path | None = None,
+    ):
         self.root = root.resolve()
+        self.data_root = (data_root or root).resolve()
         self._install = install or self._install_windows_tasks
 
     def preview(self, previous: AppConfig, candidate: AppConfig) -> dict:
@@ -107,6 +113,8 @@ class SchedulerService:
         script = self.root / "scripts" / "install-task.ps1"
         command = [
             "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
+            "-ProgramRoot", str(self.root),
+            "-DataRoot", str(self.data_root),
             "-DailyHealthCheckTime", config.daily_health_check_time,
             "-DailySendTime", config.daily_send_time,
             "-WeeklyHealthCheckEnabled", "$true" if config.weekly_health_check_enabled else "$false",

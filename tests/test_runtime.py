@@ -9,6 +9,7 @@ def test_configure_runtime_uses_project_local_playwright_directory(
 ):
     for name in (
         "AUTODY_HOME",
+        "AUTODY_BROWSERS_PATH",
         "PLAYWRIGHT_BROWSERS_PATH",
         "PLAYWRIGHT_SKIP_BROWSER_GC",
     ):
@@ -26,10 +27,23 @@ def test_configure_runtime_uses_project_local_playwright_directory(
 def test_configure_runtime_overrides_appdata_playwright_path(
     tmp_path: Path, monkeypatch
 ):
-    default_path = r"C:\Users\Administrator\AppData\Local\ms-playwright"
+    default_path = str(tmp_path / "external-cache" / "ms-playwright")
     monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", default_path)
 
     runtime = configure_runtime(tmp_path)
 
     assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(runtime.browsers_path)
     assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] != default_path
+
+
+def test_configure_runtime_honors_packaged_browser_path(
+    tmp_path: Path, monkeypatch
+):
+    browsers = tmp_path / "program" / "runtime" / "ms-playwright"
+    monkeypatch.setenv("AUTODY_BROWSERS_PATH", str(browsers))
+
+    runtime = configure_runtime(tmp_path / "user-data")
+
+    assert runtime.home == (tmp_path / "user-data").resolve()
+    assert runtime.browsers_path == browsers.resolve()
+    assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(browsers.resolve())

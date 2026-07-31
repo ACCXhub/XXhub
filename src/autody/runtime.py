@@ -20,7 +20,12 @@ class DoctorResult:
 
 def configure_runtime(home: Path) -> RuntimePaths:
     resolved_home = home.resolve()
-    browsers_path = resolved_home / "data" / "ms-playwright"
+    configured_browsers = os.environ.get("AUTODY_BROWSERS_PATH", "").strip()
+    browsers_path = (
+        Path(configured_browsers).expanduser().resolve()
+        if configured_browsers
+        else resolved_home / "data" / "ms-playwright"
+    )
     browsers_path.mkdir(parents=True, exist_ok=True)
     os.environ["AUTODY_HOME"] = str(resolved_home)
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_path)
@@ -61,4 +66,3 @@ def repair_playwright(home: Path) -> RuntimePaths:
     if completed.returncode != 0:
         raise RuntimeError(f"Chromium 安装失败，退出码：{completed.returncode}")
     return runtime
-

@@ -50,7 +50,7 @@ def test_scheduled_send_waits_for_retry_pending_and_only_notifies_for_final_outc
 def test_scheduler_wrappers_set_portable_playwright_environment():
     for path in [Path("scripts/run-scheduled.ps1"), Path("scripts/health-check.ps1")]:
         text = path.read_text(encoding="utf-8-sig")
-        for token in ["AUTODY_HOME", "PLAYWRIGHT_BROWSERS_PATH", "PLAYWRIGHT_SKIP_BROWSER_GC"]:
+        for token in ["AUTODY_HOME", "AUTODY_PROGRAM_ROOT", "AUTODY_BROWSERS_PATH", "PLAYWRIGHT_BROWSERS_PATH", "PLAYWRIGHT_SKIP_BROWSER_GC"]:
             assert token in text
 
 
@@ -69,5 +69,10 @@ def test_source_launchers_use_project_local_python_not_console_entrypoint():
     for path in [Path("scripts/run-scheduled.ps1"), Path("scripts/health-check.ps1")]:
         text = path.read_text(encoding="utf-8-sig")
         assert ".venv\\Scripts\\python.exe" in text
+        assert "runtime\\python\\python.exe" in text
+        assert "[string]$DataRoot" in text
         assert "autody.cli" in text
-    assert ".venv\\Scripts\\python.exe" in Path("scripts/install-task.ps1").read_text(encoding="utf-8-sig")
+    installer = Path("scripts/install-task.ps1").read_text(encoding="utf-8-sig")
+    assert ".venv\\Scripts\\python.exe" in installer
+    assert "runtime\\python\\python.exe" in installer
+    assert '-DataRoot `"$DataRoot`"' in installer

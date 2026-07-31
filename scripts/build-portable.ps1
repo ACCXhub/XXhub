@@ -46,6 +46,19 @@ $screenshotStage = Join-Path $Stage "docs\screenshots"
 if (Test-Path $screenshotStage) { Remove-Item -LiteralPath $screenshotStage -Recurse -Force }
 $screenshotToolStage = Join-Path $Stage "scripts\capture-doc-screenshots.py"
 if (Test-Path $screenshotToolStage) { Remove-Item -LiteralPath $screenshotToolStage -Force }
+# Repository handoff notes and release-only packaging tools are not user
+# runtime content and may contain machine-specific verification paths.
+foreach ($releaseOnlyPath in @(
+    "docs\PROJECT_HANDOFF.md",
+    "scripts\build-msi.ps1",
+    "scripts\verify-msi-lifecycle.ps1",
+    "scripts\verify-release-artifacts.ps1"
+)) {
+    $releaseOnlyStage = Join-Path $Stage $releaseOnlyPath
+    if (Test-Path -LiteralPath $releaseOnlyStage) {
+        Remove-Item -LiteralPath $releaseOnlyStage -Force
+    }
+}
 # Python bytecode is generated locally and is neither needed nor appropriate in
 # a portable source package.  Removing it from the staging tree also prevents
 # stale machine-local artifacts from being distributed.

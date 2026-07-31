@@ -39,6 +39,12 @@ npm run build
 cd ..
 ```
 
+## Windows 发布包
+
+GitHub Release 提供 per-user MSI 与 portable ZIP。MSI 将程序安装到 `%LocalAppData%\Programs\AutoDy`，将可写数据保存在 `%LocalAppData%\AutoDy`；卸载程序默认保留该数据目录。MSI 自带固定版本的 Python 运行时与 Chromium，不要求终端用户安装 Node.js，也不会在安装期间启动 AutoDy 或访问 Douyin。
+
+安装或下载后应使用同名 `.sha256` 文件校验产物。普通启动通过隐藏的 VBS 启动器和托盘完成；桌面与开始菜单快捷方式均指向该启动器。
+
 ## 验证
 
 ```powershell
@@ -49,6 +55,9 @@ npm test
 npm run build
 cd ..
 .\scripts\build-portable.ps1
+.\scripts\build-msi.ps1
+.\scripts\verify-msi-lifecycle.ps1
+.\scripts\verify-release-artifacts.ps1
 ```
 
 前端变更还需要在新浏览器上下文中检查本机生产页面 `http://127.0.0.1:8765`。检查仅限界面、请求和只读状态，不能进行真实消息操作。

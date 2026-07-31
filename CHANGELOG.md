@@ -21,11 +21,14 @@
 - 增加账号隔离的本地资料、绑定、消息分配、计划和发现缓存。
 - 增加 Dashboard 请求超时、中文错误状态、重试按钮和折叠脱敏诊断。
 - 增加按日期、类别、原因、目标稳定 ID 和建议动作分组的通知展示。
+- 增加 per-user MSI：固定并校验嵌入式 Python、固定运行依赖、捆绑 Chromium，并使用显式发布 allowlist。
+- 增加 MSI 静默安装/修复/卸载验证，以及 MSI 表、行政解包、portable 和模块包的统一隐私扫描报告。
 
 ### Security
 
 - 不确定发送、已确认目标和身份不一致状态不会暴露目标重试入口。
 - portable 构建明确排除账号资料、运行时数据、浏览器资料、日志、截图和开发夹具。
+- MSI 将程序与可写数据分别放在 `%LocalAppData%\Programs\AutoDy` 和 `%LocalAppData%\AutoDy`，卸载默认保留用户数据。
 - Test Center 导航验收与可访问 composer 的受控干跑继续保持分层身份门禁。
 
 ## [1.3.0] - Published

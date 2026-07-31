@@ -1,8 +1,10 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from autody.config import AppConfig, Target
+from autody import scheduler
 from autody.scheduler import ScheduleSettings, SchedulerService, validate_schedule_settings
 
 
@@ -55,3 +57,24 @@ def test_schedule_preview_lists_affected_windows_tasks(tmp_path: Path):
     assert {item["name"] for item in preview["affected_tasks"]} == {
         "AutoDy-Health-Daily", "AutoDy-DailySpark", "AutoDy-Health-Weekly"
     }
+
+
+def test_packaged_scheduler_passes_program_and_data_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    program_root = tmp_path / "program"
+    data_root = tmp_path / "user-data"
+    captured: list[str] = []
+
+    def fake_run(command, **_kwargs):
+        captured.extend(command)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(scheduler.subprocess, "run", fake_run)
+
+    SchedulerService(program_root, data_root=data_root).install(
+        AppConfig(targets=[Target(name="fixture")])
+    )
+
+    assert captured[captured.index("-ProgramRoot") + 1] == str(program_root.resolve())
+    assert captured[captured.index("-DataRoot") + 1] == str(data_root.resolve())

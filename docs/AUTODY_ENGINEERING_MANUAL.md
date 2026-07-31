@@ -173,7 +173,7 @@ flowchart LR
 
 ## 21. 安装、启动与便携式构建
 
-开发环境使用项目 `.venv`。源安装可以构建前端；便携式安装不要求终端用户具备 Node.js。`install.cmd`、仪表盘启动脚本和便携式构建脚本必须保持 PowerShell 5.1 与 MSI 兼容，且任何启动失败应可见、可诊断。
+开发环境使用项目 `.venv`。源安装可以构建前端；便携式安装不要求终端用户具备 Node.js。per-user MSI 将只读程序安装到 `%LocalAppData%\Programs\AutoDy`，将可写数据放在 `%LocalAppData%\AutoDy`，并默认在卸载时保留数据。MSI 使用固定 SHA-256 的官方 Python embeddable、固定依赖和 clean Chromium staging，不复制开发 `.venv`，也不递归打包仓库。`install.cmd`、仪表盘启动脚本和构建脚本必须保持 PowerShell 5.1 与 MSI 兼容，且任何启动失败应可见、可诊断。
 
 ## 22. 诊断与陈旧安装
 
@@ -193,6 +193,9 @@ npm test
 npm run build
 cd ..
 .\scripts\build-portable.ps1
+.\scripts\build-msi.ps1
+.\scripts\verify-msi-lifecycle.ps1
+.\scripts\verify-release-artifacts.ps1
 ```
 
 UI 变更还应在新的浏览器上下文中访问 `127.0.0.1:8765`，检查请求、控制台、弹窗、滚动和常见桌面宽度；该验收不得触发真实消息操作。

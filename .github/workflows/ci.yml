@@ -34,6 +34,27 @@ jobs:
           python -m playwright install chromium
       - name: Run Python tests
         run: pytest -q
+      - name: Validate MSI packaging source
+        shell: powershell
+        run: |
+          dotnet restore .\packaging\wix\AutoDy.Package.wixproj -p:AcceptEula=wix7
+          $scripts = @(
+            ".\scripts\build-msi.ps1",
+            ".\scripts\verify-msi-lifecycle.ps1",
+            ".\scripts\verify-release-artifacts.ps1"
+          )
+          foreach ($script in $scripts) {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $script),
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors.Count -gt 0) {
+              throw "PowerShell parser validation failed: $script"
+            }
+          }
       - name: Build and inspect portable archive
         shell: powershell
         run: |

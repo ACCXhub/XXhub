@@ -1,0 +1,17 @@
+<Project Sdk="WixToolset.Sdk/7.0.0">
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <Platform>x64</Platform>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">1.4.0</ProductVersion>
+    <StageDir Condition="'$(StageDir)' == ''">$(MSBuildProjectDirectory)\stage</StageDir>
+    <GeneratedWxs Condition="'$(GeneratedWxs)' == ''">$(MSBuildProjectDirectory)\GeneratedFiles.wxs</GeneratedWxs>
+    <DefineConstants>ProductVersion=$(ProductVersion);StageDir=$(StageDir)</DefineConstants>
+    <OutputName>AutoDy-$(ProductVersion)-x64</OutputName>
+    <!-- ICE91 is inapplicable to this per-user-only package; ICE60 flags
+         language-neutral third-party runtime binaries. All other ICEs remain enabled. -->
+    <SuppressIces>ICE60;ICE91</SuppressIces>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(GeneratedWxs)" />
+  </ItemGroup>
+</Project>

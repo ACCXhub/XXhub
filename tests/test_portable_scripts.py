@@ -47,9 +47,12 @@ def test_dashboard_launcher_and_shortcut_are_portable_and_use_icon():
     assert "autody-tray.ps1" in startup
     for token in [
         "AUTODY_HOME",
+        "AUTODY_PROGRAM_ROOT",
+        "AUTODY_BROWSERS_PATH",
         "PLAYWRIGHT_BROWSERS_PATH",
         "PLAYWRIGHT_SKIP_BROWSER_GC",
         ".venv\\Scripts\\python.exe",
+        "runtime\\python\\python.exe",
         "-m\", \"autody.cli\", \"ui\"",
     ]:
         assert token in tray
@@ -66,7 +69,7 @@ def test_dashboard_launcher_and_shortcut_are_portable_and_use_icon():
     assert "start-dashboard.vbs" in shortcut
     assert "wscript.exe" in shortcut
     assert "start-dashboard.cmd" not in shortcut
-    assert "C:\\Users\\Administrator" not in shortcut
+    assert "C:\\Users\\" not in shortcut
 
 
 def test_custom_icon_exists_and_is_included_with_message_packs():
@@ -84,6 +87,10 @@ def test_portable_builder_excludes_sensitive_data():
         assert token in text
     assert "Compress-Archive" in text
     assert "capture-doc-screenshots.py" in text
+    assert "PROJECT_HANDOFF.md" in text
+    assert "build-msi.ps1" in text
+    assert "verify-msi-lifecycle.ps1" in text
+    assert "verify-release-artifacts.ps1" in text
     assert "AutoDy-Windows-Portable.zip.sha256" in text
     assert "Get-FileHash" in text
     assert "data/avatar-cache/" in Path(".gitignore").read_text(encoding="utf-8")

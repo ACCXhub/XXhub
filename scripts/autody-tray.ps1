@@ -1,5 +1,6 @@
 ﻿param(
     [string]$ProjectRoot = (Join-Path $PSScriptRoot ".."),
+    [string]$DataRoot,
     [switch]$DefineOnly,
     [switch]$OpenDashboardOnly
 )
@@ -9,15 +10,60 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
-$Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
-$Config = Join-Path $ProjectRoot "config.yaml"
-$PackagePath = Join-Path $ProjectRoot "src\autody"
+$PackagedPython = Join-Path $ProjectRoot "runtime\python\python.exe"
+$IsPackaged = Test-Path -LiteralPath $PackagedPython -PathType Leaf
+if (-not $DataRoot) {
+    $DataRoot = if ($IsPackaged) {
+        Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "AutoDy"
+    } else {
+        $ProjectRoot
+    }
+}
+$DataRoot = [IO.Path]::GetFullPath($DataRoot)
+New-Item -ItemType Directory -Force -Path $DataRoot | Out-Null
+$Python = if ($IsPackaged) { $PackagedPython } else { Join-Path $ProjectRoot ".venv\Scripts\python.exe" }
+$Config = Join-Path $DataRoot "config.yaml"
+$PackagePath = if ($IsPackaged) {
+    Join-Path $ProjectRoot "runtime\python\Lib\site-packages\autody"
+} else {
+    Join-Path $ProjectRoot "src\autody"
+}
 $Url = "http://127.0.0.1:8765"
-$env:AUTODY_HOME = $ProjectRoot
-$env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $ProjectRoot "data\ms-playwright"
+$env:AUTODY_HOME = $DataRoot
+$env:AUTODY_PROGRAM_ROOT = $ProjectRoot
+$BrowserRoot = if ($IsPackaged) {
+    Join-Path $ProjectRoot "runtime\ms-playwright"
+} else {
+    Join-Path $DataRoot "data\ms-playwright"
+}
+$env:AUTODY_BROWSERS_PATH = $BrowserRoot
+$env:PLAYWRIGHT_BROWSERS_PATH = $BrowserRoot
 $env:PLAYWRIGHT_SKIP_BROWSER_GC = "1"
-$LogDir = Join-Path $ProjectRoot "data\logs"
+$LogDir = Join-Path $DataRoot "data\logs"
 $TrayLog = Join-Path $LogDir "tray.log"
+
+if ($IsPackaged) {
+    foreach ($seed in @(
+        @{ Source = (Join-Path $ProjectRoot "config.example.yaml"); Destination = $Config },
+        @{ Source = (Join-Path $ProjectRoot "messages.example.txt"); Destination = (Join-Path $DataRoot "messages.txt") }
+    )) {
+        if (-not (Test-Path -LiteralPath $seed.Destination) -and (Test-Path -LiteralPath $seed.Source)) {
+            Copy-Item -LiteralPath $seed.Source -Destination $seed.Destination
+        }
+    }
+    $packSource = Join-Path $ProjectRoot "message-packs"
+    $packDestination = Join-Path $DataRoot "message-packs"
+    if (Test-Path -LiteralPath $packSource -PathType Container) {
+        New-Item -ItemType Directory -Force -Path $packDestination | Out-Null
+        Get-ChildItem -LiteralPath $packSource -File | Copy-Item -Destination $packDestination -Force
+    }
+    $moduleSource = Join-Path $ProjectRoot "optional-modules\AutoDy-Test-Center.autody-module.zip"
+    $moduleDestination = Join-Path $DataRoot "optional-modules\AutoDy-Test-Center.autody-module.zip"
+    if (Test-Path -LiteralPath $moduleSource -PathType Leaf) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $moduleDestination) | Out-Null
+        Copy-Item -LiteralPath $moduleSource -Destination $moduleDestination -Force
+    }
+}
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -149,7 +195,7 @@ function Test-OwnedAutoDy($Snapshot) {
     if ($null -eq $Snapshot -or $null -eq $Snapshot.Identity) { return $false }
     try {
         return $Snapshot.Identity.application -eq "AutoDy" -and
-            ([IO.Path]::GetFullPath([string]$Snapshot.Identity.project_path).TrimEnd('\\') -eq [IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\\')) -and
+            ([IO.Path]::GetFullPath([string]$Snapshot.Identity.project_path).TrimEnd('\\') -eq [IO.Path]::GetFullPath($DataRoot).TrimEnd('\\')) -and
             ([IO.Path]::GetFullPath([string]$Snapshot.Identity.package_path).TrimEnd('\\') -eq [IO.Path]::GetFullPath($PackagePath).TrimEnd('\\')) -and
             ([IO.Path]::GetFullPath([string]$Snapshot.Identity.python_executable).TrimEnd('\\') -eq [IO.Path]::GetFullPath($Python).TrimEnd('\\'))
     } catch { return $false }
@@ -192,7 +238,7 @@ function Start-Or-ReuseService {
         if (Test-HealthyAutoDy $snapshot $expected) { return $snapshot }
         if (-not (Stop-ManagedService)) { throw "Verified old AutoDy service could not be stopped." }
     }
-    $process = Start-Process -FilePath $Python -ArgumentList @("-m", "autody.cli", "ui", "--no-open", "--config", $Config) -WorkingDirectory $ProjectRoot -WindowStyle Hidden -PassThru
+    $process = Start-Process -FilePath $Python -ArgumentList @("-m", "autody.cli", "ui", "--no-open", "--config", $Config) -WorkingDirectory $DataRoot -WindowStyle Hidden -PassThru
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         Start-Sleep -Milliseconds 250
         $snapshot = Get-ServiceSnapshot
@@ -331,6 +377,7 @@ function Invoke-DashboardOpenAsync {
         "-ExecutionPolicy", "Bypass",
         "-File", ('"{0}"' -f $PSCommandPath),
         "-ProjectRoot", ('"{0}"' -f $ProjectRoot),
+        "-DataRoot", ('"{0}"' -f $DataRoot),
         "-OpenDashboardOnly"
     )
     Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WorkingDirectory $ProjectRoot -WindowStyle Hidden | Out-Null
@@ -339,8 +386,8 @@ function Invoke-DashboardOpenAsync {
 function Get-TrayState {
     $snapshot = Get-ServiceSnapshot
     if ($null -eq $snapshot -or -not (Test-OwnedAutoDy $snapshot)) { return "已停止" }
-    if (Test-Path -LiteralPath (Join-Path $ProjectRoot "data\notifications\need-attention.txt")) { return "需要处理" }
-    $outcomes = Join-Path $ProjectRoot "data\history\task-outcomes.json"
+    if (Test-Path -LiteralPath (Join-Path $DataRoot "data\notifications\need-attention.txt")) { return "需要处理" }
+    $outcomes = Join-Path $DataRoot "data\history\task-outcomes.json"
     if ((Test-Path -LiteralPath $outcomes) -and ((Get-Content -Raw -LiteralPath $outcomes -ErrorAction SilentlyContinue) -match '"outcome"\s*:\s*"retry_pending"')) { return "正在安全重试" }
     return "运行正常"
 }

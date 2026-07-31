@@ -13,6 +13,7 @@
 - 失败详情现在包含精确中文原因、失败阶段、是否尝试发送和建议动作；只有安全可重试状态才显示“仅重试此目标”。
 - 通知按本地日期、类别、原因、稳定目标和建议动作分组；折叠时显示最新一条和数量，展开后按时间倒序保留每条详情。
 - 增加账号隔离的本地资料、目标绑定、启用状态、文案分配、计划、好友发现缓存和 Test Center 选择。
+- 新增 per-user MSI，内置固定版本的 Python 运行时和 Chromium；程序与可写数据分离，卸载默认保留用户数据。
 
 ### Dashboard 与本地运行
 
@@ -47,4 +48,7 @@ npm test
 npm run build
 cd ..
 .\scripts\build-portable.ps1
+.\scripts\build-msi.ps1
+.\scripts\verify-msi-lifecycle.ps1
+.\scripts\verify-release-artifacts.ps1
 ```

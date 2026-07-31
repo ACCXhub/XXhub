@@ -1,14 +1,23 @@
-﻿$ErrorActionPreference = "Stop"
+﻿param(
+    [string]$ProgramRoot,
+    [string]$DataRoot
+)
+
+$ErrorActionPreference = "Stop"
 $env:PYTHONUTF8 = "1"
-$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$env:AUTODY_HOME = $Root
-$env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $Root "data\ms-playwright"
+$Root = if ($ProgramRoot) { [IO.Path]::GetFullPath($ProgramRoot) } else { (Resolve-Path (Join-Path $PSScriptRoot "..")).Path }
+$DataRoot = if ($DataRoot) { [IO.Path]::GetFullPath($DataRoot) } elseif ($env:AUTODY_HOME) { [IO.Path]::GetFullPath($env:AUTODY_HOME) } else { $Root }
+$env:AUTODY_HOME = $DataRoot
+$env:AUTODY_PROGRAM_ROOT = $Root
+$BrowserRoot = if (Test-Path -LiteralPath (Join-Path $Root "runtime\ms-playwright")) { Join-Path $Root "runtime\ms-playwright" } else { Join-Path $DataRoot "data\ms-playwright" }
+$env:AUTODY_BROWSERS_PATH = $BrowserRoot
+$env:PLAYWRIGHT_BROWSERS_PATH = $BrowserRoot
 $env:PLAYWRIGHT_SKIP_BROWSER_GC = "1"
-$Python = Join-Path $Root ".venv\Scripts\python.exe"
-$Config = Join-Path $Root "config.yaml"
-$LogDir = Join-Path $Root "data\logs"
+$Python = if (Test-Path -LiteralPath (Join-Path $Root "runtime\python\python.exe")) { Join-Path $Root "runtime\python\python.exe" } else { Join-Path $Root ".venv\Scripts\python.exe" }
+$Config = Join-Path $DataRoot "config.yaml"
+$LogDir = Join-Path $DataRoot "data\logs"
 $Log = Join-Path $LogDir ("scheduler-{0}.log" -f (Get-Date -Format "yyyy-MM-dd"))
-$NotificationDir = Join-Path $Root "data\notifications"
+$NotificationDir = Join-Path $DataRoot "data\notifications"
 $Alert = Join-Path $NotificationDir "need-attention.txt"
 $NotificationsEnabled = -not ((Get-Content -Raw $Config -ErrorAction SilentlyContinue) -match '(?m)^completion_notifications_enabled:\s*false\s*$')
 $RetryPendingExitCode = 10
@@ -24,7 +33,7 @@ function Invoke-AutoDyRun([string]$Source) {
     $process = Start-Process `
         -FilePath $Python `
         -ArgumentList @("-m", "autody.cli", "run", "--config", "`"$Config`"", "--source", $Source) `
-        -WorkingDirectory $Root `
+        -WorkingDirectory $DataRoot `
         -Wait `
         -PassThru `
         -NoNewWindow `
