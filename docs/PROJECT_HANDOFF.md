@@ -9,7 +9,7 @@
 - 当前官方 Test Center：`1.2.0`，模块 API `1`，核心兼容范围 `>=1.3.0,<2.0.0`。
 - 当前发布系列：AutoDy `1.4.0` / 官方 Test Center `1.2.0`；标签与公开资产状态以 GitHub Releases 为准。
 - 已发布的 `v1.3.0` 及更早标签不得移动、删除或强制更新。
-- 远程：`origin` → `git@github.com:Siqihub/hlhub.git`。
+- 远程：`origin` → `git@github.com:ACCXhub/hlhub.git`。
 
 ## 已实现能力
 
