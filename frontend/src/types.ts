@@ -29,6 +29,10 @@ export interface FailureDetail {
   account_scope_matches: boolean | null;
   diagnostic_details: Record<string, unknown>;
   safe_retry_available: boolean;
+  resolved?: boolean;
+  resolved_at?: string | null;
+  resolution_zh?: string | null;
+  retry_action_available?: boolean;
 }
 
 export interface HistoryRow {

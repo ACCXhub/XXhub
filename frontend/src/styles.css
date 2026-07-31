@@ -126,6 +126,11 @@ td { height: 43px; padding: 0 14px; border-top: 1px solid #edf1f5; color: #26344
 .history-failure small { color: #7e6a50; font-size: 10px; }
 .history-failure > div > span { color: #6d7787; font-size: 11px; line-height: 1.5; }
 .history-failure .action-button { flex: 0 0 auto; min-height: 32px; padding: 0 11px; font-size: 11px; }
+.history-failure-row.resolved td { background: #f8faf8; }
+.history-failure.resolved { border-left-color: #9eb8a7; opacity: .76; }
+.history-failure.resolved strong b { color: #61766a; }
+.history-failure.resolved small { color: #75847a; }
+.history-failure-resolved { flex: 0 0 auto; padding: 5px 9px; border-radius: 5px; color: #4f7160; background: #e7f0ea; font-size: 11px; font-weight: 650; }
 .tag { display: inline-flex; padding: 4px 9px; border-radius: 5px; font-size: 11px; font-weight: 650; }
 .tag.success { color: #128945; background: #e8f8ee; }
 .tag.warning, .tag.pending { color: #be7200; background: #fff3d9; }

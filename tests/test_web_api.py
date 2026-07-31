@@ -665,6 +665,113 @@ def test_status_enriches_matching_legacy_history_with_stable_target_failure(
     assert failures["target-one"]["suggested_action_zh"] == "仅重试此目标"
 
 
+def test_status_marks_only_authoritatively_resolved_target_failures(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets[0].stable_id = "target-one"
+    config.targets[1].stable_id = "target-two"
+    save_config(config_path, config)
+    store = TaskHistoryStore(
+        tmp_path / "data" / "history" / "task-runs.jsonl"
+    )
+    target_one_failure = failure_detail(
+        "conversation_not_found",
+        stage="conversation_located",
+        run_id="run-failed",
+        target_stable_id="target-one",
+        binding_valid=True,
+        account_scope_matches=True,
+    )
+    target_two_failure = target_one_failure.model_copy(
+        update={"target_stable_id": "target-two"}
+    )
+    store.append(
+        TaskRunRecord(
+            run_id="run-failed",
+            date="2026-06-24",
+            task_type="daily_send",
+            trigger_source="scheduled",
+            start_time="2026-06-24T07:30:00",
+            end_time="2026-06-24T07:31:00",
+            total_targets=2,
+            failed_count=2,
+            final_status="retry_pending",
+            failed_target_ids=["target-one", "target-two"],
+            target_failures={
+                "target-one": target_one_failure,
+                "target-two": target_two_failure,
+            },
+        )
+    )
+    store.append(
+        TaskRunRecord(
+            run_id="run-success",
+            date="2026-06-24",
+            task_type="daily_send",
+            trigger_source="retry",
+            start_time="2026-06-24T08:00:00",
+            end_time="2026-06-24T08:01:00",
+            total_targets=1,
+            success_count=1,
+            final_status="completed",
+            confirmation_results={"target-one": "retry_confirmed"},
+        )
+    )
+
+    client = TestClient(create_app(config_path))
+    first_status = client.get("/api/status?today=2026-06-24").json()
+    first_failures = first_status["history"][1]["target_failures"]
+
+    assert first_failures["target-one"]["resolved"] is True
+    assert first_failures["target-one"]["resolved_at"] == (
+        "2026-06-24T08:01:00"
+    )
+    assert first_failures["target-one"]["resolution_zh"] == (
+        "已通过后续成功补发解决"
+    )
+    assert first_failures["target-one"]["retry_action_available"] is False
+    assert first_failures["target-two"]["resolved"] is False
+    assert first_failures["target-two"]["retry_action_available"] is True
+
+    newer_failure = target_one_failure.model_copy(
+        update={
+            "run_id": "run-newer-failure",
+            "timestamp": "2026-06-24T09:00:00",
+        }
+    )
+    store.append(
+        TaskRunRecord(
+            run_id="run-newer-failure",
+            date="2026-06-24",
+            task_type="daily_send",
+            trigger_source="scheduled",
+            start_time="2026-06-24T09:00:00",
+            end_time="2026-06-24T09:01:00",
+            total_targets=1,
+            failed_count=1,
+            final_status="retry_pending",
+            failed_target_ids=["target-one"],
+            target_failures={"target-one": newer_failure},
+        )
+    )
+
+    second_status = client.get("/api/status?today=2026-06-24").json()
+    target_one_views = [
+        row["target_failures"]["target-one"]
+        for row in second_status["history"]
+        if "target-one" in row["target_failures"]
+    ]
+
+    assert len(target_one_views) == 2
+    assert all(item["resolved"] is False for item in target_one_views)
+    assert all(
+        item["retry_action_available"] is True
+        for item in target_one_views
+    )
+
+
 def test_status_uses_target_failure_instead_of_legacy_technical_notification(
     tmp_path: Path,
 ):

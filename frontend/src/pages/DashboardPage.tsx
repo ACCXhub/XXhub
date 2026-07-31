@@ -164,11 +164,16 @@ export function DashboardPage({
                       const expanded = expandable && expandedFailureGroups.has(group.key);
                       const visibleItems = expanded ? group.items : group.items.slice(0, 1);
                       const newest = group.items[0].failure;
+                      const resolved = newest.resolved === true;
                       return (
-                        <tr className="history-failure-row" key={`${row.run_id}-${targetId}`}>
+                        <tr className={resolved ? "history-failure-row resolved" : "history-failure-row"} key={`${row.run_id}-${targetId}`}>
                           <td colSpan={5}>
                             <div
-                              className={expandable ? "history-failure-group expandable" : "history-failure-group"}
+                              className={[
+                                "history-failure-group",
+                                expandable ? "expandable" : "",
+                                resolved ? "resolved" : ""
+                              ].filter(Boolean).join(" ")}
                               role={expandable ? "button" : undefined}
                               tabIndex={expandable ? 0 : undefined}
                               aria-expanded={expandable ? expanded : undefined}
@@ -181,8 +186,14 @@ export function DashboardPage({
                                 }
                               } : undefined}
                             >
-                              {visibleItems.map(({ targetId: occurrenceTargetId, failure }, failureIndex) => (
-                                <div className="history-failure" key={`${failure.run_id}-${failure.timestamp}-${failureIndex}`}>
+                              {visibleItems.map(({ targetId: occurrenceTargetId, failure }, failureIndex) => {
+                                const occurrenceResolved = failure.resolved === true;
+                                const retryActionAvailable = (
+                                  failure.retry_action_available
+                                  ?? failure.safe_retry_available
+                                );
+                                return (
+                                <div className={occurrenceResolved ? "history-failure resolved" : "history-failure"} key={`${failure.run_id}-${failure.timestamp}-${failureIndex}`}>
                                   {failureIndex === 0 && expandable ? (
                                     <span className="history-failure-badge" aria-label={`共 ${group.items.length} 条重复通知`}>
                                       {group.items.length}
@@ -198,22 +209,33 @@ export function DashboardPage({
                                       {" · "}
                                       失败阶段：{stageLabel[failure.stage] || failure.stage}
                                       {" · "}
-                                      {failure.safe_retry_available ? "可安全重试" : failure.uncertain_send ? "禁止自动重试" : "需要处理后再运行"}
+                                      {occurrenceResolved
+                                        ? failure.resolution_zh || "已解决"
+                                        : retryActionAvailable
+                                          ? "可安全重试"
+                                          : failure.uncertain_send
+                                            ? "禁止自动重试"
+                                            : "需要处理后再运行"}
                                     </small>
                                     <span>{failure.user_detail_zh}</span>
                                   </div>
-                                  <button
-                                    className="action-button"
-                                    disabled={!!busy}
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      failureAction(occurrenceTargetId, failure.suggested_action);
-                                    }}
-                                  >
-                                    {failure.safe_retry_available ? "仅重试此目标" : failure.suggested_action_zh}
-                                  </button>
+                                  {occurrenceResolved ? (
+                                    <span className="history-failure-resolved">已解决</span>
+                                  ) : (
+                                    <button
+                                      className="action-button"
+                                      disabled={!!busy}
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        failureAction(occurrenceTargetId, failure.suggested_action);
+                                      }}
+                                    >
+                                      {retryActionAvailable ? "仅重试此目标" : failure.suggested_action_zh}
+                                    </button>
+                                  )}
                                 </div>
-                              ))}
+                                );
+                              })}
                             </div>
                           </td>
                         </tr>

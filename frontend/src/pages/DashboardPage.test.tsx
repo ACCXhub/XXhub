@@ -173,6 +173,61 @@ test("groups only identical same-day target failures and expands newest first", 
   expect(screen.getAllByText("最新重复失败")).toHaveLength(1);
 });
 
+test("marks later-confirmed failures as resolved without hiding unresolved retry", () => {
+  const makeFailure = (
+    targetId: string,
+    timestamp: string,
+    resolved: boolean
+  ) => ({
+    category: "navigation", stage: "conversation_located",
+    reason_code: "conversation_not_found",
+    user_summary_zh: resolved ? "已补发的历史失败" : "仍待处理的失败",
+    user_detail_zh: `${timestamp} 的失败原因`,
+    retryable: true, send_attempted: false, send_attempts: 0,
+    uncertain_send: false, suggested_action: "retry",
+    suggested_action_zh: "仅重试此目标", timestamp,
+    run_id: timestamp, target_stable_id: targetId,
+    account_scope: "account", binding_valid: true,
+    account_scope_matches: true, safe_retry_available: true,
+    retry_action_available: !resolved, resolved,
+    resolved_at: resolved ? "2026-07-16T09:30:00" : null,
+    resolution_zh: resolved ? "已通过后续成功补发解决" : null,
+    diagnostic_details: {}
+  });
+  const row = (
+    runId: string,
+    endTime: string,
+    targetId: string,
+    failure: ReturnType<typeof makeFailure>
+  ) => ({
+    run_id: runId, date: "2026-07-16", task_type: "daily_send",
+    trigger_source: "retry" as const, success_count: 0, failed_count: 1,
+    skipped_count: 0, total_targets: 1, retry_count: 1,
+    final_status: "retry_pending", end_time: endTime,
+    target_failures: { [targetId]: failure }
+  });
+  const resolvedStatus = {
+    ...status,
+    friends: [
+      { target_id: "target-resolved", name: "已解决目标", status: "success" as const },
+      { target_id: "target-open", name: "未解决目标", status: "failed" as const }
+    ],
+    history: [
+      row("resolved-new", "2026-07-16T09:01:00", "target-resolved", makeFailure("target-resolved", "2026-07-16T09:00:00", true)),
+      row("resolved-old", "2026-07-16T08:01:00", "target-resolved", makeFailure("target-resolved", "2026-07-16T08:00:00", true)),
+      row("open", "2026-07-16T07:01:00", "target-open", makeFailure("target-open", "2026-07-16T07:00:00", false))
+    ]
+  };
+
+  render(<DashboardPage status={resolvedStatus} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} />);
+
+  expect(screen.getByText(/已通过后续成功补发解决/)).toBeInTheDocument();
+  expect(screen.getByText("已解决")).toBeInTheDocument();
+  expect(screen.getByLabelText("共 2 条重复通知")).toHaveTextContent("2");
+  expect(screen.getAllByRole("button", { name: "仅重试此目标" })).toHaveLength(1);
+  expect(screen.getByText("仍待处理的失败")).toBeInTheDocument();
+});
+
 test("target retry action keeps the stable target id", () => {
   const retry = vi.fn();
   const partial = {

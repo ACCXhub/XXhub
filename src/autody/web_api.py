@@ -535,6 +535,64 @@ def _history_target_failures(
     return failures
 
 
+def _history_failure_views(
+    config: AppConfig,
+    records: list,
+    daily_by_date: dict[str, dict],
+) -> list[dict[str, dict]]:
+    failures_by_record = [
+        _history_target_failures(config, record, daily_by_date)
+        for record in records
+    ]
+    confirmed_by_record = [
+        {
+            target_id
+            for target_id, result in record.confirmation_results.items()
+            if result in {"confirmed", "retry_confirmed"}
+        }
+        for record in records
+    ]
+    views: list[dict[str, dict]] = []
+    for record, failures in zip(records, failures_by_record):
+        record_view: dict[str, dict] = {}
+        for target_id, detail in failures.items():
+            later_success_at: str | None = None
+            later_failure_at: str | None = None
+            for later_index, later_record in enumerate(records):
+                if later_record.end_time <= record.end_time:
+                    continue
+                if target_id in confirmed_by_record[later_index]:
+                    later_success_at = max(
+                        later_success_at or later_record.end_time,
+                        later_record.end_time,
+                    )
+                if target_id in failures_by_record[later_index]:
+                    later_failure_at = max(
+                        later_failure_at or later_record.end_time,
+                        later_record.end_time,
+                    )
+            resolved = bool(
+                later_success_at
+                and (
+                    later_failure_at is None
+                    or later_success_at > later_failure_at
+                )
+            )
+            record_view[target_id] = {
+                **detail.model_dump(mode="json"),
+                "resolved": resolved,
+                "resolved_at": later_success_at if resolved else None,
+                "resolution_zh": (
+                    "已通过后续成功补发解决" if resolved else None
+                ),
+                "retry_action_available": (
+                    detail.safe_retry_available and not resolved
+                ),
+            }
+        views.append(record_view)
+    return views
+
+
 def _today_plan(config: AppConfig, state, day: date, overrides: dict[str, dict] | None = None) -> dict:
     daily = state.daily.get(day.isoformat(), {})
     succeeded = set(daily.get("succeeded", []))
@@ -1102,6 +1160,11 @@ def create_app(
         bootstrap_legacy_daily_history(history_store, state.daily, len(config.targets))
         history_page = history_store.query(page_size=30)
         records = list(reversed(history_page.items))
+        history_failure_views = _history_failure_views(
+            config,
+            history_page.items,
+            state.daily,
+        )
         history = [
             {
                 "run_id": item.run_id,
@@ -1115,14 +1178,9 @@ def create_app(
                 "retry_count": item.retry_count,
                 "final_status": item.final_status,
                 "end_time": item.end_time,
-                "target_failures": {
-                    target_id: detail.model_dump(mode="json")
-                    for target_id, detail in _history_target_failures(
-                        config, item, state.daily
-                    ).items()
-                },
+                "target_failures": history_failure_views[index],
             }
-            for item in history_page.items
+            for index, item in enumerate(history_page.items)
         ]
         try:
             tasks = cached_task_rows()
