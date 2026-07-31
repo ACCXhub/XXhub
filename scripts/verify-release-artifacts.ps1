@@ -1,6 +1,7 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = "1.4.0"
+    [string]$Version = "1.4.0",
+    [string]$ArtifactDirectory
 )
 
 Set-StrictMode -Version Latest
@@ -8,8 +9,13 @@ $ErrorActionPreference = "Stop"
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Output = Join-Path $Root "output"
-$Msi = Join-Path $Output "AutoDy-$Version-x64.msi"
-$Portable = Join-Path $Output "AutoDy-Windows-Portable.zip"
+$ArtifactRoot = if ([string]::IsNullOrWhiteSpace($ArtifactDirectory)) {
+    $Output
+} else {
+    (Resolve-Path -LiteralPath $ArtifactDirectory).Path
+}
+$Msi = Join-Path $ArtifactRoot "AutoDy-$Version-x64.msi"
+$Portable = Join-Path $ArtifactRoot "AutoDy-Windows-Portable.zip"
 $Module = Join-Path $Output "AutoDy-Test-Center.autody-module.zip"
 $ReportJson = Join-Path $Output "release-privacy-report.json"
 $ReportMarkdown = Join-Path $Output "release-privacy-report.md"
