@@ -7,6 +7,9 @@ on:
 jobs:
   test:
     runs-on: windows-latest
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/data/ms-playwright
+      PLAYWRIGHT_SKIP_BROWSER_GC: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

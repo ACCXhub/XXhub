@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 import logging
 from logging.handlers import TimedRotatingFileHandler
 import os
@@ -37,9 +37,9 @@ def test_logging_selects_file_from_each_record_date(tmp_path: Path):
     setup_logging(make_config(tmp_path), logger=logger)
 
     before = logger.makeRecord(logger.name, logging.INFO, __file__, 1, "跨日前", (), None)
-    before.created = 1785340799  # 2026-07-29 23:59:59 Asia/Shanghai
+    before.created = datetime(2026, 7, 29, 23, 59, 59).timestamp()
     after = logger.makeRecord(logger.name, logging.INFO, __file__, 1, "跨日后", (), None)
-    after.created = 1785340801
+    after.created = datetime(2026, 7, 30, 0, 0, 1).timestamp()
     handler = next(item for item in logger.handlers if isinstance(item, DailyAppendFileHandler))
     handler.handle(before)
     handler.handle(after)

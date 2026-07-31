@@ -98,3 +98,10 @@ def test_portable_builder_uses_ci_python_when_project_venv_is_absent():
     assert "Get-Command python" in text
     assert "if (-not (Test-Path $Python))" in text
     assert "sys.path.insert" in text
+
+
+def test_ci_installs_playwright_into_the_test_runtime():
+    text = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/data/ms-playwright" in text
+    assert 'PLAYWRIGHT_SKIP_BROWSER_GC: "1"' in text
+    assert "python -m playwright install chromium" in text
