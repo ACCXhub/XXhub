@@ -48,17 +48,24 @@ function Invoke-NativeChecked {
         [hashtable]$Environment = @{}
     )
     $previous = @{}
+    $previousErrorActionPreference = $ErrorActionPreference
     foreach ($name in $Environment.Keys) {
         $previous[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
         [Environment]::SetEnvironmentVariable($name, [string]$Environment[$name], "Process")
     }
     try {
+        # Windows PowerShell 5.1 surfaces native stderr as NativeCommandError
+        # when Stop is active. Capture it as text and trust the real exit code.
+        $ErrorActionPreference = "Continue"
         $outputText = (& $FilePath @Arguments 2>&1 | Out-String)
-        if ($LASTEXITCODE -ne 0) {
+        $nativeExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $previousErrorActionPreference
+        if ($nativeExitCode -ne 0) {
             $sanitized = $outputText.Replace($Root, "<repo>").Replace($Output, "<output>")
-            throw "$StageName failed with exit code $LASTEXITCODE.`n$sanitized"
+            throw "$StageName failed with exit code $nativeExitCode.`n$sanitized"
         }
     } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
         foreach ($name in $Environment.Keys) {
             [Environment]::SetEnvironmentVariable($name, $previous[$name], "Process")
         }
@@ -188,7 +195,7 @@ if (-not $runtimeReady) {
     )
     Invoke-NativeChecked "Install AutoDy runtime package" $HostPython @(
         "-m", "pip", "--disable-pip-version-check", "install", "--quiet",
-        "--no-deps", "--target", $sitePackages, $wheel.FullName
+        "--upgrade", "--no-deps", "--target", $sitePackages, $wheel.FullName
     )
 
     Get-ChildItem -LiteralPath $sitePackages -Recurse -Force -Directory |

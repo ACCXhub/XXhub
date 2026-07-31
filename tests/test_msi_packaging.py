@@ -46,6 +46,10 @@ def test_msi_builder_uses_explicit_allowlist_and_clean_runtime():
         "EmbeddedPythonSha256",
         "Get-FileHash",
         "AcceptEula=wix7",
+        '$previousErrorActionPreference = $ErrorActionPreference',
+        '$ErrorActionPreference = "Continue"',
+        "$nativeExitCode = $LASTEXITCODE",
+        '"--upgrade", "--no-deps", "--target", $sitePackages, $wheel.FullName',
         "WixToolset.Sdk/7.0.0",
     ]:
         if token == "WixToolset.Sdk/7.0.0":
