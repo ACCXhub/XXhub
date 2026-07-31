@@ -1,10 +1,17 @@
+param(
+    [ValidatePattern('^\d+\.\d+\.\d+$')]
+    [string]$Version = "1.4.1"
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Output = Join-Path $Root "output"
 $Stage = Join-Path $Output "AutoDy-Windows"
-$Archive = Join-Path $Output "AutoDy-Windows-Portable.zip"
-$Checksum = Join-Path $Output "AutoDy-Windows-Portable.zip.sha256"
+$ArchiveName = "AutoDy-Windows-Portable-$Version.zip"
+$ChecksumName = "$ArchiveName.sha256"
+$Archive = Join-Path $Output $ArchiveName
+$Checksum = Join-Path $Output $ChecksumName
 $ModuleArchive = Join-Path $Output "AutoDy-Test-Center.autody-module.zip"
 $ModuleChecksum = Join-Path $Output "AutoDy-Test-Center.autody-module.zip.sha256"
 
@@ -85,7 +92,7 @@ foreach ($item in $forbidden) {
     if ($entries | Where-Object { $_ -like "*$item*" }) { throw "Portable archive staging contains excluded local data: $item" }
 }
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Archive).Hash.ToLowerInvariant()
-"$hash  AutoDy-Windows-Portable.zip" | Set-Content -Encoding ascii -NoNewline $Checksum
+"$hash  $ArchiveName" | Set-Content -Encoding ascii -NoNewline $Checksum
 $moduleHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ModuleArchive).Hash.ToLowerInvariant()
 "$moduleHash  AutoDy-Test-Center.autody-module.zip" | Set-Content -Encoding ascii -NoNewline $ModuleChecksum
 Write-Host "Portable archive: $Archive"

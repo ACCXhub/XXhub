@@ -2,7 +2,7 @@
 
 AutoDy 是面向 Windows 本机运行的 Douyin 私信工作流管理台。它在本地管理目标、文案、计划和执行历史，并把身份校验、重复保护、确认、浏览器锁与不确定结果保护放在发送流程之前。
 
-当前开发版本：AutoDy `1.4.0`；官方 Test Center `1.2.0`（模块 API `1`，兼容 `>=1.3.0,<2.0.0`）。模块版本独立发布，版本号不同并不代表不兼容。
+当前版本：AutoDy `1.4.1`；官方 Test Center `1.2.0`（模块 API `1`，兼容 `>=1.3.0,<2.0.0`）。模块版本独立发布，版本号不同并不代表不兼容。
 
 ![AutoDy 管理台](docs/screenshots/dashboard-overview.png)
 
@@ -41,7 +41,7 @@ cd ..
 
 ## Windows 发布包
 
-GitHub Release 提供 per-user MSI 与 portable ZIP。MSI 将程序安装到 `%LocalAppData%\Programs\AutoDy`，将可写数据保存在 `%LocalAppData%\AutoDy`；卸载程序默认保留该数据目录。MSI 自带固定版本的 Python 运行时与 Chromium，不要求终端用户安装 Node.js，也不会在安装期间启动 AutoDy 或访问 Douyin。
+GitHub Release 提供 per-user MSI 与 portable ZIP。MSI 向导会显示默认目录，并允许在安装前选择其他程序目录；默认路径为 `%LocalAppData%\Programs\AutoDy`。可写数据始终保存在 `%LocalAppData%\AutoDy`，卸载程序默认保留该数据目录。MSI 自带固定版本的 Python 运行时与 Chromium，不要求终端用户安装 Node.js，也不会在安装期间启动 AutoDy 或访问 Douyin。
 
 安装或下载后应使用同名 `.sha256` 文件校验产物。普通启动通过隐藏的 VBS 启动器和托盘完成；桌面与开始菜单快捷方式均指向该启动器。
 

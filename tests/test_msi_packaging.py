@@ -111,7 +111,7 @@ def test_release_privacy_verifier_covers_all_release_artifacts():
         "SELECT `Shortcut`,`Name`,`Target`,`Arguments` FROM `Shortcut`",
         "FROM ``_Tables`` WHERE ``Name`` = 'CustomAction'",
         '"/a `"$Msi`" /qn',
-        "AutoDy-Windows-Portable.zip",
+        "AutoDy-Windows-Portable-$Version.zip",
         "AutoDy-Test-Center.autody-module.zip",
         "release-privacy-report.json",
         "release-privacy-report.md",
@@ -160,3 +160,26 @@ def test_ci_restores_wix_sdk_and_parses_release_scripts():
     assert ".\\scripts\\build-msi.ps1" in workflow
     assert ".\\scripts\\verify-msi-lifecycle.ps1" in workflow
     assert ".\\scripts\\verify-release-artifacts.ps1" in workflow
+    assert "AutoDy-Windows-Portable-$env:AUTODY_RELEASE_VERSION.zip" in workflow
+
+
+def test_release_workflow_publishes_only_versioned_public_assets():
+    workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    assert "AUTODY_RELEASE_VERSION: \"1.4.1\"" in workflow
+    assert ".\\scripts\\build-msi.ps1 -Version $env:AUTODY_RELEASE_VERSION" in workflow
+    assert (
+        ".\\scripts\\verify-release-artifacts.ps1 "
+        "-Version $env:AUTODY_RELEASE_VERSION"
+    ) in workflow
+    for asset in [
+        "output/AutoDy-1.4.1-x64.msi",
+        "output/AutoDy-1.4.1-x64.msi.sha256",
+        "output/AutoDy-Windows-Portable-1.4.1.zip",
+        "output/AutoDy-Windows-Portable-1.4.1.zip.sha256",
+    ]:
+        assert asset in workflow
+    published_files = workflow.split("files: |", 1)[1].split(
+        "body_path:", 1
+    )[0]
+    assert "AutoDy-Test-Center" not in published_files

@@ -9,10 +9,16 @@ permissions:
   contents: write
 
 jobs:
-  portable:
+  release:
     runs-on: windows-latest
+    env:
+      AUTODY_RELEASE_VERSION: "1.4.1"
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -23,13 +29,31 @@ jobs:
         run: |
           npm ci
           npm run build
-      - name: Build portable archive
+      - name: Prepare release Python environment
         shell: powershell
-        run: .\scripts\build-portable.ps1
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv\Scripts\python.exe -m pip install -e .
+      - name: Verify release tag version
+        shell: powershell
+        run: |
+          if ("${{ github.ref_name }}" -ne "v$env:AUTODY_RELEASE_VERSION") {
+            throw "Release tag does not match the configured AutoDy version."
+          }
+      - name: Build and verify public release assets
+        shell: powershell
+        run: |
+          .\scripts\build-portable.ps1 -Version $env:AUTODY_RELEASE_VERSION
+          .\scripts\build-msi.ps1 -Version $env:AUTODY_RELEASE_VERSION
+          .\scripts\verify-release-artifacts.ps1 -Version $env:AUTODY_RELEASE_VERSION
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          fail_on_unmatched_files: true
           files: |
-            output/AutoDy-Windows-Portable.zip
-            output/AutoDy-Windows-Portable.zip.sha256
+            output/AutoDy-1.4.1-x64.msi
+            output/AutoDy-1.4.1-x64.msi.sha256
+            output/AutoDy-Windows-Portable-1.4.1.zip
+            output/AutoDy-Windows-Portable-1.4.1.zip.sha256
           body_path: docs/RELEASE_NOTES.md

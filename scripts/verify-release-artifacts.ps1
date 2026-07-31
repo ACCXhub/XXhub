@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = "1.4.0",
+    [string]$Version = "1.4.1",
     [string]$ArtifactDirectory
 )
 
@@ -15,7 +15,7 @@ $ArtifactRoot = if ([string]::IsNullOrWhiteSpace($ArtifactDirectory)) {
     (Resolve-Path -LiteralPath $ArtifactDirectory).Path
 }
 $Msi = Join-Path $ArtifactRoot "AutoDy-$Version-x64.msi"
-$Portable = Join-Path $ArtifactRoot "AutoDy-Windows-Portable.zip"
+$Portable = Join-Path $ArtifactRoot "AutoDy-Windows-Portable-$Version.zip"
 $Module = Join-Path $Output "AutoDy-Test-Center.autody-module.zip"
 $ReportJson = Join-Path $Output "release-privacy-report.json"
 $ReportMarkdown = Join-Path $Output "release-privacy-report.md"

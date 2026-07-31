@@ -91,7 +91,8 @@ def test_portable_builder_excludes_sensitive_data():
     assert "build-msi.ps1" in text
     assert "verify-msi-lifecycle.ps1" in text
     assert "verify-release-artifacts.ps1" in text
-    assert "AutoDy-Windows-Portable.zip.sha256" in text
+    assert '"AutoDy-Windows-Portable-$Version.zip"' in text
+    assert '"$ArchiveName.sha256"' in text
     assert "Get-FileHash" in text
     assert "data/avatar-cache/" in Path(".gitignore").read_text(encoding="utf-8")
     assert "data/discovered_friends.json" in Path(".gitignore").read_text(encoding="utf-8")

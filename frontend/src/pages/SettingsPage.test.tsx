@@ -11,8 +11,8 @@ vi.mock("../api", () => ({
       daily_send_time: "07:30", recovery_deadline: "23:59", mask_log_friend_names: true
     }),
     saveConfig: vi.fn(),
-    modules: vi.fn().mockResolvedValue({ modules: [{ id: "autody-test-center", display_name: "测试中心", installed: false, version: null, compatible: true, bundled_available: true, bundled_version: "1.2.0", core_version: "1.4.0", required_autody_version: ">=1.3.0,<2.0.0" }] }),
-    installTestCenter: vi.fn().mockResolvedValue({ id: "autody-test-center", display_name: "测试中心", installed: true, version: "1.2.0", compatible: true, bundled_version: "1.2.0", core_version: "1.4.0", required_autody_version: ">=1.3.0,<2.0.0" }),
+    modules: vi.fn().mockResolvedValue({ modules: [{ id: "autody-test-center", display_name: "测试中心", installed: false, version: null, compatible: true, bundled_available: true, bundled_version: "1.2.0", core_version: "1.4.1", required_autody_version: ">=1.3.0,<2.0.0" }] }),
+    installTestCenter: vi.fn().mockResolvedValue({ id: "autody-test-center", display_name: "测试中心", installed: true, version: "1.2.0", compatible: true, bundled_version: "1.2.0", core_version: "1.4.1", required_autody_version: ">=1.3.0,<2.0.0" }),
     uninstallTestCenter: vi.fn().mockResolvedValue({ installed: false })
   }
 }));
@@ -63,7 +63,7 @@ test("upgrades an outdated installed Test Center before opening it", async () =>
       compatible: true,
       bundled_available: true,
       bundled_version: "1.2.0",
-      core_version: "1.4.0",
+      core_version: "1.4.1",
       required_autody_version: ">=1.3.0,<2.0.0",
       update_available: true
     }]
