@@ -316,7 +316,13 @@ class TestCenterDryRun:
             result.visible_conversation_id = identity.visible_conversation_id
             result.visible_display_name = identity.visible_display_name
             stage("verifying_identity")
-            result.identity_match = identity.identity_match
+            result.identity_match = (
+                identity.identity_match
+                and (
+                    navigation_only
+                    or identity.identity_match_reason == "stable_id_match"
+                )
+            )
             result.identity_match_reason = identity.identity_match_reason
             if not result.identity_match:
                 result.result = "stopped"

@@ -54,6 +54,7 @@ class ChatSelectors:
     conversation: str
     conversation_name: str
     conversation_list: str
+    visible_conversation: str
     header_name: str
     input: str
     login_marker: str
@@ -65,6 +66,7 @@ class ChatSelectors:
             '[data-e2e="conversation-item"]',
             '[data-e2e="conversation-name"]',
             '[data-e2e="chat-app"]',
+            '[data-e2e="visible-conversation"]',
             '[data-e2e="chat-header-name"]',
             '[data-e2e="chat-input"]',
             '[data-e2e="conversation-item"]',
@@ -107,6 +109,8 @@ class DeliveryResult:
     confirmation_attempts: int = 0
     screenshot_path: Path | None = None
     error: str | None = None
+    failure_stage: str | None = None
+    reason_code: str | None = None
 
     @property
     def successful(self) -> bool:
@@ -182,6 +186,7 @@ DOUYIN_SELECTORS = ChatSelectors(
     conversation=".conversationConversationItemwrapper",
     conversation_name=".conversationConversationItemtitle",
     conversation_list=".conversationConversationListwrapper",
+    visible_conversation=".RightPanelHeaderuser",
     header_name=".RightPanelHeadertitle",
     input=".messageEditorimChatEditorContainer",
     login_marker=".conversationConversationListwrapper",
@@ -320,12 +325,44 @@ class DouyinChat:
     def _visible_conversation(self) -> tuple[str | None, str | None]:
         header = self.page.locator(self.selectors.header_name)
         visible_name = header.first.inner_text().strip() if header.count() and header.first.is_visible() else None
+        visible = self.page.locator(self.selectors.visible_conversation)
+        visible_id = None
+        if visible.count() and visible.first.is_visible():
+            for attribute in CONVERSATION_ID_ATTRIBUTES:
+                value = visible.first.get_attribute(attribute)
+                if value:
+                    visible_id = conversation_candidate_id(
+                        opaque_conversation_identity("row", str(value))
+                    )
+                    break
+            if visible_id is None:
+                avatar = visible.first.locator("img").first
+                source = avatar.get_attribute("src") if avatar.count() else None
+                if source:
+                    visible_id = conversation_candidate_id(
+                        opaque_conversation_identity(
+                            "avatar",
+                            normalized_avatar_source(str(source)),
+                        )
+                    )
+        return visible_id, visible_name
+
+    def _selected_conversation(
+        self,
+    ) -> tuple[str | None, bool, bool]:
         conversations = self.page.locator(self.selectors.conversation)
+        selected: list[str | None] = []
         for index in range(conversations.count()):
             item = conversations.nth(index)
             if self._row_is_selected(item):
-                return conversation_row_candidate_id(item), visible_name
-        return None, visible_name
+                selected.append(conversation_row_candidate_id(item))
+        if len(selected) != 1:
+            return None, False, len(selected) > 1
+        return selected[0], True, False
+
+    def _page_revision(self) -> tuple[str, int]:
+        pages = getattr(self.page.context, "pages", None)
+        return self.page.url, len(pages) if pages is not None else 1
 
     def open_conversation_identity(
         self,
@@ -364,31 +401,76 @@ class DouyinChat:
                 reason,
             )
 
+        expected_page_revision = self._page_revision()
         item.click()
-        header = self.page.locator(self.selectors.header_name)
         deadline = time.monotonic() + timeout_ms / 1000
         stable_reads = 0
+        last_authoritative_values: tuple[str | None, str | None] | None = None
         visible_id: str | None = None
         visible_name: str | None = None
+        discard_transient_read = True
         while time.monotonic() < deadline:
             if interrupt_requested is not None and (kind := interrupt_requested()):
                 raise ChatNavigationInterrupted(kind)
             try:
+                selected_id, selected_state, selected_ambiguous = (
+                    self._selected_conversation()
+                )
                 visible_id, visible_name = self._visible_conversation()
             except Exception:
+                selected_id, selected_state, selected_ambiguous = None, False, False
                 visible_id, visible_name = None, None
+
+            if self._page_revision() != expected_page_revision:
+                return ConversationIdentity(
+                    expected_conversation_id,
+                    visible_id,
+                    selected_display_name,
+                    visible_name,
+                    False,
+                    "navigation_not_stable",
+                )
+            if discard_transient_read:
+                discard_transient_read = False
+                self.page.wait_for_timeout(100)
+                continue
+            if selected_ambiguous:
+                return ConversationIdentity(
+                    expected_conversation_id,
+                    visible_id,
+                    selected_display_name,
+                    visible_name,
+                    False,
+                    "identity_ambiguous",
+                )
             if (
-                visible_id == expected_conversation_id
-                and visible_name is not None
-                and self._row_is_selected(item)
-                and header.count()
-                and header.first.is_visible()
+                selected_id is not None
+                and selected_id != expected_conversation_id
+            ) or (
+                visible_id is not None
+                and visible_id != expected_conversation_id
+            ):
+                return ConversationIdentity(
+                    expected_conversation_id,
+                    visible_id,
+                    selected_display_name,
+                    visible_name,
+                    False,
+                    "stable_id_mismatch",
+                )
+
+            authoritative_values = (selected_id, visible_id)
+            if authoritative_values != last_authoritative_values:
+                stable_reads = 0
+                last_authoritative_values = authoritative_values
+            if (
+                selected_state
+                and selected_id == expected_conversation_id
+                and visible_id == expected_conversation_id
             ):
                 stable_reads += 1
                 if stable_reads >= 2:
                     break
-            else:
-                stable_reads = 0
             self.page.wait_for_timeout(100)
 
         if stable_reads < 2:
@@ -400,18 +482,22 @@ class DouyinChat:
                 False,
                 "navigation_not_stable",
             )
-        if visible_id != expected_conversation_id:
-            reason = "stable_id_mismatch"
-        elif visible_name != selected_display_name:
-            reason = "display_name_mismatch"
-        else:
-            reason = "stable_id_match"
+        title_matches = (
+            visible_name is not None
+            and normalize_message_text(visible_name)
+            == normalize_message_text(selected_display_name)
+        )
+        reason = (
+            "stable_id_match"
+            if title_matches
+            else "stable_id_match_title_warning"
+        )
         return ConversationIdentity(
             expected_conversation_id,
             visible_id,
             selected_display_name,
             visible_name,
-            reason == "stable_id_match",
+            True,
             reason,
         )
 
@@ -520,9 +606,45 @@ class DouyinChat:
             reason=reason,
         )
 
-    def send(self, target: str, message: str) -> DeliveryResult:
+    def send(
+        self,
+        target: str,
+        message: str,
+        *,
+        selected_target_id: str | None = None,
+        expected_conversation_id: str | None = None,
+    ) -> DeliveryResult:
+        send_attempted = False
         try:
-            self.open_verified_conversation(target)
+            if expected_conversation_id is not None:
+                identity = self.open_conversation_identity(
+                    selected_target_id or "",
+                    expected_conversation_id,
+                    target,
+                    timeout_ms=self.friend_search_timeout_ms,
+                )
+                if not identity.identity_match:
+                    if identity.identity_match_reason == "conversation_not_found":
+                        reason_code = "conversation_not_found"
+                        stage = "conversation_located"
+                    elif identity.identity_match_reason == "stable_id_mismatch":
+                        reason_code = "binding_stale"
+                        stage = "target_binding_resolved"
+                    elif identity.identity_match_reason == "navigation_not_stable":
+                        reason_code = "navigation_not_stable"
+                        stage = "conversation_selected"
+                    else:
+                        reason_code = "identity_verification_failed"
+                        stage = "identity_verified"
+                    return DeliveryResult(
+                        DeliveryStatus.BLOCKED,
+                        send_attempts=0,
+                        error=identity.identity_match_reason,
+                        failure_stage=stage,
+                        reason_code=reason_code,
+                    )
+            else:
+                self.open_verified_conversation(target)
             if self._latest_matches(message):
                 return DeliveryResult(
                     DeliveryStatus.CONFIRMED,
@@ -531,6 +653,10 @@ class DouyinChat:
                 )
             editor = self.composer_editor()
             editor.fill(message)
+            # Treat the outcome as potentially sent from the moment Enter is
+            # requested. Navigation, identity verification, and composer setup
+            # failures happen before this boundary and remain safe to retry.
+            send_attempted = True
             editor.press("Enter")
             status, attempts = self._confirm_delivery(message)
             if status:
@@ -542,21 +668,46 @@ class DouyinChat:
                 confirmation_attempts=attempts,
                 screenshot_path=screenshot,
                 error="latest outgoing message did not match the final sent message",
+                failure_stage="confirmation_observed",
+                reason_code="confirmation_failed_uncertain",
             )
         except RuntimeError as exc:
             screenshot = self.screenshot("send-error")
             return DeliveryResult(
                 DeliveryStatus.SEND_FAILED,
-                send_attempts=1,
+                send_attempts=int(send_attempted),
                 screenshot_path=screenshot,
                 error=str(exc),
+                failure_stage=(
+                    "send_boundary_reached"
+                    if send_attempted
+                    else "conversation_located"
+                ),
+                reason_code=(
+                    "confirmation_failed_uncertain"
+                    if send_attempted
+                    else "conversation_not_found"
+                    if "not found" in str(exc).casefold()
+                    else "unknown_exception"
+                ),
             )
         except PlaywrightTimeoutError as exc:
             screenshot = self.screenshot("page-changed")
             return DeliveryResult(
                 DeliveryStatus.BLOCKED,
+                send_attempts=int(send_attempted),
                 screenshot_path=screenshot,
                 error="Douyin chat page structure changed or timed out",
+                failure_stage=(
+                    "send_boundary_reached"
+                    if send_attempted
+                    else "conversation_selected"
+                ),
+                reason_code=(
+                    "confirmation_failed_uncertain"
+                    if send_attempted
+                    else "page_load_timeout"
+                ),
             )
 
     def screenshot(self, label: str) -> Path:

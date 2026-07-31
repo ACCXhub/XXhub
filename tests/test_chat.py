@@ -12,6 +12,7 @@ from autody.chat import (
     DOUYIN_SELECTORS,
     DeliveryStatus,
     DouyinChat,
+    conversation_row_candidate_id,
     normalize_message_text,
     open_chat,
 )
@@ -46,7 +47,254 @@ def test_duplicate_names_are_rejected(page, fake_chat):
     )
     result = fake_chat.send("小明", "早安")
     assert result.status is DeliveryStatus.SEND_FAILED
+    assert result.send_attempts == 0
     assert "ambiguous" in (result.error or "")
+
+
+def test_navigation_failure_is_not_recorded_as_a_send_attempt(monkeypatch, fake_chat):
+    composer_accessed = False
+
+    def fail_before_composer(_target):
+        raise RuntimeError("target not found")
+
+    def composer_editor():
+        nonlocal composer_accessed
+        composer_accessed = True
+        raise AssertionError("composer must not be accessed after navigation failure")
+
+    monkeypatch.setattr(fake_chat, "open_verified_conversation", fail_before_composer)
+    monkeypatch.setattr(fake_chat, "composer_editor", composer_editor)
+
+    result = fake_chat.send("小明", "早安")
+
+    assert result.status is DeliveryStatus.SEND_FAILED
+    assert result.send_attempts == 0
+    assert composer_accessed is False
+
+
+def test_stable_binding_navigation_is_used_before_composer(page, fake_chat):
+    row = page.locator('[data-e2e="conversation-item"]').first
+    expected = conversation_row_candidate_id(row)
+
+    result = fake_chat.send(
+        "小明",
+        "早安",
+        selected_target_id="target-current",
+        expected_conversation_id=expected,
+    )
+
+    assert result.successful
+
+
+def test_authoritative_ids_allow_a_lagging_title(page, fake_chat):
+    row = page.locator('[data-e2e="conversation-item"]').first
+    expected = conversation_row_candidate_id(row)
+    page.locator('[data-e2e="chat-header-name"]').evaluate(
+        """element => {
+            element.textContent = '';
+            setTimeout(() => { element.textContent = '小明 · 在线'; }, 250);
+        }"""
+    )
+
+    identity = fake_chat.open_conversation_identity(
+        "target-current",
+        expected,
+        "小明",
+        timeout_ms=600,
+    )
+
+    assert identity.identity_match is True
+    assert identity.identity_match_reason == "stable_id_match_title_warning"
+
+
+def test_title_mismatch_alone_does_not_override_authoritative_ids(page, fake_chat):
+    row = page.locator('[data-e2e="conversation-item"]').first
+    expected = conversation_row_candidate_id(row)
+    page.locator('[data-e2e="chat-header-name"]').evaluate(
+        "element => { element.textContent = '仍在更新'; }"
+    )
+
+    identity = fake_chat.open_conversation_identity(
+        "target-current",
+        expected,
+        "小明",
+        timeout_ms=500,
+    )
+
+    assert identity.identity_match is True
+    assert identity.identity_match_reason == "stable_id_match_title_warning"
+
+
+def test_conflicting_visible_stable_id_stops_before_composer(
+    page, monkeypatch, fake_chat
+):
+    row = page.locator('[data-e2e="conversation-item"]').first
+    expected = conversation_row_candidate_id(row)
+    composer_accessed = False
+    page.locator('[data-e2e="visible-conversation"]').evaluate(
+        "element => { element.dataset.conversationId = 'conversation-other'; }"
+    )
+
+    def composer_editor():
+        nonlocal composer_accessed
+        composer_accessed = True
+        raise AssertionError("visible identity conflict must stop before composer")
+
+    monkeypatch.setattr(fake_chat, "composer_editor", composer_editor)
+    result = fake_chat.send(
+        "小明",
+        "早安",
+        selected_target_id="target-current",
+        expected_conversation_id=expected,
+    )
+
+    assert result.status is DeliveryStatus.BLOCKED
+    assert result.send_attempts == 0
+    assert result.reason_code == "binding_stale"
+    assert composer_accessed is False
+
+
+def test_selected_row_identity_change_fails_verification(page, fake_chat):
+    row = page.locator('[data-e2e="conversation-item"]').first
+    expected = conversation_row_candidate_id(row)
+    row.evaluate(
+        """element => {
+            element.addEventListener('click', () => {
+                setTimeout(() => {
+                    element.dataset.conversationId = 'conversation-other';
+                }, 150);
+            }, { once: true });
+        }"""
+    )
+
+    identity = fake_chat.open_conversation_identity(
+        "target-current",
+        expected,
+        "小明",
+        timeout_ms=500,
+    )
+
+    assert identity.identity_match is False
+    assert identity.identity_match_reason == "stable_id_mismatch"
+
+
+def test_virtualized_row_replacement_keeps_stable_identity(page, fake_chat):
+    row = page.locator('[data-e2e="conversation-item"]').first
+    expected = conversation_row_candidate_id(row)
+    row.evaluate(
+        """element => {
+            element.addEventListener('click', () => {
+                setTimeout(() => {
+                    element.replaceWith(element.cloneNode(true));
+                }, 50);
+            }, { once: true });
+        }"""
+    )
+
+    identity = fake_chat.open_conversation_identity(
+        "target-current",
+        expected,
+        "小明",
+        timeout_ms=600,
+    )
+
+    assert identity.identity_match is True
+
+
+def test_first_transient_read_is_not_counted_as_stable(page, fake_chat):
+    row = page.locator('[data-e2e="conversation-item"]').first
+    expected = conversation_row_candidate_id(row)
+    row.evaluate(
+        """element => {
+            element.addEventListener('click', () => {
+                setTimeout(() => {
+                    document.querySelector('[data-e2e="visible-conversation"]')
+                        .dataset.conversationId = 'conversation-other';
+                }, 150);
+            }, { once: true });
+        }"""
+    )
+
+    identity = fake_chat.open_conversation_identity(
+        "target-current",
+        expected,
+        "小明",
+        timeout_ms=500,
+    )
+
+    assert identity.identity_match is False
+    assert identity.identity_match_reason == "stable_id_mismatch"
+
+
+def test_stability_window_waits_until_expected_row_is_selected(page, fake_chat):
+    row = page.locator('[data-e2e="conversation-item"]').first
+    expected = conversation_row_candidate_id(row)
+    row.evaluate(
+        """element => {
+            element.addEventListener('click', () => {
+                element.setAttribute('aria-selected', 'false');
+                setTimeout(() => {
+                    element.setAttribute('aria-selected', 'true');
+                }, 150);
+            }, { once: true });
+        }"""
+    )
+
+    identity = fake_chat.open_conversation_identity(
+        "target-current",
+        expected,
+        "小明",
+        timeout_ms=600,
+    )
+
+    assert identity.identity_match is True
+
+
+def test_navigation_only_fixture_never_accesses_composer(
+    page, monkeypatch, fake_chat
+):
+    row = page.locator('[data-e2e="conversation-item"]').first
+    expected = conversation_row_candidate_id(row)
+    composer_accessed = False
+
+    def composer_editor():
+        nonlocal composer_accessed
+        composer_accessed = True
+        raise AssertionError("navigation-only verification cannot inspect composer")
+
+    monkeypatch.setattr(fake_chat, "composer_editor", composer_editor)
+    identity = fake_chat.open_conversation_identity(
+        "target-current",
+        expected,
+        "小明",
+        timeout_ms=500,
+    )
+
+    assert identity.identity_match is True
+    assert composer_accessed is False
+
+
+def test_stale_stable_binding_stops_before_composer(page, monkeypatch, fake_chat):
+    composer_accessed = False
+
+    def composer_editor():
+        nonlocal composer_accessed
+        composer_accessed = True
+        raise AssertionError("identity failure must stop before composer access")
+
+    monkeypatch.setattr(fake_chat, "composer_editor", composer_editor)
+
+    result = fake_chat.send(
+        "小明",
+        "早安",
+        selected_target_id="target-current",
+        expected_conversation_id="candidate-stale",
+    )
+
+    assert result.status is DeliveryStatus.BLOCKED
+    assert result.send_attempts == 0
+    assert result.reason_code == "binding_stale"
+    assert composer_accessed is False
 
 
 def test_header_mismatch_is_blocked(page, fake_chat):

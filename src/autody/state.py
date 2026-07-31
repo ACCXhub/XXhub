@@ -25,9 +25,36 @@ class StateStore:
             return AppState()
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise TypeError("state root must be a mapping")
+            rotation = raw.get("rotation", {})
+            if not isinstance(rotation, dict):
+                rotation = {}
+            order = rotation.get("order", [])
+            consumed = rotation.get("consumed", [])
+            daily = raw.get("daily", {})
+            if not isinstance(daily, dict):
+                daily = {}
             return AppState(
-                rotation=RotationState(**raw.get("rotation", {})),
-                daily=raw.get("daily", {}),
+                rotation=RotationState(
+                    order=(
+                        list(order)
+                        if isinstance(order, list)
+                        and all(isinstance(item, str) for item in order)
+                        else []
+                    ),
+                    consumed=(
+                        list(consumed)
+                        if isinstance(consumed, list)
+                        and all(isinstance(item, str) for item in consumed)
+                        else []
+                    ),
+                ),
+                daily={
+                    str(day): dict(value)
+                    for day, value in daily.items()
+                    if isinstance(day, str) and isinstance(value, dict)
+                },
             )
         except (json.JSONDecodeError, TypeError, AttributeError) as exc:
             raise ValueError(f"state file is corrupt: {self.path}") from exc

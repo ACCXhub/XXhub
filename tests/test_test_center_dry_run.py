@@ -1437,6 +1437,30 @@ def test_identity_or_cleanup_mismatch_stops_without_deleting_user_content(page, 
     assert changed.counters["real_composer_clears"] == 0
 
 
+def test_navigation_only_accepts_authoritative_ids_while_title_lags(page, tmp_path: Path):
+    _open_fixture(page)
+    page.locator('[data-e2e="chat-header-name"]').evaluate(
+        "element => element.textContent = '标题仍在更新'"
+    )
+    runner = TestCenterDryRun(
+        page,
+        ChatSelectors.test_defaults(),
+        artifact_dir=tmp_path,
+    )
+
+    result = runner.run_target(
+        Target(name="小明", stable_id="target-a", candidate_id=CONVERSATION_A_ID),
+        None,
+        DryRunSettings(),
+        navigation_only=True,
+    )
+
+    assert result.result == "navigation_verified"
+    assert result.identity_match is True
+    assert result.identity_match_reason == "stable_id_match_title_warning"
+    assert result.counters["real_composer_writes"] == 0
+
+
 def test_target_change_immediately_clears_previous_identity_draft_and_result(page):
     _open_mocked_frontend(
         page,
