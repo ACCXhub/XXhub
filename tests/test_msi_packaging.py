@@ -14,6 +14,14 @@ def test_wix_project_is_sdk_style_and_per_user():
     assert 'Id="PreserveDataRoot"' in product
     assert 'Permanent="yes"' in product
     assert "<MajorUpgrade" in product
+    assert 'PackageReference Include="WixToolset.UI.wixext" Version="7.0.0"' in project
+    assert 'xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"' in product
+    assert 'ui:WixUI Id="WixUI_InstallDir"' in product
+    assert 'InstallDirectory="INSTALLFOLDER"' in product
+    assert 'Id="WixUILicenseRtf"' in product
+    assert 'Id="InstalledFolderSearch"' in product
+    assert 'Name="InstallFolder"' in product
+    assert 'Value="[INSTALLFOLDER]"' in product
     assert "<SuppressIces>ICE60;ICE91</SuppressIces>" in project
 
 
@@ -120,13 +128,25 @@ def test_msi_lifecycle_verifier_preserves_shortcuts_and_data():
 
     for token in [
         '"/i `"$Msi`""',
+        'INSTALLFOLDER=`"$CustomInstallRoot`"',
         '"/fa $ProductCode"',
         '"/x $ProductCode"',
+        "Assert-MsiUi",
+        '"WelcomeDlg"',
+        '"InstallDirDlg"',
+        '"VerifyReadyDlg"',
+        '"ProgressDlg"',
+        '"ExitDialog"',
+        '"CancelDlg"',
+        '"SetTargetPath"',
+        '"SpawnDialog"',
+        '"Install previous-version baseline"',
+        '"Major upgrade"',
         "Assert-Shortcut",
         "Get-DataSnapshot",
         "Test-SnapshotsEqual",
         "shortcutBackups",
-        "not_testable_no_prior_msi_baseline",
+        "prior_installation_restoration",
         "msi-lifecycle-report.json",
     ]:
         assert token in verifier

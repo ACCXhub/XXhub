@@ -13,6 +13,14 @@
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
     <Icon Id="AutoDyIcon" SourceFile="$(var.StageDir)\assets\icons\autody.ico" />
     <Property Id="ARPPRODUCTICON" Value="AutoDyIcon" />
+    <Property Id="INSTALLFOLDER">
+      <RegistrySearch
+        Id="InstalledFolderSearch"
+        Root="HKCU"
+        Key="Software\AutoDy"
+        Name="InstallFolder"
+        Type="raw" />
+    </Property>
     <WixVariable Id="WixUILicenseRtf" Value="$(sys.SOURCEFILEDIR)License.rtf" />
     <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
     <Feature Id="MainFeature" Title="AutoDy" Level="1">
@@ -75,6 +83,12 @@
         WorkingDirectory="INSTALLFOLDER"
         Icon="AutoDyIcon" />
       <RemoveFolder Id="RemoveAutoDyProgramMenuFolder" Directory="AutoDyProgramMenuFolder" On="uninstall" />
+      <RegistryValue
+        Root="HKCU"
+        Key="Software\AutoDy"
+        Name="InstallFolder"
+        Value="[INSTALLFOLDER]"
+        Type="string" />
       <RegistryValue
         Root="HKCU"
         Key="Software\AutoDy"
