@@ -28,6 +28,7 @@ _MANIFEST_NAME = "manifest.json"
 _MAX_FILE_COUNT = 16
 _MAX_ARCHIVE_BYTES = 512 * 1024
 _MAX_EXTRACTED_BYTES = 1024 * 1024
+_REPRODUCIBLE_ZIP_TIMESTAMP = (2000, 1, 1, 0, 0, 0)
 _ALLOWED_FILES = {
     _MANIFEST_NAME,
     "backend.py",
@@ -36,6 +37,16 @@ _ALLOWED_FILES = {
     "frontend/module.css",
     "README.md",
 }
+
+
+def _write_reproducible_zip_entry(
+    archive: zipfile.ZipFile, name: str, data: bytes | str
+) -> None:
+    info = zipfile.ZipInfo(name, date_time=_REPRODUCIBLE_ZIP_TIMESTAMP)
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.create_system = 3
+    info.external_attr = 0o100644 << 16
+    archive.writestr(info, data)
 
 
 def _project_source_present(root: Path) -> bool:
@@ -247,10 +258,14 @@ def build_module_archive(destination: Path, *, version: str, core_version: str =
     destination.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as archive:
         for name, data in payload.items():
-            archive.writestr(name, data)
-        archive.writestr(_MANIFEST_NAME, json.dumps(manifest, ensure_ascii=False, indent=2))
+            _write_reproducible_zip_entry(archive, name, data)
+        _write_reproducible_zip_entry(
+            archive,
+            _MANIFEST_NAME,
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+        )
         if mutate == "traversal":
-            archive.writestr("../escape.txt", "invalid")
+            _write_reproducible_zip_entry(archive, "../escape.txt", "invalid")
     return destination
 
 

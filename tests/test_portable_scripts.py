@@ -85,7 +85,8 @@ def test_portable_builder_excludes_sensitive_data():
     text = Path("scripts/build-portable.ps1").read_text(encoding="utf-8-sig")
     for token in [".venv", "browser-profile", "avatar-cache", "discovered_friends", "account-profile", "account-profiles", "account-avatar", "screenshots", "config.yaml", "data", "node_modules"]:
         assert token in text
-    assert "Compress-Archive" in text
+    assert "New-ReproducibleZipFromDirectory" in text
+    assert "Convert-ReleaseTextFilesToLf" in text
     assert "capture-doc-screenshots.py" in text
     assert "PROJECT_HANDOFF.md" in text
     assert "build-msi.ps1" in text
@@ -93,7 +94,7 @@ def test_portable_builder_excludes_sensitive_data():
     assert "verify-release-artifacts.ps1" in text
     assert '"AutoDy-Windows-Portable-$Version.zip"' in text
     assert '"$ArchiveName.sha256"' in text
-    assert "Get-FileHash" in text
+    assert "Get-ReleaseFileSha256" in text
     assert "data/avatar-cache/" in Path(".gitignore").read_text(encoding="utf-8")
     assert "data/discovered_friends.json" in Path(".gitignore").read_text(encoding="utf-8")
     assert "data/account-profile.json" in Path(".gitignore").read_text(encoding="utf-8")
@@ -110,6 +111,8 @@ def test_portable_builder_uses_ci_python_when_project_venv_is_absent():
 
 def test_ci_installs_playwright_into_the_test_runtime():
     text = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert "PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/data/ms-playwright" in text
-    assert 'PLAYWRIGHT_SKIP_BROWSER_GC: "1"' in text
-    assert "python -m playwright install chromium" in text
+    bootstrap = Path("scripts/bootstrap-source.ps1").read_text(encoding="utf-8-sig")
+    assert ".\\scripts\\bootstrap-source.ps1" in text
+    assert "PLAYWRIGHT_BROWSERS_PATH" in bootstrap
+    assert "PLAYWRIGHT_SKIP_BROWSER_GC" in bootstrap
+    assert "'playwright', 'install', 'chromium'" in bootstrap

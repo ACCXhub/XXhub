@@ -1,19 +1,36 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = "1.4.1"
+    [string]$Version = "1.4.2",
+    [switch]$PlanOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+. (Join-Path $PSScriptRoot 'release-common.ps1')
 $Output = Join-Path $Root "output"
-$Stage = Join-Path $Output "AutoDy-Windows"
+$ReleaseDirectory = Get-CanonicalReleaseDirectory -Root $Root -Version $Version
+$Work = Join-Path $Output "work\portable-v$Version"
+$Stage = Join-Path $Work "AutoDy-Windows"
 $ArchiveName = "AutoDy-Windows-Portable-$Version.zip"
 $ChecksumName = "$ArchiveName.sha256"
-$Archive = Join-Path $Output $ArchiveName
-$Checksum = Join-Path $Output $ChecksumName
-$ModuleArchive = Join-Path $Output "AutoDy-Test-Center.autody-module.zip"
-$ModuleChecksum = Join-Path $Output "AutoDy-Test-Center.autody-module.zip.sha256"
+$Archive = Join-Path $ReleaseDirectory $ArchiveName
+$Checksum = Join-Path $ReleaseDirectory $ChecksumName
+$ModuleArchive = Join-Path $Work "AutoDy-Test-Center.autody-module.zip"
+$ModuleChecksum = Join-Path $Work "AutoDy-Test-Center.autody-module.zip.sha256"
+
+if ($PlanOnly) {
+    [ordered]@{
+        version = $Version
+        configuration = 'Release'
+        release_directory = $ReleaseDirectory
+        artifact = $Archive
+    } | ConvertTo-Json -Depth 3 -Compress
+    return
+}
+
+New-Item -ItemType Directory -Force -Path $ReleaseDirectory | Out-Null
+New-Item -ItemType Directory -Force -Path $Work | Out-Null
 
 Get-ChildItem -LiteralPath (Join-Path $Root "scripts") -Filter *.ps1 | ForEach-Object {
     $tokens = $null
@@ -32,7 +49,7 @@ if (Test-Path $ModuleChecksum) { Remove-Item -LiteralPath $ModuleChecksum -Force
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 
 $items = @(
-    "src", "scripts", "docs", "assets", "message-packs", ".github",
+    "src", "scripts", "docs", "assets", "message-packs",
     "pyproject.toml", "README.md", "LICENSE", "SECURITY.md", "THIRD_PARTY_NOTICES.md",
     "config.example.yaml", "messages.example.txt", "install.cmd"
 )
@@ -57,9 +74,13 @@ if (Test-Path $screenshotToolStage) { Remove-Item -LiteralPath $screenshotToolSt
 # runtime content and may contain machine-specific verification paths.
 foreach ($releaseOnlyPath in @(
     "docs\PROJECT_HANDOFF.md",
+    "scripts\bootstrap-source.ps1",
     "scripts\build-msi.ps1",
+    "scripts\build-release-from-clean-source.ps1",
+    "scripts\release-common.ps1",
     "scripts\verify-msi-lifecycle.ps1",
-    "scripts\verify-release-artifacts.ps1"
+    "scripts\verify-release-artifacts.ps1",
+    "scripts\write-release-manifest.ps1"
 )) {
     $releaseOnlyStage = Join-Path $Stage $releaseOnlyPath
     if (Test-Path -LiteralPath $releaseOnlyStage) {
@@ -85,15 +106,18 @@ Copy-Item -LiteralPath $ModuleArchive -Destination $moduleStage -Force
 # avatar-cache, discovered_friends.json, account-profile.json, account-profiles,
 # account-avatar, screenshots,
 # config.yaml, messages.txt, node_modules, .git.
-Compress-Archive -Path (Join-Path $Stage "*") -DestinationPath $Archive -Force
+Convert-ReleaseTextFilesToLf -Root $Stage
+New-ReproducibleZipFromDirectory -SourceDirectory $Stage -DestinationPath $Archive
 $forbidden = @("config.yaml", "messages.txt", ".venv", "node_modules", "browser-profile", "avatar-cache", "account-profile", "account-profiles", "account-avatar", "discovered_friends", "screenshots", "data\logs", "data\history", "data\preflight")
 $entries = Get-ChildItem -LiteralPath $Stage -Recurse -Force | ForEach-Object { $_.FullName.Substring($Stage.Length).TrimStart('\\') }
 foreach ($item in $forbidden) {
     if ($entries | Where-Object { $_ -like "*$item*" }) { throw "Portable archive staging contains excluded local data: $item" }
 }
-$hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Archive).Hash.ToLowerInvariant()
+$hash = Get-ReleaseFileSha256 -Path $Archive
 "$hash  $ArchiveName" | Set-Content -Encoding ascii -NoNewline $Checksum
-$moduleHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ModuleArchive).Hash.ToLowerInvariant()
+$null = Assert-CanonicalReleaseArtifact -Root $Root -Version $Version -Path $Archive
+$null = Assert-CanonicalReleaseArtifact -Root $Root -Version $Version -Path $Checksum
+$moduleHash = Get-ReleaseFileSha256 -Path $ModuleArchive
 "$moduleHash  AutoDy-Test-Center.autody-module.zip" | Set-Content -Encoding ascii -NoNewline $ModuleChecksum
 Write-Host "Portable archive: $Archive"
 Write-Host "SHA-256: $Checksum"

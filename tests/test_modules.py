@@ -36,6 +36,17 @@ def test_official_module_metadata_is_generated_from_the_single_version_policy(tm
     assert manifest["required_autody_version"] == OFFICIAL_TEST_CENTER_CORE_RANGE
 
 
+def test_official_module_archive_is_byte_reproducible(tmp_path: Path):
+    first = build_official_module_archive(tmp_path / "first.autody-module.zip")
+    second = build_official_module_archive(tmp_path / "second.autody-module.zip")
+
+    assert first.read_bytes() == second.read_bytes()
+    with zipfile.ZipFile(first) as archive:
+        assert {entry.date_time for entry in archive.infolist()} == {
+            (2000, 1, 1, 0, 0, 0)
+        }
+
+
 def test_source_runtime_generates_current_package_without_reading_output_directory(tmp_path: Path):
     (tmp_path / "src" / "autody").mkdir(parents=True)
     (tmp_path / "src" / "autody" / "modules.py").write_text("# source marker", encoding="utf-8")
