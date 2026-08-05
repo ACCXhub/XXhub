@@ -4,6 +4,25 @@
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-08-03
+
+### Added
+
+- 增加幂等 clean-source bootstrap、固定开发依赖、规范 Release 输出目录和机器可读发布 manifest。
+- CI 通过远程 artifact 在独立 Windows runner 验证哈希、MSI 行政解包和完整生命周期。
+
+### Changed
+
+- MSI 构建显式使用 Release，Debug 中间 MSI 使用明显的非发布文件名。
+- portable 与官方模块 ZIP 使用排序、固定时间戳和规范 LF 行尾生成可复现归档。
+- 文档明确区分普通用户 MSI、需要 Python 的 portable 与开发者 Source ZIP/TAR。
+
+### Fixed
+
+- 修复干净源码缺少 `.venv`/`config.yaml` 时 README 首条命令必然失败的问题。
+- 修复 PowerShell 5.1 把成功 native 命令的 stderr warning 当成终止错误的问题。
+- 发布脚本拒绝 `obj`、Debug、work、陈旧版本、错误 ProductVersion、外部 CAB 和非当前干净提交。
+
 ## [1.4.1] - 2026-07-31
 
 ### Changed

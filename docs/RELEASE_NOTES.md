@@ -1,45 +1,41 @@
 # 发布说明
 
-## AutoDy 1.4.1
+## AutoDy 1.4.2
 
-发布日期：2026-07-31。官方 Test Center 版本：`1.2.0`。
+发布日期：2026-08-03。官方 Test Center 版本：`1.2.0`。
 
-### Overview
+### 安装包调查结论
 
-- 历史目标失败现在会依据稳定目标 ID 和后续确认成功状态显示“已解决”。
-- 已解决卡片保留历史和重复数量，但不再显示“仅重试此目标”主操作。
-- 只有同一目标存在更晚确认成功、且之后没有更新失败时才会标记为已解决；未解决项继续保持原有安全重试入口。
+- 用户误发的 `obj\x64\Debug` MSI 与官方 v1.4.1 MSI 字节完全相同；该具体文件没有缺 CAB、截断或损坏的 DLL，但 `obj` 仍是 WiX/MSBuild 中间目录，不能作为分发入口。
+- 三份同字节 MSI 均完成行政解包；6 个内嵌 CAB 可完整读取，`D3DCompiler_47.dll` 的大小和 SHA-256 与 staging 源一致。
+- v1.4.1 的历史生命周期报告已通过 fresh、默认/自定义路径、repair、upgrade 和 uninstall。接收方失败副本的哈希与完整 MSI 日志未取得，因此不能把具体接收方故障归因于包内结构，也不能无证据归因于权限或安全软件。
 
-### MSI 安装器
+### 发布与源码构建修复
 
-- 增加 Welcome、许可、安装目录、Ready、Progress 和完成页面。
-- 安装目录页显示默认路径 `%LocalAppData%\Programs\AutoDy`，支持 Browse 选择其他程序目录。
-- 所选程序目录会持久化，修复、升级和卸载均能继续定位实际 payload。
-- 可写数据仍固定保存在 `%LocalAppData%\AutoDy`，卸载默认保留用户数据。
-- 保持 per-user 安装、静默安装和原有 UpgradeCode；`1.4.0` 可直接升级到 `1.4.1`。
+- MSI 使用原生目录解析：新安装优先选择当前用户可写的 `D:\AutoDy`，D 盘不可用或不可写时回退到 `%LocalAppData%\Programs\AutoDy`；无效的旧注册表路径不会被复用，升级与修复继续使用已安装路径。
+- 开始菜单增加“卸载 AutoDy”快捷方式，调用当前 MSI ProductCode；正常卸载移除程序与快捷方式，默认保留 `%LocalAppData%\AutoDy` 用户数据。
+- 启动器会先严格验证 `/api/service-identity`；同一用户、安装和数据目录的已有 AutoDy 服务会被复用。8765 被无关服务占用时才从 8766–8799 选择安全回退端口。
+- MSI 的生成标识和 OLE 元数据已固定，使相同输入的 Release MSI 字节可复现；v1.4.1 可原路径升级。
+- 正式 MSI 构建显式使用 `Release`；手工 Debug 输出带 `UNOFFICIAL-DEBUG`，避免被误认为发布包。
+- 所有公开文件只从 `output\release\v1.4.2` 发布；`obj`、Debug、work 和测试目录会被守卫拒绝。
+- 增加机器可读 `release-manifest.json`，记录版本、提交、Release 配置、文件大小/SHA-256、ProductCode、UpgradeCode、MSI Summary、隐私扫描和生命周期结果。
+- 增加幂等 `scripts\bootstrap-source.ps1`、固定 Python 开发依赖和 `scripts\build-release-from-clean-source.ps1`。
+- portable 与官方模块 ZIP 使用排序、固定时间戳和规范行尾，避免构建时间及 Windows/GitHub archive 行尾造成漂移。
+- 修复 PowerShell 5.1 将成功 native 命令的 stderr warning 误判为构建失败的问题。
 
-### 发布资产
+### 下载选择
 
-公开 Release 仅包含：
+- 普通用户：下载 `AutoDy-1.4.2-x64.msi`。
+- 便携源码包：下载 `AutoDy-Windows-Portable-1.4.2.zip`，需要 Python 3.11 与网络，不需要 Node.js。
+- 开发者源码：GitHub 自动 Source ZIP/TAR，先运行 `scripts\bootstrap-source.ps1`。
+- 不要分发 `obj`、`bin\Debug`、`output\work` 或测试目录中的文件。
 
-- `AutoDy-1.4.1-x64.msi`
-- `AutoDy-1.4.1-x64.msi.sha256`
-- `AutoDy-Windows-Portable-1.4.1.zip`
-- `AutoDy-Windows-Portable-1.4.1.zip.sha256`
+### 公开资产
 
-MSI 与 portable 继续使用显式 allowlist，不包含本地账号、好友、消息、Cookie、浏览器资料、日志、备份、截图、运行时数据、测试、`.venv` 或 `node_modules`。
+- `AutoDy-1.4.2-x64.msi`
+- `AutoDy-1.4.2-x64.msi.sha256`
+- `AutoDy-Windows-Portable-1.4.2.zip`
+- `AutoDy-Windows-Portable-1.4.2.zip.sha256`
+- `release-manifest.json`
 
-### 发布前验证
-
-```powershell
-.\.venv\Scripts\python.exe -m autody.cli doctor
-.\.venv\Scripts\pytest.exe -q
-cd frontend
-npm test
-npm run build
-cd ..
-.\scripts\build-portable.ps1
-.\scripts\build-msi.ps1
-.\scripts\verify-msi-lifecycle.ps1
-.\scripts\verify-release-artifacts.ps1
-```
+发布前必须在干净 Windows runner 完成默认/自定义安装、repair、v1.4.1 upgrade、uninstall、远程 artifact 传输哈希、MSI/CAB/DLL 完整性、隐私扫描和 clean-source 构建。旧 v1.4.0/v1.4.1 标签与资产保持不变。

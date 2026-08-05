@@ -8,7 +8,7 @@ AutoDy 是运行在 Windows 本机的 Douyin 私信工作流管理台。它将�
 
 ## 2. 版本与兼容性
 
-当前核心版本为 `1.4.1`。官方 Test Center 的模块版本为 `1.2.0`，模块 API 为 `1`，兼容范围为 `>=1.3.0,<2.0.0`。核心版本与模块版本独立演进；模块不需要机械地追随核心版本号。
+当前核心版本为 `1.4.2`。官方 Test Center 的模块版本为 `1.2.0`，模块 API 为 `1`，兼容范围为 `>=1.3.0,<2.0.0`。核心版本与模块版本独立演进；模块不需要机械地追随核心版本号。
 
 ## 3. 产品边界
 
@@ -161,7 +161,7 @@ flowchart LR
 
 ## 18. 模块版本显示
 
-设置页应分别显示 AutoDy 核心版本、官方模块版本和兼容状态。例如 AutoDy `1.4.1` 与 Test Center `1.2.0` 且范围 `>=1.3.0,<2.0.0` 是正常兼容组合，不表示模块“落后”。
+设置页应分别显示 AutoDy 核心版本、官方模块版本和兼容状态。例如 AutoDy `1.4.2` 与 Test Center `1.2.0` 且范围 `>=1.3.0,<2.0.0` 是正常兼容组合，不表示模块“落后”。
 
 ## 19. Windows 托盘控制器
 
@@ -173,7 +173,7 @@ flowchart LR
 
 ## 21. 安装、启动与便携式构建
 
-开发环境使用项目 `.venv`。源安装可以构建前端；便携式安装不要求终端用户具备 Node.js。per-user MSI 默认将只读程序安装到 `%LocalAppData%\Programs\AutoDy`，向导允许改选程序目录，并持久化该路径供修复和卸载使用；可写数据固定放在 `%LocalAppData%\AutoDy`，默认在卸载时保留。MSI 使用固定 SHA-256 的官方 Python embeddable、固定依赖和 clean Chromium staging，不复制开发 `.venv`，也不递归打包仓库。`install.cmd`、仪表盘启动脚本和构建脚本必须保持 PowerShell 5.1 与 MSI 兼容，且任何启动失败应可见、可诊断。
+开发者源码先运行 `scripts\bootstrap-source.ps1`，使用 `requirements-dev.lock`、`npm ci` 和源码树本地 Playwright 目录建立隔离环境。GitHub Source ZIP/TAR 不是安装器；portable 是需要 Python 3.11 与网络、但不需要 Node.js 的便携源码包；只有 MSI 自带 Python 与 Chromium。per-user MSI 新安装在当前用户可写时优先使用 `D:\AutoDy`，否则回退到 `%LocalAppData%\Programs\AutoDy`；向导允许改选程序目录，并持久化该路径供修复、升级和卸载使用。可写数据固定放在 `%LocalAppData%\AutoDy`，默认在卸载时保留。MSI 使用固定 SHA-256 的官方 Python embeddable、固定依赖和 clean Chromium staging，不复制开发 `.venv`，也不递归打包仓库。`install.cmd`、仪表盘启动脚本和构建脚本必须保持 PowerShell 5.1 与 MSI 兼容，且任何启动失败应可见、可诊断。
 
 ## 22. 诊断与陈旧安装
 
@@ -192,10 +192,7 @@ cd frontend
 npm test
 npm run build
 cd ..
-.\scripts\build-portable.ps1
-.\scripts\build-msi.ps1
-.\scripts\verify-msi-lifecycle.ps1
-.\scripts\verify-release-artifacts.ps1
+.\scripts\build-release-from-clean-source.ps1 -Version 1.4.2 -BuildOnly -Commit <commit>
 ```
 
 UI 变更还应在新的浏览器上下文中访问 `127.0.0.1:8765`，检查请求、控制台、弹窗、滚动和常见桌面宽度；该验收不得触发真实消息操作。
