@@ -1,25 +1,38 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = "1.4.1",
-    [string]$ArtifactDirectory
+    [string]$Version = "1.4.2",
+    [string]$ArtifactDirectory,
+    [string]$ReportDirectory
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+. (Join-Path $PSScriptRoot 'release-common.ps1')
 $Output = Join-Path $Root "output"
+$CanonicalRelease = Get-CanonicalReleaseDirectory -Root $Root -Version $Version
 $ArtifactRoot = if ([string]::IsNullOrWhiteSpace($ArtifactDirectory)) {
-    $Output
+    $CanonicalRelease
 } else {
     (Resolve-Path -LiteralPath $ArtifactDirectory).Path
 }
+$ReportRoot = if ([string]::IsNullOrWhiteSpace($ReportDirectory)) {
+    $ArtifactRoot
+} else {
+    [IO.Path]::GetFullPath($ReportDirectory)
+}
+if ($ArtifactRoot -match '(?i)\\obj(\\|$)|\\Debug(\\|$)') {
+    throw 'Refusing to verify an intermediate or Debug artifact directory for release.'
+}
+New-Item -ItemType Directory -Force -Path $ReportRoot | Out-Null
 $Msi = Join-Path $ArtifactRoot "AutoDy-$Version-x64.msi"
 $Portable = Join-Path $ArtifactRoot "AutoDy-Windows-Portable-$Version.zip"
-$Module = Join-Path $Output "AutoDy-Test-Center.autody-module.zip"
-$ReportJson = Join-Path $Output "release-privacy-report.json"
-$ReportMarkdown = Join-Path $Output "release-privacy-report.md"
-$Work = Join-Path $Output "release-privacy-work"
+$MsiChecksum = "$Msi.sha256"
+$PortableChecksum = "$Portable.sha256"
+$ReportJson = Join-Path $ReportRoot "release-privacy-report.json"
+$ReportMarkdown = Join-Path $ReportRoot "release-privacy-report.md"
+$Work = Join-Path $Output "work\release-privacy-v$Version"
 $AdminExtract = Join-Path $Work "msi-admin"
 $PortableExtract = Join-Path $Work "portable"
 $ModuleExtract = Join-Path $Work "module"
@@ -131,6 +144,8 @@ function Get-SanitizedText {
 $findings = New-Object System.Collections.ArrayList
 $checks = [ordered]@{
     msi_tables = "not_run"
+    msi_embedded_cabs = "not_run"
+    checksums = "not_run"
     msi_administrative_extract = "not_run"
     portable_zip = "not_run"
     module_zip = "not_run"
@@ -145,8 +160,9 @@ $counts = [ordered]@{
     module_files = 0
 }
 $artifacts = @()
+$d3dCompiler = $null
 
-foreach ($artifact in @($Msi, $Portable, $Module)) {
+foreach ($artifact in @($Msi, $MsiChecksum, $Portable, $PortableChecksum)) {
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
         [void]$findings.Add([ordered]@{
             category = "missing_artifact"
@@ -158,8 +174,29 @@ foreach ($artifact in @($Msi, $Portable, $Module)) {
     $artifacts += [ordered]@{
         file = $item.Name
         size = $item.Length
-        sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $item.FullName).Hash.ToLowerInvariant()
+        sha256 = Get-ReleaseFileSha256 -Path $item.FullName
+        zone_identifier = Test-Path -LiteralPath ($item.FullName + ':Zone.Identifier')
     }
+}
+
+if (
+    (Test-Path -LiteralPath $Msi -PathType Leaf) -and
+    (Test-Path -LiteralPath $MsiChecksum -PathType Leaf) -and
+    (Test-Path -LiteralPath $Portable -PathType Leaf) -and
+    (Test-Path -LiteralPath $PortableChecksum -PathType Leaf)
+) {
+    $checksumMismatch = $false
+    foreach ($pair in @(@($Msi, $MsiChecksum), @($Portable, $PortableChecksum))) {
+        $expected = "$(Get-ReleaseFileSha256 -Path $pair[0])  $([IO.Path]::GetFileName($pair[0]))"
+        if ((Get-Content -Raw -LiteralPath $pair[1]).Trim() -ne $expected) {
+            $checksumMismatch = $true
+            [void]$findings.Add([ordered]@{
+                category = 'checksum_mismatch'
+                file = [IO.Path]::GetFileName($pair[1])
+            })
+        }
+    }
+    $checks.checksums = if ($checksumMismatch) { 'failed' } else { 'passed' }
 }
 
 $byteMapping = [Text.Encoding]::GetEncoding(28591)
@@ -211,6 +248,9 @@ try {
             $installer = New-Object -ComObject WindowsInstaller.Installer
             $database = $installer.OpenDatabase($Msi, 0)
             $fileRows = @(Get-MsiRows $database 'SELECT `File`,`FileName` FROM `File`' 2)
+            $productRows = @(Get-MsiRows $database "SELECT ``Value`` FROM ``Property`` WHERE ``Property`` = 'ProductVersion'" 1)
+            $mediaRows = @(Get-MsiRows $database 'SELECT `DiskId`,`LastSequence`,`Cabinet` FROM `Media`' 3)
+            $streamRows = @(Get-MsiRows $database 'SELECT `Name` FROM `_Streams`' 1)
             $shortcutRows = @(Get-MsiRows $database 'SELECT `Shortcut`,`Name`,`Target`,`Arguments` FROM `Shortcut`' 4)
             $customActionTable = @(Get-MsiRows $database "SELECT ``Name`` FROM ``_Tables`` WHERE ``Name`` = 'CustomAction'" 1)
             $customActionRows = @()
@@ -221,6 +261,26 @@ try {
             $counts.msi_shortcuts = $shortcutRows.Count
             $counts.msi_custom_actions = $customActionRows.Count
 
+            if ($productRows.Count -ne 1 -or $productRows[0].Values[0] -ne $Version) {
+                [void]$findings.Add([ordered]@{
+                    category = "wrong_product_version"
+                    file = "MSI Property table"
+                })
+            }
+            $streamNames = @($streamRows | ForEach-Object { $_.Values[0] })
+            foreach ($media in $mediaRows) {
+                $cabinet = $media.Values[2]
+                if (-not $cabinet.StartsWith('#') -or $cabinet.Substring(1) -notin $streamNames) {
+                    [void]$findings.Add([ordered]@{
+                        category = "missing_or_external_cab"
+                        file = "MSI Media table"
+                    })
+                }
+            }
+            $checks.msi_embedded_cabs = if (
+                @($findings | Where-Object { $_.category -eq 'missing_or_external_cab' }).Count -eq 0
+            ) { 'passed' } else { 'failed' }
+
             foreach ($row in $fileRows) {
                 if (Test-ForbiddenEntryPath $row.Values[1]) {
                     [void]$findings.Add([ordered]@{
@@ -229,23 +289,62 @@ try {
                     })
                 }
             }
-            if ($shortcutRows.Count -ne 2) {
+            $expectedShortcuts = @(
+                [pscustomobject]@{
+                    Id = 'DesktopShortcut'
+                    Name = '*|AutoDy Management'
+                    Target = '[SystemFolder]wscript.exe'
+                    Arguments = '"[INSTALLFOLDER]scripts\start-dashboard.vbs"'
+                },
+                [pscustomobject]@{
+                    Id = 'StartMenuShortcut'
+                    Name = '*|AutoDy Management'
+                    Target = '[SystemFolder]wscript.exe'
+                    Arguments = '"[INSTALLFOLDER]scripts\start-dashboard.vbs"'
+                },
+                [pscustomobject]@{
+                    Id = 'UninstallShortcut'
+                    Name = '*|卸载 AutoDy'
+                    Target = '[SystemFolder]msiexec.exe'
+                    Arguments = '/x [ProductCode]'
+                }
+            )
+            if ($shortcutRows.Count -ne $expectedShortcuts.Count) {
                 [void]$findings.Add([ordered]@{
                     category = "unexpected_shortcut_count"
                     file = "MSI Shortcut table"
                 })
             }
-            foreach ($row in $shortcutRows) {
-                if ($row.Values[1] -notlike "*AutoDy Management" -or
-                    $row.Values[2] -ne "[SystemFolder]wscript.exe" -or
-                    $row.Values[3] -ne '"[INSTALLFOLDER]scripts\start-dashboard.vbs"') {
+            foreach ($expectedShortcut in $expectedShortcuts) {
+                $matches = @($shortcutRows | Where-Object {
+                    $_.Values[0] -eq $expectedShortcut.Id -and
+                    $_.Values[1] -like $expectedShortcut.Name -and
+                    $_.Values[2] -eq $expectedShortcut.Target -and
+                    $_.Values[3] -eq $expectedShortcut.Arguments
+                })
+                if ($matches.Count -ne 1) {
                     [void]$findings.Add([ordered]@{
                         category = "unsafe_shortcut"
                         file = "MSI Shortcut table"
                     })
                 }
             }
-            if ($customActionRows.Count -ne 0) {
+            $expectedCustomActions = @(
+                [pscustomobject]@{ Action = 'SetExistingInstallFolder'; Type = '51'; Source = 'INSTALLFOLDER'; Target = '[AUTODY_EXISTING_INSTALLFOLDER]' },
+                [pscustomobject]@{ Action = 'SetDDriveInstallFolder'; Type = '51'; Source = 'INSTALLFOLDER'; Target = 'D:\AutoDy' },
+                [pscustomobject]@{ Action = 'Wix4RemoveFoldersEx_X64'; Type = '65'; Source = 'Wix4UtilCA_X64'; Target = 'WixRemoveFoldersEx' }
+            )
+            $unexpectedCustomAction = $customActionRows.Count -ne $expectedCustomActions.Count
+            foreach ($expectedAction in $expectedCustomActions) {
+                $matches = @($customActionRows | Where-Object {
+                    $_.Values[0] -eq $expectedAction.Action -and
+                    $_.Values[1] -eq $expectedAction.Type -and
+                    $_.Values[2] -eq $expectedAction.Source -and
+                    $_.Values[3] -eq $expectedAction.Target
+                })
+                if ($matches.Count -ne 1) { $unexpectedCustomAction = $true }
+            }
+            if ($unexpectedCustomAction) {
                 [void]$findings.Add([ordered]@{
                     category = "unexpected_custom_action"
                     file = "MSI CustomAction table"
@@ -280,6 +379,25 @@ try {
             })
         } else {
             $counts.administrative_files = Test-ExtractedTree $AdminExtract "msi-admin"
+            if ($counts.administrative_files -ne ($counts.msi_files + 1)) {
+                [void]$findings.Add([ordered]@{
+                    category = "administrative_payload_count_mismatch"
+                    file = Split-Path -Leaf $Msi
+                })
+            }
+            $dlls = @(Get-ChildItem -LiteralPath $AdminExtract -Recurse -File -Filter 'D3DCompiler_47.dll' |
+                Where-Object { $_.FullName -like '*chromium-*\chrome-win64\D3DCompiler_47.dll' })
+            if ($dlls.Count -ne 1) {
+                [void]$findings.Add([ordered]@{
+                    category = "d3dcompiler_payload_missing"
+                    file = Split-Path -Leaf $Msi
+                })
+            } else {
+                $d3dCompiler = [ordered]@{
+                    size = $dlls[0].Length
+                    sha256 = Get-ReleaseFileSha256 -Path $dlls[0].FullName
+                }
+            }
             $checks.msi_administrative_extract = "passed"
         }
     }
@@ -289,13 +407,20 @@ try {
         Expand-Archive -LiteralPath $Portable -DestinationPath $PortableExtract -Force
         $counts.portable_files = Test-ExtractedTree $PortableExtract "portable"
         $checks.portable_zip = "passed"
-    }
-
-    if (Test-Path -LiteralPath $Module -PathType Leaf) {
-        New-Item -ItemType Directory -Force -Path $ModuleExtract | Out-Null
-        Expand-Archive -LiteralPath $Module -DestinationPath $ModuleExtract -Force
-        $counts.module_files = Test-ExtractedTree $ModuleExtract "module"
-        $checks.module_zip = "passed"
+        $modules = @(Get-ChildItem -LiteralPath $PortableExtract -Recurse -File `
+            -Filter 'AutoDy-Test-Center.autody-module.zip')
+        if ($modules.Count -ne 1) {
+            [void]$findings.Add([ordered]@{
+                category = "embedded_module_missing_or_duplicated"
+                file = Split-Path -Leaf $Portable
+            })
+            $checks.module_zip = 'failed'
+        } else {
+            New-Item -ItemType Directory -Force -Path $ModuleExtract | Out-Null
+            Expand-Archive -LiteralPath $modules[0].FullName -DestinationPath $ModuleExtract -Force
+            $counts.module_files = Test-ExtractedTree $ModuleExtract "module"
+            $checks.module_zip = "passed"
+        }
     }
     $checks.private_path_scan = if (
         @($findings | Where-Object { $_.category -eq "private_absolute_path" }).Count -eq 0
@@ -329,6 +454,7 @@ $report = [ordered]@{
     artifacts = $artifacts
     checks = $checks
     counts = $counts
+    d3dcompiler_47 = $d3dCompiler
     findings = @($findings)
 }
 $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $ReportJson -Encoding utf8

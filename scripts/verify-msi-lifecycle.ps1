@@ -1,28 +1,62 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = "1.4.1",
+    [string]$Version = "1.4.2",
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$PreviousVersion = "1.4.0"
+    [string]$PreviousVersion = "1.4.1",
+    [string]$ArtifactDirectory,
+    [string]$PreviousMsiPath,
+    [string]$ReportDirectory
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+. (Join-Path $PSScriptRoot 'release-common.ps1')
 $Output = Join-Path $Root "output"
-$Msi = Join-Path $Output "AutoDy-$Version-x64.msi"
-$PreviousMsi = Join-Path $Output "AutoDy-$PreviousVersion-x64.msi"
-$Work = Join-Path $Output "msi-lifecycle-work"
-$ReportJson = Join-Path $Output "msi-lifecycle-report.json"
-$ReportMarkdown = Join-Path $Output "msi-lifecycle-report.md"
-$InstallRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Programs\AutoDy"
+$ArtifactRoot = if ([string]::IsNullOrWhiteSpace($ArtifactDirectory)) {
+    Get-CanonicalReleaseDirectory -Root $Root -Version $Version
+} else {
+    (Resolve-Path -LiteralPath $ArtifactDirectory).Path
+}
+$ReportRoot = if ([string]::IsNullOrWhiteSpace($ReportDirectory)) {
+    $ArtifactRoot
+} else {
+    [IO.Path]::GetFullPath($ReportDirectory)
+}
+New-Item -ItemType Directory -Force -Path $ReportRoot | Out-Null
+$Msi = Join-Path $ArtifactRoot "AutoDy-$Version-x64.msi"
+$PreviousMsi = if ([string]::IsNullOrWhiteSpace($PreviousMsiPath)) {
+    Join-Path $Output "baselines\v$PreviousVersion\AutoDy-$PreviousVersion-x64.msi"
+} else {
+    [IO.Path]::GetFullPath($PreviousMsiPath)
+}
+$Work = Join-Path $Output "work\msi-lifecycle-v$Version"
+$ReportJson = Join-Path $ReportRoot "msi-lifecycle-report.json"
+$ReportMarkdown = Join-Path $ReportRoot "msi-lifecycle-report.md"
+$InstallRoot = if (Test-Path -LiteralPath "D:\" -PathType Container) {
+    "D:\AutoDy"
+} else {
+    Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "Programs\AutoDy"
+}
 $CustomInstallRoot = Join-Path $Work "custom-install\AutoDy"
 $InstalledDataRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "AutoDy"
 $RepositoryDataRoot = Join-Path $Root "data"
 $ExpectedUpgradeCode = "{C8B3A04F-ABAB-4F4C-8A2C-7A1AE24F1400}"
 $DesktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "AutoDy Management.lnk"
 $StartMenuShortcut = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\AutoDy\AutoDy Management.lnk"
-$ShortcutPaths = @($DesktopShortcut, $StartMenuShortcut)
+$UninstallShortcut = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\AutoDy\卸载 AutoDy.lnk"
+$ShortcutPaths = @($DesktopShortcut, $StartMenuShortcut, $UninstallShortcut)
+
+if (Test-Path -LiteralPath "HKCU:\Software\AutoDy") {
+    throw "Refusing to run MSI lifecycle verification in a user profile with existing AutoDy registration. Use a clean Windows user profile."
+}
+if (Test-Path -LiteralPath $InstallRoot) {
+    throw "Refusing to run MSI lifecycle verification because the resolved install directory already exists. Use a clean Windows user profile."
+}
+if (Test-Path -LiteralPath $InstalledDataRoot) {
+    throw "Refusing to run MSI lifecycle verification because the AutoDy runtime-data directory already exists. Use a clean Windows user profile."
+}
 
 function Assert-OutputChild {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -265,6 +299,26 @@ function Assert-Shortcut {
     }
 }
 
+function Assert-UninstallShortcut {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ExpectedProductCode
+    )
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Expected MSI uninstall shortcut is missing."
+    }
+    $shell = New-Object -ComObject WScript.Shell
+    try {
+        $shortcut = $shell.CreateShortcut($Path)
+        if ([IO.Path]::GetFileName($shortcut.TargetPath) -ne "msiexec.exe" -or
+            $shortcut.Arguments -ne "/x $ExpectedProductCode") {
+            throw "MSI uninstall shortcut target or arguments are incorrect."
+        }
+    } finally {
+        [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)
+    }
+}
+
 function Get-SanitizedText {
     param([Parameter(Mandatory = $true)][string]$Text)
     $profile = [Environment]::GetFolderPath("UserProfile")
@@ -318,7 +372,7 @@ for ($index = 0; $index -lt $ShortcutPaths.Count; $index++) {
         $shortcutBackups[$path] = [ordered]@{
             existed = $true
             backup = $backup
-            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash
+            sha256 = Get-ReleaseFileSha256 -Path $path
             last_write_time = $item.LastWriteTime
         }
     } else {
@@ -362,6 +416,7 @@ try {
 
     Assert-Shortcut $DesktopShortcut $InstallRoot
     Assert-Shortcut $StartMenuShortcut $InstallRoot
+    Assert-UninstallShortcut $UninstallShortcut $ProductCode
     $stages.shortcuts = "passed"
 
     Invoke-MsiChecked "Repair" "/fa $ProductCode" (Join-Path $Work "repair.log")
@@ -371,6 +426,7 @@ try {
     Assert-InstalledPayload $InstallRoot
     Assert-Shortcut $DesktopShortcut $InstallRoot
     Assert-Shortcut $StartMenuShortcut $InstallRoot
+    Assert-UninstallShortcut $UninstallShortcut $ProductCode
     $stages.repair = "passed"
 
     Invoke-MsiChecked "Uninstall after default install" `
@@ -394,6 +450,7 @@ try {
     Assert-InstalledPayload $CustomInstallRoot
     Assert-Shortcut $DesktopShortcut $CustomInstallRoot
     Assert-Shortcut $StartMenuShortcut $CustomInstallRoot
+    Assert-UninstallShortcut $UninstallShortcut $ProductCode
     if (Test-Path -LiteralPath (Join-Path $InstallRoot "runtime\python\python.exe") -PathType Leaf) {
         throw "Custom-path MSI install unexpectedly wrote payload to the default install folder."
     }
@@ -428,6 +485,7 @@ try {
     Assert-InstalledPayload $InstallRoot
     Assert-Shortcut $DesktopShortcut $InstallRoot
     Assert-Shortcut $StartMenuShortcut $InstallRoot
+    Assert-UninstallShortcut $UninstallShortcut $ProductCode
     $stages.upgrade = "passed"
 
     Invoke-MsiChecked "Uninstall after upgrade" `
@@ -489,7 +547,7 @@ try {
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
             Copy-Item -LiteralPath $backup.backup -Destination $path -Force
             (Get-Item -LiteralPath $path).LastWriteTime = $backup.last_write_time
-            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash -ne $backup.sha256) {
+            if ((Get-ReleaseFileSha256 -Path $path) -ne $backup.sha256) {
                 if ($failure -eq $null) {
                     $failure = "A pre-existing shortcut was not restored byte-for-byte."
                 }

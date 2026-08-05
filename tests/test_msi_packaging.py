@@ -7,6 +7,7 @@ def test_wix_project_is_sdk_style_and_per_user():
 
     assert 'Sdk="WixToolset.Sdk/7.0.0"' in project
     assert 'Scope="perUser"' in product
+    assert 'Codepage="65001"' in product
     assert 'Id="LocalAppDataFolder"' in product
     assert 'Id="ProgramsFolder" Name="Programs"' in product
     assert 'Id="INSTALLFOLDER" Name="AutoDy"' in product
@@ -15,11 +16,13 @@ def test_wix_project_is_sdk_style_and_per_user():
     assert 'Permanent="yes"' in product
     assert "<MajorUpgrade" in product
     assert 'PackageReference Include="WixToolset.UI.wixext" Version="7.0.0"' in project
+    assert 'PackageReference Include="WixToolset.Util.wixext" Version="7.0.0"' in project
     assert 'xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"' in product
     assert 'ui:WixUI Id="WixUI_InstallDir"' in product
     assert 'InstallDirectory="INSTALLFOLDER"' in product
     assert 'Id="WixUILicenseRtf"' in product
     assert 'Id="InstalledFolderSearch"' in product
+    assert 'Value="Z:\\__AutoDyNoExistingInstall__"' in product
     assert 'Name="InstallFolder"' in product
     assert 'Value="[INSTALLFOLDER]"' in product
     assert "<SuppressIces>ICE60;ICE91</SuppressIces>" in project
@@ -34,6 +37,27 @@ def test_msi_shortcuts_use_the_hidden_launcher():
     assert 'Id="StartMenuShortcut"' in product
 
 
+def test_msi_uninstall_shortcut_and_install_folder_resolution_are_msi_native():
+    product = Path("packaging/wix/Product.wxs").read_text(encoding="utf-8")
+
+    assert 'Id="UninstallShortcut"' in product
+    assert 'Name="卸载 AutoDy"' in product
+    assert 'Target="[SystemFolder]msiexec.exe"' in product
+    assert 'Arguments="/x [ProductCode]"' in product
+    assert 'Id="InstalledFolderSearch"' in product
+    assert 'Id="ExistingInstallFolderSearch"' in product
+    assert 'Path="[AUTODY_REGISTERED_INSTALLFOLDER]"' in product
+    assert 'Id="AutoDyDDriveSearch"' in product
+    assert 'Path="D:\\"' in product
+    assert 'Value="D:\\AutoDy"' in product
+    assert 'After="AppSearch"' in product
+    assert 'Sequence="both"' in product
+    assert 'Condition="AUTODY_EXISTING_INSTALLFOLDER"' in product
+    assert 'Condition="NOT INSTALLFOLDER AND NOT AUTODY_EXISTING_INSTALLFOLDER AND AUTODY_D_DRIVE"' in product
+    assert 'Script="vbscript"' not in product
+    assert not Path("packaging/wix/InstallFolderValidation.vbs").exists()
+
+
 def test_msi_builder_uses_explicit_allowlist_and_clean_runtime():
     builder = Path("scripts/build-msi.ps1").read_text(encoding="utf-8-sig")
 
@@ -44,13 +68,14 @@ def test_msi_builder_uses_explicit_allowlist_and_clean_runtime():
         "packaging\\runtime-requirements.txt",
         "AutoDy-Test-Center.autody-module.zip",
         "EmbeddedPythonSha256",
-        "Get-FileHash",
+        "Get-ReleaseFileSha256",
         "AcceptEula=wix7",
         '$previousErrorActionPreference = $ErrorActionPreference',
         '$ErrorActionPreference = "Continue"',
         "$nativeExitCode = $LASTEXITCODE",
         '"--upgrade", "--no-deps", "--target", $sitePackages, $wheel.FullName',
         "WixToolset.Sdk/7.0.0",
+        "WixToolset.Util.wixext.dll",
     ]:
         if token == "WixToolset.Sdk/7.0.0":
             assert token in Path("packaging/wix/AutoDy.Package.wixproj").read_text(
@@ -83,6 +108,8 @@ def test_generated_payload_components_use_hkcu_registry_keypaths():
     assert '"Key", "Software\\AutoDy\\Installer\\Components"' in builder
     assert '"KeyPath", "yes"' in builder
     assert '"Id", "PayloadDirectoryCleanup"' in builder
+    assert '"util", "RemoveFolderEx", "http://wixtoolset.org/schemas/v4/wxs/util"' in builder
+    assert '"Property", "INSTALLFOLDER"' in builder
     assert '"Id", "RemoveInstallFolder"' in builder
     assert '"Id", "RemoveProgramsFolderIfEmpty"' in builder
     assert '"On", "uninstall"' in builder
@@ -114,6 +141,10 @@ def test_release_privacy_verifier_covers_all_release_artifacts():
         "SELECT `File`,`FileName` FROM `File`",
         "SELECT `Shortcut`,`Name`,`Target`,`Arguments` FROM `Shortcut`",
         "FROM ``_Tables`` WHERE ``Name`` = 'CustomAction'",
+        "UninstallShortcut",
+        "Wix4RemoveFoldersEx_X64",
+        "SetExistingInstallFolder",
+        "SetDDriveInstallFolder",
         '"/a `"$Msi`" /qn',
         "AutoDy-Windows-Portable-$Version.zip",
         "AutoDy-Test-Center.autody-module.zip",
@@ -147,8 +178,13 @@ def test_msi_lifecycle_verifier_preserves_shortcuts_and_data():
         '"Install previous-version baseline"',
         '"Major upgrade"',
         "Assert-Shortcut",
+        "Assert-UninstallShortcut",
+        "卸载 AutoDy.lnk",
+        '"/x $ExpectedProductCode"',
         "Get-DataSnapshot",
         "Test-SnapshotsEqual",
+        "D:\\AutoDy",
+        "existing AutoDy registration",
         "shortcutBackups",
         "prior_installation_restoration",
         "msi-lifecycle-report.json",
@@ -159,28 +195,29 @@ def test_msi_lifecycle_verifier_preserves_shortcuts_and_data():
 def test_ci_restores_wix_sdk_and_parses_release_scripts():
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
 
-    assert "dotnet restore .\\packaging\\wix\\AutoDy.Package.wixproj" in workflow
-    assert "-p:AcceptEula=wix7" in workflow
-    assert ".\\scripts\\build-msi.ps1" in workflow
+    assert ".\\scripts\\bootstrap-source.ps1" in workflow
+    assert ".\\scripts\\build-release-from-clean-source.ps1" in workflow
     assert ".\\scripts\\verify-msi-lifecycle.ps1" in workflow
     assert ".\\scripts\\verify-release-artifacts.ps1" in workflow
-    assert "AutoDy-Windows-Portable-$env:AUTODY_RELEASE_VERSION.zip" in workflow
+    assert "actions/upload-artifact@v4" in workflow
+    assert "actions/download-artifact@v4" in workflow
+    assert "clean-windows-acceptance" in workflow
 
 
 def test_release_workflow_publishes_only_versioned_public_assets():
     workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
 
-    assert "AUTODY_RELEASE_VERSION: \"1.4.1\"" in workflow
-    assert ".\\scripts\\build-msi.ps1 -Version $env:AUTODY_RELEASE_VERSION" in workflow
-    assert (
-        ".\\scripts\\verify-release-artifacts.ps1 "
-        "-Version $env:AUTODY_RELEASE_VERSION"
-    ) in workflow
+    assert "AUTODY_RELEASE_VERSION: \"1.4.2\"" in workflow
+    assert ".\\scripts\\build-release-from-clean-source.ps1" in workflow
+    assert "write-release-manifest.ps1" not in workflow.split(
+        "Publish only canonical guarded assets", 1
+    )[1]
     for asset in [
-        "output/AutoDy-1.4.1-x64.msi",
-        "output/AutoDy-1.4.1-x64.msi.sha256",
-        "output/AutoDy-Windows-Portable-1.4.1.zip",
-        "output/AutoDy-Windows-Portable-1.4.1.zip.sha256",
+        "output/release/v1.4.2/AutoDy-1.4.2-x64.msi",
+        "output/release/v1.4.2/AutoDy-1.4.2-x64.msi.sha256",
+        "output/release/v1.4.2/AutoDy-Windows-Portable-1.4.2.zip",
+        "output/release/v1.4.2/AutoDy-Windows-Portable-1.4.2.zip.sha256",
+        "output/release/v1.4.2/release-manifest.json",
     ]:
         assert asset in workflow
     published_files = workflow.split("files: |", 1)[1].split(

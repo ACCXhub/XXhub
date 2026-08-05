@@ -5,15 +5,17 @@
     Name="AutoDy"
     Manufacturer="AutoDy"
     Version="$(var.ProductVersion)"
+    ProductCode="$(var.ProductCode)"
     UpgradeCode="C8B3A04F-ABAB-4F4C-8A2C-7A1AE24F1400"
     Scope="perUser"
+    Codepage="65001"
     InstallerVersion="500"
     Compressed="yes">
     <MajorUpgrade DowngradeErrorMessage="A newer version of AutoDy is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
     <Icon Id="AutoDyIcon" SourceFile="$(var.StageDir)\assets\icons\autody.ico" />
     <Property Id="ARPPRODUCTICON" Value="AutoDyIcon" />
-    <Property Id="INSTALLFOLDER">
+    <Property Id="AUTODY_REGISTERED_INSTALLFOLDER" Value="Z:\__AutoDyNoExistingInstall__">
       <RegistrySearch
         Id="InstalledFolderSearch"
         Root="HKCU"
@@ -21,6 +23,29 @@
         Name="InstallFolder"
         Type="raw" />
     </Property>
+    <Property Id="AUTODY_EXISTING_INSTALLFOLDER">
+      <DirectorySearch
+        Id="ExistingInstallFolderSearch"
+        Path="[AUTODY_REGISTERED_INSTALLFOLDER]"
+        Depth="0" />
+    </Property>
+    <Property Id="AUTODY_D_DRIVE">
+      <DirectorySearch Id="AutoDyDDriveSearch" Path="D:\" Depth="0" />
+    </Property>
+    <SetProperty
+      Action="SetExistingInstallFolder"
+      Id="INSTALLFOLDER"
+      Value="[AUTODY_EXISTING_INSTALLFOLDER]"
+      After="AppSearch"
+      Sequence="both"
+      Condition="AUTODY_EXISTING_INSTALLFOLDER" />
+    <SetProperty
+      Action="SetDDriveInstallFolder"
+      Id="INSTALLFOLDER"
+      Value="D:\AutoDy"
+      After="AppSearch"
+      Sequence="both"
+      Condition="NOT INSTALLFOLDER AND NOT AUTODY_EXISTING_INSTALLFOLDER AND AUTODY_D_DRIVE" />
     <WixVariable Id="WixUILicenseRtf" Value="$(sys.SOURCEFILEDIR)License.rtf" />
     <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
     <Feature Id="MainFeature" Title="AutoDy" Level="1">
@@ -81,6 +106,14 @@
         Target="[SystemFolder]wscript.exe"
         Arguments="&quot;[INSTALLFOLDER]scripts\start-dashboard.vbs&quot;"
         WorkingDirectory="INSTALLFOLDER"
+        Icon="AutoDyIcon" />
+      <Shortcut
+        Id="UninstallShortcut"
+        Directory="AutoDyProgramMenuFolder"
+        Name="卸载 AutoDy"
+        Description="卸载 AutoDy"
+        Target="[SystemFolder]msiexec.exe"
+        Arguments="/x [ProductCode]"
         Icon="AutoDyIcon" />
       <RemoveFolder Id="RemoveAutoDyProgramMenuFolder" Directory="AutoDyProgramMenuFolder" On="uninstall" />
       <RegistryValue

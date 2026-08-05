@@ -1,25 +1,80 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = "1.4.1",
-    [switch]$ReuseRuntime
+    [string]$Version = "1.4.2",
+    [switch]$ReuseRuntime,
+    [switch]$PlanOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+. (Join-Path $PSScriptRoot 'release-common.ps1')
 $Output = Join-Path $Root "output"
-$StageRoot = Join-Path $Output "msi-stage"
+$ReleaseDirectory = Get-CanonicalReleaseDirectory -Root $Root -Version $Version
+$StageRoot = Join-Path $Output "work\msi-stage-v$Version"
 $Stage = Join-Path $StageRoot "AutoDy"
-$Work = Join-Path $Output "msi-work"
+$Work = Join-Path $Output "work\msi-v$Version"
 $WixProject = Join-Path $Root "packaging\wix\AutoDy.Package.wixproj"
 $GeneratedWxs = Join-Path $Work "GeneratedFiles.wxs"
-$Msi = Join-Path $Output "AutoDy-$Version-x64.msi"
+$Msi = Join-Path $ReleaseDirectory "AutoDy-$Version-x64.msi"
 $Checksum = "$Msi.sha256"
 $EmbeddedPython = Join-Path $Output "python-3.11.9-embed-amd64.zip"
 $EmbeddedPythonUri = "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip"
 $EmbeddedPythonSha256 = "009D6BF7E3B2DDCA3D784FA09F90FE54336D5B60F0E0F305C37F400BF83CFD3B"
 $HostPython = Join-Path $Root ".venv\Scripts\python.exe"
+$Configuration = 'Release'
+$DotnetOutput = Join-Path $Work 'wix-output'
+$WixLibraryOutput = Join-Path $Work 'wix-library'
+$WixLibrary = Join-Path $WixLibraryOutput "AutoDy-$Version-x64.wixlib"
+$CompileIntermediate = Join-Path $Work 'obj-compile'
+$LinkIntermediate = Join-Path $Work 'obj-link'
+$NuGetPackages = if ([string]::IsNullOrWhiteSpace($env:NUGET_PACKAGES)) {
+    Join-Path ([Environment]::GetFolderPath('UserProfile')) '.nuget\packages'
+} else {
+    $env:NUGET_PACKAGES
+}
+$WixCli = Join-Path $NuGetPackages 'wixtoolset.sdk\7.0.0\tools\net8.0\wix.dll'
+$WixUiExtension = Join-Path $NuGetPackages 'wixtoolset.ui.wixext\7.0.0\wixext7\WixToolset.UI.wixext.dll'
+$WixUtilExtension = Join-Path $NuGetPackages 'wixtoolset.util.wixext\7.0.0\wixext7\WixToolset.Util.wixext.dll'
+$BuiltMsi = Join-Path $DotnetOutput "AutoDy-$Version-x64.msi"
+$ProductCode = Get-ReproducibleMsiGuid -Purpose product -Version $Version
+$PackageCode = Get-ReproducibleMsiGuid -Purpose package -Version $Version
+$CompileArguments = @(
+    'build', $WixProject, '--nologo', '--verbosity', 'quiet', '--no-incremental',
+    '--configuration', $Configuration,
+    "-p:Configuration=$Configuration",
+    '-p:OutputType=Library',
+    "-p:BaseIntermediateOutputPath=$CompileIntermediate\",
+    "-p:ProductVersion=$Version",
+    "-p:ProductCode=$ProductCode",
+    "-p:StageDir=$Stage",
+    "-p:GeneratedWxs=$GeneratedWxs",
+    '-p:AcceptEula=wix7',
+    "-p:OutputPath=$WixLibraryOutput"
+)
+$LinkArguments = @(
+    $WixCli, 'build', '--acceptEula', 'wix7', '--nologo',
+    $WixLibrary,
+    '-ext', $WixUiExtension,
+    '-ext', $WixUtilExtension,
+    '-intermediatefolder', $LinkIntermediate,
+    '-out', $BuiltMsi
+)
+
+if ($PlanOnly) {
+    [ordered]@{
+        version = $Version
+        configuration = $Configuration
+        release_directory = $ReleaseDirectory
+        artifact = $Msi
+        product_code = "{$ProductCode}"
+        package_code = "{$PackageCode}"
+        compile_arguments = $CompileArguments
+        link_arguments = $LinkArguments
+    } | ConvertTo-Json -Depth 4 -Compress
+    return
+}
 
 function Assert-OutputChild {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -69,6 +124,112 @@ function Invoke-NativeChecked {
         foreach ($name in $Environment.Keys) {
             [Environment]::SetEnvironmentVariable($name, $previous[$name], "Process")
         }
+    }
+}
+
+function Set-WixLibrarySummaryInformation {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$StablePackageCode
+    )
+
+    Add-Type -AssemblyName System.IO.Compression
+    $stream = [IO.File]::Open(
+        $Path,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::ReadWrite,
+        [IO.FileShare]::None
+    )
+    try {
+        $archive = New-Object IO.Compression.ZipArchive(
+            $stream,
+            [IO.Compression.ZipArchiveMode]::Update,
+            $false,
+            [Text.Encoding]::UTF8
+        )
+        try {
+            $entry = $archive.GetEntry('wix-ir.json')
+            if ($null -eq $entry) {
+                throw 'WiX library does not contain wix-ir.json.'
+            }
+            $reader = New-Object IO.StreamReader($entry.Open(), [Text.Encoding]::UTF8)
+            try {
+                $json = $reader.ReadToEnd()
+            } finally {
+                $reader.Dispose()
+            }
+            if ($json.Contains('"fields":[{"data":9}')) {
+                throw 'WiX library already contains an authored PackageCode.'
+            }
+            $anchor = '{"type":"SummaryInformation"'
+            $index = $json.IndexOf($anchor, [StringComparison]::Ordinal)
+            if ($index -lt 0) {
+                throw 'WiX library does not contain package summary information.'
+            }
+            $fixedSummary = @(
+                '{"type":"SummaryInformation","fields":[{"data":9},{"data":"{' + $StablePackageCode + '}"}]},'
+                '{"type":"SummaryInformation","fields":[{"data":12},{"data":"2000/01/01 00:00:00"}]},'
+                '{"type":"SummaryInformation","fields":[{"data":13},{"data":"2000/01/01 00:00:00"}]},'
+                ''
+            ) -join ''
+            $updated = $json.Insert($index, $fixedSummary)
+            $entry.Delete()
+            $replacement = $archive.CreateEntry(
+                'wix-ir.json',
+                [IO.Compression.CompressionLevel]::Optimal
+            )
+            $replacement.LastWriteTime = New-Object DateTimeOffset(
+                2000, 1, 1, 0, 0, 0, [TimeSpan]::Zero
+            )
+            $writer = New-Object IO.StreamWriter(
+                $replacement.Open(),
+                (New-Object Text.UTF8Encoding($false))
+            )
+            try {
+                $writer.Write($updated)
+            } finally {
+                $writer.Dispose()
+            }
+        } finally {
+            $archive.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Set-MsiRootStorageModifiedTime {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
+    try {
+        $header = New-Object byte[] 512
+        if ($stream.Read($header, 0, $header.Length) -ne $header.Length -or
+            [BitConverter]::ToString($header[0..7]) -ne 'D0-CF-11-E0-A1-B1-1A-E1') {
+            throw "WiX output is not a Compound File Binary MSI."
+        }
+        $sectorSize = 1 -shl [BitConverter]::ToUInt16($header, 0x1E)
+        $directorySector = [BitConverter]::ToUInt32($header, 0x30)
+        if ($directorySector -eq 4294967294 -or $directorySector -eq 4294967295) {
+            throw "MSI Compound File has no root directory sector."
+        }
+        $rootEntryOffset = ([int64]$directorySector + 1) * $sectorSize
+        $stream.Position = $rootEntryOffset
+        $rootEntry = New-Object byte[] 128
+        if ($stream.Read($rootEntry, 0, $rootEntry.Length) -ne $rootEntry.Length -or $rootEntry[66] -ne 5) {
+            throw "MSI Compound File root directory entry is invalid."
+        }
+        $nameLength = [BitConverter]::ToUInt16($rootEntry, 64)
+        $name = [Text.Encoding]::Unicode.GetString($rootEntry, 0, $nameLength - 2)
+        if ($name -ne "Root Entry") {
+            throw "MSI Compound File root directory entry is missing."
+        }
+        $fixedFileTime = [DateTime]::SpecifyKind((New-Object DateTime 2000, 1, 1, 0, 0, 0), [DateTimeKind]::Utc).ToFileTimeUtc()
+        $stream.Position = $rootEntryOffset + 108
+        $timestamp = [BitConverter]::GetBytes([int64]$fixedFileTime)
+        $stream.Write($timestamp, 0, $timestamp.Length)
+    } finally {
+        $stream.Dispose()
     }
 }
 
@@ -147,6 +308,7 @@ if (-not (Test-Path -LiteralPath $HostPython -PathType Leaf)) {
     throw "Project Python environment is missing."
 }
 New-Item -ItemType Directory -Force -Path $Output | Out-Null
+New-Item -ItemType Directory -Force -Path $ReleaseDirectory | Out-Null
 Reset-OutputDirectory $Work
 
 $runtimeReady = $ReuseRuntime -and
@@ -159,7 +321,7 @@ if (-not $runtimeReady) {
     if (-not (Test-Path -LiteralPath $EmbeddedPython -PathType Leaf)) {
         Invoke-WebRequest -Uri $EmbeddedPythonUri -OutFile $EmbeddedPython -UseBasicParsing
     }
-    $embeddedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $EmbeddedPython).Hash
+    $embeddedHash = (Get-ReleaseFileSha256 -Path $EmbeddedPython).ToUpperInvariant()
     if ($embeddedHash -ne $EmbeddedPythonSha256) {
         throw "Embedded Python archive checksum mismatch."
     }
@@ -287,6 +449,11 @@ foreach ($file in $stagedFiles) {
     }
 }
 
+$fixedFileTime = New-Object DateTime(2000, 1, 1, 0, 0, 0, [DateTimeKind]::Unspecified)
+foreach ($file in $stagedFiles) {
+    $file.LastWriteTime = $fixedFileTime
+}
+
 $userProfile = [Environment]::GetFolderPath("UserProfile")
 $byteMapping = [Text.Encoding]::GetEncoding(28591)
 $privatePatterns = @(
@@ -308,6 +475,7 @@ $writer = [System.Xml.XmlWriter]::Create($GeneratedWxs, $xmlSettings)
 try {
     $writer.WriteStartDocument()
     $writer.WriteStartElement("Wix", "http://wixtoolset.org/schemas/v4/wxs")
+    $writer.WriteAttributeString("xmlns", "util", $null, "http://wixtoolset.org/schemas/v4/wxs/util")
     $writer.WriteStartElement("Fragment")
 
     $directorySet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
@@ -366,6 +534,10 @@ try {
     $writer.WriteAttributeString("Id", "PayloadDirectoryCleanup")
     $writer.WriteAttributeString("Directory", "INSTALLFOLDER")
     $writer.WriteAttributeString("Guid", (Get-StableGuid "__payload_directories__"))
+    $writer.WriteStartElement("util", "RemoveFolderEx", "http://wixtoolset.org/schemas/v4/wxs/util")
+    $writer.WriteAttributeString("Property", "INSTALLFOLDER")
+    $writer.WriteAttributeString("On", "uninstall")
+    $writer.WriteEndElement()
     $directoriesForRemoval = $directories | Sort-Object `
         @{ Expression = { ($_ -split '\\').Count }; Descending = $true },
         @{ Expression = { $_ }; Descending = $false }
@@ -404,23 +576,26 @@ try {
     $writer.Dispose()
 }
 
-$dotnetOutput = Join-Path $Work "wix-output"
-New-Item -ItemType Directory -Force -Path $dotnetOutput | Out-Null
-Invoke-NativeChecked "Build WiX MSI" "dotnet" @(
-    "build", $WixProject, "--nologo", "--verbosity", "quiet",
-    "-p:ProductVersion=$Version",
-    "-p:StageDir=$Stage",
-    "-p:GeneratedWxs=$GeneratedWxs",
-    "-p:AcceptEula=wix7",
-    "-p:OutputPath=$dotnetOutput"
-)
-$builtMsiFiles = @(Get-ChildItem -LiteralPath $dotnetOutput -Filter "AutoDy-$Version-x64.msi" -Recurse -File)
-if ($builtMsiFiles.Count -ne 1) {
+New-Item -ItemType Directory -Force -Path $WixLibraryOutput | Out-Null
+Invoke-NativeChecked "Compile WiX library" "dotnet" $CompileArguments
+if (-not (Test-Path -LiteralPath $WixLibrary -PathType Leaf)) {
+    throw "WiX compile did not produce the expected library."
+}
+Set-WixLibrarySummaryInformation -Path $WixLibrary -StablePackageCode $PackageCode
+
+New-Item -ItemType Directory -Force -Path $DotnetOutput | Out-Null
+if (-not (Test-Path -LiteralPath $WixCli -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $WixUiExtension -PathType Leaf)) {
+    throw 'Restored WiX 7 tooling is missing.'
+}
+Invoke-NativeChecked "Link WiX MSI" "dotnet" $LinkArguments
+if (-not (Test-Path -LiteralPath $BuiltMsi -PathType Leaf)) {
     throw "WiX build did not produce the expected MSI."
 }
-$builtMsi = $builtMsiFiles[0]
-Copy-Item -LiteralPath $builtMsi.FullName -Destination $Msi -Force
-$hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Msi).Hash.ToLowerInvariant()
+Set-MsiRootStorageModifiedTime -Path $BuiltMsi
+Copy-Item -LiteralPath $BuiltMsi -Destination $Msi -Force
+$null = Assert-CanonicalReleaseArtifact -Root $Root -Version $Version -Path $Msi
+$hash = Get-ReleaseFileSha256 -Path $Msi
 "$hash  AutoDy-$Version-x64.msi" | Set-Content -LiteralPath $Checksum -Encoding ascii -NoNewline
 
 Write-Host "MSI built: AutoDy-$Version-x64.msi"
