@@ -27,13 +27,123 @@ def test_tray_controller_has_a_real_single_instance_windows_host_and_expected_me
         assert token in text
 
 
-def test_tray_refuses_unrelated_8765_owner_and_stops_only_verified_managed_service():
+def test_tray_falls_back_from_an_unrelated_8765_owner_and_stops_only_verified_managed_service():
     text = Path("scripts/autody-tray.ps1").read_text(encoding="utf-8-sig")
 
-    assert "Port 8765 belongs to an unrelated process" in text
+    assert "$PreferredPort = 8765" in text
+    assert "function Get-PersistedServicePort" in text
+    assert "function Save-ServicePort" in text
+    assert "function Get-ServicePortCandidates" in text
+    assert "foreach ($port in $PreferredPort..8799)" in text
+    assert '"--port", $selectedPort' in text
+    assert "Save-ServicePort $selectedPort" in text
     assert "Test-OwnedAutoDy" in text
     assert "$snapshot.Pid -ne $ManagedPid" in text
     assert "Stop-Process -Id $ManagedPid" in text
+
+
+def test_tray_reuses_a_persisted_fallback_port_for_dashboard_and_shutdown():
+    text = Path("scripts/autody-tray.ps1").read_text(encoding="utf-8-sig")
+
+    wait = text[
+        text.index("function Wait-ForExistingHealthyService"):
+        text.index("function Invoke-OptionalDashboardActivation")
+    ]
+    assert "foreach ($port in Get-ServicePortCandidates)" in wait
+    assert "Set-ServicePort $port" in wait
+    assert "Save-ServicePort $port" in wait
+    assert "$script:Url = \"http://127.0.0.1:$Port\"" in text
+    assert "function Stop-ManagedService" in text
+
+
+def test_tray_revalidates_a_stale_persisted_port_before_selecting_a_new_service_port():
+    text = Path("scripts/autody-tray.ps1").read_text(encoding="utf-8-sig")
+
+    start = text[
+        text.index("function Start-Or-ReuseService"):
+        text.index("function Wait-ForExistingHealthyService")
+    ]
+    assert "foreach ($port in Get-ServicePortCandidates)" in start
+    assert "foreach ($port in $PreferredPort..8799)" in start
+    assert start.index("foreach ($port in Get-ServicePortCandidates)") < start.index(
+        "foreach ($port in $PreferredPort..8799)"
+    )
+
+
+def test_tray_requires_current_identity_process_and_user_scope_before_reusing_a_service():
+    script_path = Path("scripts/autody-tray.ps1").resolve()
+    command = r"""
+    $ErrorActionPreference = "Stop"
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+      $env:AUTODY_TEST_TRAY_SCRIPT, [ref]$tokens, [ref]$errors
+    )
+    if ($errors.Count) { throw ($errors.Message -join "; ") }
+    $function = $ast.Find({
+      param($node)
+      $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Test-OwnedAutoDy"
+    }, $true)
+    if ($null -eq $function) { throw "ownership function missing" }
+    Invoke-Expression $function.Extent.Text
+    $DataRoot = "C:\\AutoDyData"
+    $PackagePath = "C:\\AutoDy\\runtime\\python\\Lib\\site-packages\\autody"
+    $Python = "C:\\AutoDy\\runtime\\python\\python.exe"
+    $owner = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $identity = [pscustomobject]@{
+      application = "AutoDy"
+      version = "1.4.2"
+      project_path = $DataRoot
+      package_path = $PackagePath
+      python_executable = $Python
+    }
+    $valid = [pscustomobject]@{
+      Pid = 4242
+      ProcessPath = $Python
+      Owner = $owner
+      Identity = $identity
+    }
+    if (-not (Test-OwnedAutoDy $valid "1.4.2")) { throw "valid AutoDy identity was rejected" }
+    $wrongVersion = [pscustomobject]@{
+      Pid = 4242
+      ProcessPath = $Python
+      Owner = $owner
+      Identity = [pscustomobject]@{
+        application = "AutoDy"
+        version = "1.4.1"
+        project_path = $DataRoot
+        package_path = $PackagePath
+        python_executable = $Python
+      }
+    }
+    $wrongOwner = [pscustomobject]@{
+      Pid = 4242
+      ProcessPath = $Python
+      Owner = "OTHER\\User"
+      Identity = $identity
+    }
+    $malformed = [pscustomobject]@{
+      Pid = 4242
+      ProcessPath = $Python
+      Owner = $owner
+      Identity = [pscustomobject]@{ application = "AutoDy"; version = $null }
+    }
+    if (Test-OwnedAutoDy $wrongVersion "1.4.2") { throw "stale identity was reused" }
+    if (Test-OwnedAutoDy $wrongOwner "1.4.2") { throw "another user identity was reused" }
+    if (Test-OwnedAutoDy $malformed "1.4.2") { throw "malformed identity was reused" }
+    """
+    test_env = os.environ.copy()
+    test_env["AUTODY_TEST_TRAY_SCRIPT"] = str(script_path)
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", command],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=test_env,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_tray_exit_does_not_change_scheduled_tasks_or_user_data():

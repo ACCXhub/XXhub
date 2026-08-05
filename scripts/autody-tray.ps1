@@ -28,7 +28,10 @@ $PackagePath = if ($IsPackaged) {
 } else {
     Join-Path $ProjectRoot "src\autody"
 }
-$Url = "http://127.0.0.1:8765"
+$PreferredPort = 8765
+$PortStatePath = Join-Path $DataRoot "data\service-port.json"
+$script:ServicePort = $PreferredPort
+$script:Url = "http://127.0.0.1:$PreferredPort"
 $env:AUTODY_HOME = $DataRoot
 $env:AUTODY_PROGRAM_ROOT = $ProjectRoot
 $BrowserRoot = if ($IsPackaged) {
@@ -150,6 +153,35 @@ function Write-TrayLog([string]$Message) {
     "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message" | Add-Content -LiteralPath $TrayLog -Encoding UTF8
 }
 
+function Set-ServicePort([int]$Port) {
+    $script:ServicePort = $Port
+    $script:Url = "http://127.0.0.1:$Port"
+}
+
+function Get-PersistedServicePort {
+    try {
+        $saved = Get-Content -LiteralPath $PortStatePath -Raw -ErrorAction Stop | ConvertFrom-Json
+        $port = [int]$saved.port
+        if ($port -ge $PreferredPort -and $port -le 8799) { return $port }
+    } catch { }
+    return $null
+}
+
+function Save-ServicePort([int]$Port) {
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PortStatePath) | Out-Null
+    @{ port = $Port } | ConvertTo-Json | Set-Content -LiteralPath $PortStatePath -Encoding utf8
+}
+
+function Get-ServicePortCandidates {
+    $ports = New-Object 'System.Collections.Generic.List[int]'
+    $persisted = Get-PersistedServicePort
+    if ($null -ne $persisted) { $ports.Add($persisted) }
+    foreach ($port in $PreferredPort..8799) {
+        if (-not $ports.Contains($port)) { $ports.Add($port) }
+    }
+    return $ports
+}
+
 function Test-SystemDarkTheme {
     try {
         $value = Get-ItemPropertyValue -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "AppsUseLightTheme" -ErrorAction Stop
@@ -177,24 +209,42 @@ function Set-AutoDyMenuTheme {
     }
 }
 
-function Get-Listener {
-    try { return Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction Stop | Select-Object -First 1 } catch { return $null }
+function Get-Listener([int]$Port = $script:ServicePort) {
+    try { return Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop | Select-Object -First 1 } catch { return $null }
 }
 
-function Get-ServiceSnapshot {
-    $listener = Get-Listener
+function Get-ServiceSnapshot([int]$Port = $script:ServicePort) {
+    $listener = Get-Listener $Port
     if ($null -eq $listener) { return $null }
     try {
-        $identity = Invoke-RestMethod -Uri "$Url/api/service-identity" -TimeoutSec 2 -ErrorAction Stop
-        $modules = Invoke-RestMethod -Uri "$Url/api/modules" -TimeoutSec 2 -ErrorAction Stop
-        return [pscustomobject]@{ Pid = [int]$listener.OwningProcess; Identity = $identity; Modules = $modules }
-    } catch { return [pscustomobject]@{ Pid = [int]$listener.OwningProcess; Identity = $null; Modules = $null } }
+        $url = "http://127.0.0.1:$Port"
+        $identity = Invoke-RestMethod -Uri "$url/api/service-identity" -TimeoutSec 2 -ErrorAction Stop
+        $modules = Invoke-RestMethod -Uri "$url/api/modules" -TimeoutSec 2 -ErrorAction Stop
+        $process = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f $listener.OwningProcess) -ErrorAction Stop
+        $ownerResult = Invoke-CimMethod -InputObject $process -MethodName GetOwner -ErrorAction Stop
+        $owner = if ($ownerResult.ReturnValue -eq 0 -and $ownerResult.User) {
+            if ($ownerResult.Domain) { "$($ownerResult.Domain)\$($ownerResult.User)" } else { [string]$ownerResult.User }
+        } else { $null }
+        return [pscustomobject]@{
+            Pid = [int]$listener.OwningProcess
+            ProcessPath = [string]$process.ExecutablePath
+            Owner = $owner
+            Identity = $identity
+            Modules = $modules
+        }
+    } catch {
+        return [pscustomobject]@{ Pid = [int]$listener.OwningProcess; ProcessPath = $null; Owner = $null; Identity = $null; Modules = $null }
+    }
 }
 
-function Test-OwnedAutoDy($Snapshot) {
+function Test-OwnedAutoDy($Snapshot, [string]$ExpectedVersion) {
     if ($null -eq $Snapshot -or $null -eq $Snapshot.Identity) { return $false }
     try {
         return $Snapshot.Identity.application -eq "AutoDy" -and
+            $Snapshot.Identity.version -eq $ExpectedVersion -and
+            $Snapshot.Pid -gt 0 -and
+            ([IO.Path]::GetFullPath([string]$Snapshot.ProcessPath).TrimEnd('\\') -eq [IO.Path]::GetFullPath($Python).TrimEnd('\\')) -and
+            $Snapshot.Owner -eq [Security.Principal.WindowsIdentity]::GetCurrent().Name -and
             ([IO.Path]::GetFullPath([string]$Snapshot.Identity.project_path).TrimEnd('\\') -eq [IO.Path]::GetFullPath($DataRoot).TrimEnd('\\')) -and
             ([IO.Path]::GetFullPath([string]$Snapshot.Identity.package_path).TrimEnd('\\') -eq [IO.Path]::GetFullPath($PackagePath).TrimEnd('\\')) -and
             ([IO.Path]::GetFullPath([string]$Snapshot.Identity.python_executable).TrimEnd('\\') -eq [IO.Path]::GetFullPath($Python).TrimEnd('\\'))
@@ -208,7 +258,7 @@ function Get-ExpectedVersions {
 }
 
 function Test-HealthyAutoDy($Snapshot, $Expected) {
-    if (-not (Test-OwnedAutoDy $Snapshot) -or $null -eq $Snapshot.Modules) { return $false }
+    if (-not (Test-OwnedAutoDy $Snapshot $Expected.Core) -or $null -eq $Snapshot.Modules) { return $false }
     $module = @($Snapshot.Modules.modules | Where-Object { $_.id -eq "autody-test-center" }) | Select-Object -First 1
     return $Snapshot.Identity.version -eq $Expected.Core -and $module.bundled_version -eq $Expected.Module -and
         $module.bundled_package.required_autody_version -eq ">=1.3.0,<2.0.0" -and $module.bundled_available
@@ -217,8 +267,9 @@ function Test-HealthyAutoDy($Snapshot, $Expected) {
 $ManagedPid = $null
 function Stop-ManagedService {
     if ($null -eq $ManagedPid) { return $false }
+    $expected = Get-ExpectedVersions
     $snapshot = Get-ServiceSnapshot
-    if ($null -eq $snapshot -or $snapshot.Pid -ne $ManagedPid -or -not (Test-OwnedAutoDy $snapshot)) {
+    if ($null -eq $snapshot -or $snapshot.Pid -ne $ManagedPid -or -not (Test-OwnedAutoDy $snapshot $expected.Core)) {
         Write-TrayLog "Refused to stop an unverified listener."
         return $false
     }
@@ -231,22 +282,30 @@ function Stop-ManagedService {
 function Start-Or-ReuseService {
     if (-not (Test-Path -LiteralPath $Python) -or -not (Test-Path -LiteralPath $Config)) { throw "Current AutoDy installation is incomplete." }
     $expected = Get-ExpectedVersions
-    $snapshot = Get-ServiceSnapshot
-    if ($null -ne $snapshot) {
-        if (-not (Test-OwnedAutoDy $snapshot)) { throw "Port 8765 belongs to an unrelated process; the tray will not attach or stop it." }
+    foreach ($port in Get-ServicePortCandidates) {
+        $snapshot = Get-ServiceSnapshot $port
+        if ($null -eq $snapshot -or -not (Test-OwnedAutoDy $snapshot $expected.Core)) { continue }
+        Set-ServicePort $port
         $script:ManagedPid = $snapshot.Pid
-        if (Test-HealthyAutoDy $snapshot $expected) { return $snapshot }
+        if (Test-HealthyAutoDy $snapshot $expected) { Save-ServicePort $port; return $snapshot }
         if (-not (Stop-ManagedService)) { throw "Verified old AutoDy service could not be stopped." }
     }
-    $process = Start-Process -FilePath $Python -ArgumentList @("-m", "autody.cli", "ui", "--no-open", "--config", $Config) -WorkingDirectory $DataRoot -WindowStyle Hidden -PassThru
+    $selectedPort = $null
+    foreach ($port in $PreferredPort..8799) {
+        if ($null -eq (Get-Listener $port)) { $selectedPort = $port; break }
+    }
+    if ($null -eq $selectedPort) { throw "No safe AutoDy port is available from $PreferredPort through 8799." }
+    Set-ServicePort $selectedPort
+    $process = Start-Process -FilePath $Python -ArgumentList @("-m", "autody.cli", "ui", "--no-open", "--config", $Config, "--port", $selectedPort) -WorkingDirectory $DataRoot -WindowStyle Hidden -PassThru
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         Start-Sleep -Milliseconds 250
         $snapshot = Get-ServiceSnapshot
         if ($null -ne $snapshot -and (Test-HealthyAutoDy $snapshot $expected)) {
             $script:ManagedPid = $snapshot.Pid
+            Save-ServicePort $selectedPort
             return $snapshot
         }
-        if ($null -ne $snapshot -and (Test-OwnedAutoDy $snapshot) -and $null -ne $snapshot.Modules) {
+        if ($null -ne $snapshot -and (Test-OwnedAutoDy $snapshot $expected.Core) -and $null -ne $snapshot.Modules) {
             $script:ManagedPid = $snapshot.Pid
             $module = @($snapshot.Modules.modules | Where-Object { $_.id -eq "autody-test-center" }) | Select-Object -First 1
             if ($null -ne $module -and $module.load_error) {
@@ -264,12 +323,12 @@ function Wait-ForExistingHealthyService {
     }
     $expected = Get-ExpectedVersions
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
-        $snapshot = Get-ServiceSnapshot
-        if ($null -ne $snapshot) {
-            if (-not (Test-OwnedAutoDy $snapshot)) {
-                throw "Port 8765 belongs to an unrelated process; AutoDy will not open it."
-            }
-            if (Test-HealthyAutoDy $snapshot $expected) {
+        foreach ($port in Get-ServicePortCandidates) {
+            $snapshot = Get-ServiceSnapshot $port
+            if ($null -ne $snapshot -and (Test-OwnedAutoDy $snapshot $expected.Core) -and (Test-HealthyAutoDy $snapshot $expected)) {
+                Set-ServicePort $port
+                $script:ManagedPid = $snapshot.Pid
+                Save-ServicePort $port
                 return $snapshot
             }
         }
@@ -384,8 +443,9 @@ function Invoke-DashboardOpenAsync {
 }
 
 function Get-TrayState {
+    $expected = Get-ExpectedVersions
     $snapshot = Get-ServiceSnapshot
-    if ($null -eq $snapshot -or -not (Test-OwnedAutoDy $snapshot)) { return "已停止" }
+    if ($null -eq $snapshot -or -not (Test-OwnedAutoDy $snapshot $expected.Core)) { return "已停止" }
     if (Test-Path -LiteralPath (Join-Path $DataRoot "data\notifications\need-attention.txt")) { return "需要处理" }
     $outcomes = Join-Path $DataRoot "data\history\task-outcomes.json"
     if ((Test-Path -LiteralPath $outcomes) -and ((Get-Content -Raw -LiteralPath $outcomes -ErrorAction SilentlyContinue) -match '"outcome"\s*:\s*"retry_pending"')) { return "正在安全重试" }

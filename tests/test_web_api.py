@@ -263,7 +263,7 @@ def test_official_module_status_and_generated_install_share_the_version_policy(t
     manifest = __import__("json").loads((tmp_path / "data" / "modules" / MODULE_ID / "manifest.json").read_text(encoding="utf-8"))
 
     assert status["bundled_version"] == OFFICIAL_TEST_CENTER_VERSION
-    assert status["core_version"] == "1.4.1"
+    assert status["core_version"] == "1.4.2"
     assert installed["version"] == OFFICIAL_TEST_CENTER_VERSION
     assert manifest["module_version"] == OFFICIAL_TEST_CENTER_VERSION
     assert manifest["required_autody_version"] == OFFICIAL_TEST_CENTER_CORE_RANGE
