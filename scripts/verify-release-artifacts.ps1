@@ -490,6 +490,12 @@ if ($findings.Count -eq 0) {
 $markdown -join "`r`n" | Set-Content -LiteralPath $ReportMarkdown -Encoding utf8
 
 if (-not $report.passed) {
+    Write-Host "Release artifact privacy verification failed:"
+    foreach ($finding in $findings) {
+        Write-Host "- [$($finding.category)] $($finding.file)"
+    }
+    Write-Host "JSON report: $ReportJson"
+    Write-Host "Markdown report: $ReportMarkdown"
     throw "Release artifact privacy verification failed. See output reports."
 }
 
