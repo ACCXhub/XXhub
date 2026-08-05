@@ -119,7 +119,7 @@ try {
     Invoke-NativeChecked -Stage 'Install pinned Playwright Chromium' -FilePath $Python `
         -Arguments @('-m', 'playwright', 'install', 'chromium')
     Invoke-NativeChecked -Stage 'Run source doctor check' -FilePath $Python `
-        -Arguments @('-m', 'autody.cli', 'doctor', '--config', (Join-Path $Root 'config.example.yaml'))
+        -Arguments @('-X', 'utf8', '-m', 'autody.cli', 'doctor', '--config', (Join-Path $Root 'config.example.yaml'))
 } finally {
     [Environment]::SetEnvironmentVariable('AUTODY_HOME', $previousHome, 'Process')
     [Environment]::SetEnvironmentVariable('AUTODY_BROWSERS_PATH', $previousBrowsers, 'Process')

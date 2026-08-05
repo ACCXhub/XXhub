@@ -156,6 +156,13 @@ def test_source_bootstrap_check_only_is_read_only(monkeypatch):
     assert before == after
 
 
+def test_source_bootstrap_runs_doctor_in_utf8_mode():
+    script = BOOTSTRAP_SOURCE.read_text(encoding="utf-8-sig")
+
+    assert "Run source doctor check" in script
+    assert "@('-X', 'utf8', '-m', 'autody.cli', 'doctor'" in script
+
+
 def test_public_build_plans_use_release_configuration_and_canonical_outputs(
     monkeypatch,
 ):
