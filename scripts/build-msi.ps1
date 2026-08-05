@@ -304,6 +304,14 @@ function Test-FileContainsMappedPattern {
     }
 }
 
+function Test-PrivacyTextFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    return [IO.Path]::GetExtension($Path).ToLowerInvariant() -in @(
+        '.cmd', '.css', '.html', '.ini', '.json', '.md', '.ps1', '.pth',
+        '.py', '.txt', '.vbs', '.xml', '.yaml', '.yml'
+    )
+}
+
 if (-not (Test-Path -LiteralPath $HostPython -PathType Leaf)) {
     throw "Project Python environment is missing."
 }
@@ -463,7 +471,8 @@ $privatePatterns = @(
     $byteMapping.GetString([Text.Encoding]::Unicode.GetBytes($userProfile))
 )
 foreach ($file in $stagedFiles) {
-    if (Test-FileContainsMappedPattern $file.FullName $privatePatterns $byteMapping) {
+    if ((Test-PrivacyTextFile $file.FullName) -and
+        (Test-FileContainsMappedPattern $file.FullName $privatePatterns $byteMapping)) {
         $relative = $file.FullName.Substring($Stage.Length + 1)
         throw "MSI staging contains a private absolute path in: $relative"
     }

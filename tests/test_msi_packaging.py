@@ -151,6 +151,7 @@ def test_release_privacy_verifier_covers_all_release_artifacts():
         "release-privacy-report.json",
         "release-privacy-report.md",
         "Test-FileContainsMappedPattern",
+        "Test-PrivacyTextFile",
         "Test-ForbiddenEntryPath",
     ]:
         assert token in verifier

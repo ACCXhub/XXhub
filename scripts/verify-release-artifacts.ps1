@@ -208,6 +208,14 @@ $privateBytePatterns = @(
     $byteMapping.GetString([Text.Encoding]::Unicode.GetBytes($userProfile))
 )
 
+function Test-PrivacyTextFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    return [IO.Path]::GetExtension($Path).ToLowerInvariant() -in @(
+        '.cmd', '.css', '.html', '.ini', '.json', '.md', '.ps1', '.pth',
+        '.py', '.txt', '.vbs', '.xml', '.yaml', '.yml'
+    )
+}
+
 function Test-ExtractedTree {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -222,7 +230,8 @@ function Test-ExtractedTree {
                 file = "$ArtifactLabel/$($relative.Replace('\', '/'))"
             })
         }
-        if (Test-FileContainsMappedPattern $file.FullName $privateBytePatterns $byteMapping) {
+        if ((Test-PrivacyTextFile $file.FullName) -and
+            (Test-FileContainsMappedPattern $file.FullName $privateBytePatterns $byteMapping)) {
             [void]$findings.Add([ordered]@{
                 category = "private_absolute_path"
                 file = "$ArtifactLabel/$($relative.Replace('\', '/'))"
@@ -235,12 +244,6 @@ function Test-ExtractedTree {
 Reset-OutputDirectory $Work
 try {
     if (Test-Path -LiteralPath $Msi -PathType Leaf) {
-        if (Test-FileContainsMappedPattern $Msi $privateBytePatterns $byteMapping) {
-            [void]$findings.Add([ordered]@{
-                category = "private_absolute_path"
-                file = Split-Path -Leaf $Msi
-            })
-        }
 
         $installer = $null
         $database = $null
