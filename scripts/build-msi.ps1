@@ -464,7 +464,8 @@ $privatePatterns = @(
 )
 foreach ($file in $stagedFiles) {
     if (Test-FileContainsMappedPattern $file.FullName $privatePatterns $byteMapping) {
-        throw "MSI staging contains a private absolute path."
+        $relative = $file.FullName.Substring($Stage.Length + 1)
+        throw "MSI staging contains a private absolute path in: $relative"
     }
 }
 
