@@ -1,27 +1,44 @@
 # Changelog
 
-所有显著变更记录在此文件中。版本以发布标签为准；未发布工作不代表已发布版本。
+所有显著变更记录在此文件中。版本状态以标签和 GitHub Release 为准；候选版本、构建产物或本地验证均不代表已发布。
 
 ## [Unreleased]
 
-## [1.4.2] - 2026-08-03
+暂无已发布变更。
+
+## [1.4.2] - 已准备，未发布
+
+最终 Release CI 尚未完成。不得创建 v1.4.2 标签或 Release，也不得把候选 MSI/portable 当作正式资产。
 
 ### Added
 
 - 增加幂等 clean-source bootstrap、固定开发依赖、规范 Release 输出目录和机器可读发布 manifest。
-- CI 通过远程 artifact 在独立 Windows runner 验证哈希、MSI 行政解包和完整生命周期。
+- 增加 MSI-native 安装路径解析：登记实际程序目录，用于后续修复、升级与卸载定位。
+- 增加首次安装对 D:\AutoDy 的优先选择，以及不可用时的 %LocalAppData%\Programs\AutoDy 回退。
+- 增加开始菜单卸载快捷方式、安装目录向导和升级/修复目录复用。
+- 增加确定性 MSI 输出与统一的 SHA-256、manifest、allowlist 验证。
+- CI 在发行检查失败时保留受控隐私诊断，便于定位不合规 payload。
 
 ### Changed
 
+- 8765 不再是唯一启动端口：无关监听者占用时，在 8766–8799 中安全选择空闲端口；选中端口可持久化并复核。
+- 重复启动会复用经 service identity、当前用户、路径和解释器验证的同一 AutoDy 服务。
 - MSI 构建显式使用 Release，Debug 中间 MSI 使用明显的非发布文件名。
 - portable 与官方模块 ZIP 使用排序、固定时间戳和规范 LF 行尾生成可复现归档。
 - 文档明确区分普通用户 MSI、需要 Python 的 portable 与开发者 Source ZIP/TAR。
 
 ### Fixed
 
-- 修复干净源码缺少 `.venv`/`config.yaml` 时 README 首条命令必然失败的问题。
-- 修复 PowerShell 5.1 把成功 native 命令的 stderr warning 当成终止错误的问题。
-- 发布脚本拒绝 `obj`、Debug、work、陈旧版本、错误 ProductVersion、外部 CAB 和非当前干净提交。
+- 拒绝陈旧或失效的已登记安装路径，避免向未知旧目录写入 payload。
+- 修复干净源码缺少 .venv/config.yaml 时 README 首条命令必然失败的问题。
+- 修复 PowerShell 5.1 将成功 native 命令的 stderr warning 当作终止错误的问题。
+- 发布脚本拒绝 obj、Debug、work、陈旧版本、错误 ProductVersion、外部 CAB 和非当前干净提交。
+
+### Security
+
+- 无关端口监听者不会被结束；只有托盘确认管理的服务可被停止或重启。
+- 发行物继续使用 allowlist，隐私扫描排除运行时数据、认证资料、浏览器 profile、日志、备份和开发夹具。
+- 发布失败诊断保留最小必要信息，不应包含真实账号、目标、消息或 Cookie。
 
 ## [1.4.1] - 2026-07-31
 
@@ -34,59 +51,17 @@
 ### Fixed
 
 - 自定义 MSI 安装目录会持久化，维护、修复和卸载能够继续定位实际程序路径，不再把 payload 留在自定义目录。
-- MSI 生命周期验证覆盖默认与自定义安装、取消表链、修复、`1.4.0` → `1.4.1` 升级、卸载、数据保留和现场恢复。
-
-### Security
-
-- 已解决失败只有在相同稳定目标已有更晚确认成功且之后没有更新失败时才会被降级显示；未解决目标继续保持原有安全重试边界。
-- MSI 与 portable 继续使用发布 allowlist，程序文件和 `%LocalAppData%\AutoDy` 运行时数据保持分离。
+- MSI 生命周期验证覆盖默认与自定义安装、取消表链、修复、1.4.0 到 1.4.1 升级、卸载、数据保留和现场恢复。
 
 ## [1.4.0] - 2026-07-31
 
-### Changed
-
-- 将工程、使用和发布文档整合为 README、工程手册、交接和发布说明四个入口。
-- 明确 Test Center `1.2.0` 与 AutoDy 核心 `1.4.0` 的独立版本和兼容关系。
-- 以右侧可见会话稳定 ID 为最高权威，强化会话导航的连续确认和瞬态读取处理。
-- 旧版运行状态字段在读取时安全归一化，未知可选字段和失败的可选状态区段不再拖垮 Overview。
-- 好友快照、运行日志跟随、账号切换后的页面同步和 Windows 调度启动行为更加可靠。
-
 ### Added
 
-- 记录延迟安全重试、通知去重、托盘服务所有权和模块包诊断的维护说明。
-- 增加结构化失败详情和仅针对安全可重试目标的稳定 ID 重试入口。
-- 增加账号隔离的本地资料、绑定、消息分配、计划和发现缓存。
-- 增加 Dashboard 请求超时、中文错误状态、重试按钮和折叠脱敏诊断。
-- 增加按日期、类别、原因、目标稳定 ID 和建议动作分组的通知展示。
-- 增加 per-user MSI：固定并校验嵌入式 Python、固定运行依赖、捆绑 Chromium，并使用显式发布 allowlist。
-- 增加 MSI 静默安装/修复/卸载验证，以及 MSI 表、行政解包、portable 和模块包的统一隐私扫描报告。
-
-### Security
-
-- 不确定发送、已确认目标和身份不一致状态不会暴露目标重试入口。
-- portable 构建明确排除账号资料、运行时数据、浏览器资料、日志、截图和开发夹具。
-- MSI 将程序与可写数据分别放在 `%LocalAppData%\Programs\AutoDy` 和 `%LocalAppData%\AutoDy`，卸载默认保留用户数据。
-- Test Center 导航验收与可访问 composer 的受控干跑继续保持分层身份门禁。
+- 增加延迟安全重试、通知去重、托盘服务所有权、模块包诊断和 per-user MSI 基础能力。
 
 ## [1.3.0] - Published
 
 ### Added
 
 - Windows 本地 Dashboard、目标、文案、计划和执行历史基础能力。
-- 可选官方 Test Center `1.1.0` 模块与脱敏文档截图。
-
-### Changed
-
-- 改善启动器可见性、好友缓存和日志交互。
-
-## [1.2.0] - Historical
-
-### Added
-
-- 本地调度与浏览器自动化基础流程。
-
-## [1.1.0] - Historical
-
-### Added
-
-- 初始本地管理台与项目结构。
+- 可选官方 Test Center 1.1.0 模块与脱敏文档截图。

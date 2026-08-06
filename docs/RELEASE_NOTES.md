@@ -1,41 +1,30 @@
-# 发布说明
+# AutoDy 1.4.2 发布说明（候选）
 
-## AutoDy 1.4.2
+> 状态：已准备，尚未发布。最终 Release CI 仍待完成；在此之前不得创建 v1.4.2 标签或 GitHub Release。
 
-发布日期：2026-08-03。官方 Test Center 版本：`1.2.0`。
+## 安装与更新
 
-### 安装包调查结论
+- MSI 新安装优先建议 D:\AutoDy；当 D: 不可用时回退至 %LocalAppData%\Programs\AutoDy，并允许用户选择其他可写目录。
+- 安装器登记实际程序目录，修复、升级和卸载会验证并复用有效路径，拒绝陈旧安装目录。
+- 开始菜单新增卸载快捷方式；程序文件与 %LocalAppData%\AutoDy 可写数据保持分离，卸载默认保留数据。
+- 已完成 v1.4.1 到 v1.4.2 的安装、修复、升级、卸载和数据保留验证。
 
-- 用户误发的 `obj\x64\Debug` MSI 与官方 v1.4.1 MSI 字节完全相同；该具体文件没有缺 CAB、截断或损坏的 DLL，但 `obj` 仍是 WiX/MSBuild 中间目录，不能作为分发入口。
-- 三份同字节 MSI 均完成行政解包；6 个内嵌 CAB 可完整读取，`D3DCompiler_47.dll` 的大小和 SHA-256 与 staging 源一致。
-- v1.4.1 的历史生命周期报告已通过 fresh、默认/自定义路径、repair、upgrade 和 uninstall。接收方失败副本的哈希与完整 MSI 日志未取得，因此不能把具体接收方故障归因于包内结构，也不能无证据归因于权限或安全软件。
+## 启动与服务
 
-### 发布与源码构建修复
+- AutoDy 优先使用 8765；无关监听者占用时从 8766–8799 安全选择空闲端口。
+- 重复启动会复用已验证的 AutoDy 服务和 PID；无关监听者不会被停止。
+- 服务身份检查更严格，核验应用身份、当前用户、安装路径、模块包和 Python 解释器。
 
-- MSI 使用原生目录解析：新安装优先选择当前用户可写的 `D:\AutoDy`，D 盘不可用或不可写时回退到 `%LocalAppData%\Programs\AutoDy`；无效的旧注册表路径不会被复用，升级与修复继续使用已安装路径。
-- 开始菜单增加“卸载 AutoDy”快捷方式，调用当前 MSI ProductCode；正常卸载移除程序与快捷方式，默认保留 `%LocalAppData%\AutoDy` 用户数据。
-- 启动器会先严格验证 `/api/service-identity`；同一用户、安装和数据目录的已有 AutoDy 服务会被复用。8765 被无关服务占用时才从 8766–8799 选择安全回退端口。
-- MSI 的生成标识和 OLE 元数据已固定，使相同输入的 Release MSI 字节可复现；v1.4.1 可原路径升级。
-- 正式 MSI 构建显式使用 `Release`；手工 Debug 输出带 `UNOFFICIAL-DEBUG`，避免被误认为发布包。
-- 所有公开文件只从 `output\release\v1.4.2` 发布；`obj`、Debug、work 和测试目录会被守卫拒绝。
-- 增加机器可读 `release-manifest.json`，记录版本、提交、Release 配置、文件大小/SHA-256、ProductCode、UpgradeCode、MSI Summary、隐私扫描和生命周期结果。
-- 增加幂等 `scripts\bootstrap-source.ps1`、固定 Python 开发依赖和 `scripts\build-release-from-clean-source.ps1`。
-- portable 与官方模块 ZIP 使用排序、固定时间戳和规范行尾，避免构建时间及 Windows/GitHub archive 行尾造成漂移。
-- 修复 PowerShell 5.1 将成功 native 命令的 stderr warning 误判为构建失败的问题。
+## 构建与完整性
 
-### 下载选择
+- MSI、portable 和模块包采用确定性输入；MSI 字节级可重复性已有验证证据。
+- MSI 包含并校验 D3DCompiler_47.dll payload。
+- 发行物使用 SHA-256、manifest、allowlist 与隐私扫描；CI 失败时保留受控诊断以辅助排查。
 
-- 普通用户：下载 `AutoDy-1.4.2-x64.msi`。
-- 便携源码包：下载 `AutoDy-Windows-Portable-1.4.2.zip`，需要 Python 3.11 与网络，不需要 Node.js。
-- 开发者源码：GitHub 自动 Source ZIP/TAR，先运行 `scripts\bootstrap-source.ps1`。
-- 不要分发 `obj`、`bin\Debug`、`output\work` 或测试目录中的文件。
+## 安全说明
 
-### 公开资产
+AutoDy 不会因为端口冲突终止无关进程。真实消息相关流程持续受身份校验、重复保护、确认和不确定状态停止保护。发布包和文档不得包含账号、消息、Cookie、受管浏览器资料或其他运行时私密数据。
 
-- `AutoDy-1.4.2-x64.msi`
-- `AutoDy-1.4.2-x64.msi.sha256`
-- `AutoDy-Windows-Portable-1.4.2.zip`
-- `AutoDy-Windows-Portable-1.4.2.zip.sha256`
-- `release-manifest.json`
+## 发布前检查
 
-发布前必须在干净 Windows runner 完成默认/自定义安装、repair、v1.4.1 upgrade、uninstall、远程 artifact 传输哈希、MSI/CAB/DLL 完整性、隐私扫描和 clean-source 构建。旧 v1.4.0/v1.4.1 标签与资产保持不变。
+最终发布仍需通过一次 Release CI。该门禁完成后，发布负责人应核对正式产物、SHA-256 sidecar、manifest 和 Git 标签，再创建新的 v1.4.2 发布。
