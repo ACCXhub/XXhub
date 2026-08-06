@@ -1,11 +1,8 @@
-# AutoDy 工程手册（兼容入口）
+# AutoDy 工程手册兼容入口
 
-该路径因当前 MSI 发布清单而保留。为避免多份工程说明发生漂移，完整、可维护的工程文档已拆分至 [文档索引](README.md)：
+该英文文件名仍由当前 MSI 构建输入引用，因此保留为兼容入口；完整工程正文已经迁移到中文文件名，避免两套长文重复和漂移。
 
-- [软件需求规格说明](software-engineering/software-requirements-specification.md)
-- [系统设计](software-engineering/system-design.md)
-- [测试与验收报告](software-engineering/test-and-acceptance-report.md)
-- [维护与排障指南](software-engineering/maintenance-and-troubleshooting.md)
-- [隐私与安全设计](software-engineering/privacy-and-security.md)
+- [文档总览](文档总览.md)
+- [软件工程文档目录](软件工程/01-软件需求规格说明书.md)
 
-适用状态：AutoDy `1.4.2` 已准备但尚未发布；最终 Release CI 通过前不得创建发布标签或 Release。
+AutoDy 1.4.2 为发布候选，等待最终 Release CI 通过。

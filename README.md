@@ -1,74 +1,46 @@
 # AutoDy
 
-AutoDy 是运行在 Windows 本机的 Douyin 私信工作流管理台。它管理本地目标、文案、计划、运行历史与诊断，并将稳定会话身份校验、重复保护、确认、浏览器锁和不确定结果保护放在执行流程之前。
+AutoDy 是 Windows 本机运行的 Douyin 私信工作流管理台。它管理本地目标、文案、计划和历史，并在执行前使用稳定会话身份、重复保护、确认和全局浏览器锁。不能证明安全时，系统停止并记录状态，而不依赖猜测继续执行。
 
-当前版本状态：AutoDy 1.4.2 已准备但尚未发布；最终 Release CI 仍待完成。已存在 v1.4.0 与 v1.4.1 标签，不会被移动。官方 Test Center 为 1.2.0，模块 API 为 1，兼容范围为 >=1.3.0,<2.0.0；模块和核心版本独立演进。
+## 当前状态
 
-## 核心能力
+AutoDy 1.4.2 是发布候选，等待最终 Release CI 通过；尚未创建 v1.4.2 标签或 Release。v1.4.0 与 v1.4.1 已存在，不会被移动。官方 Test Center 为 1.2.0，模块 API 为 1，兼容范围为 >=1.3.0,<2.0.0。
 
-- 本地 Dashboard：账号资料、目标、文案、计划、执行历史、诊断和可选模块信息。
-- 受管浏览器资料：浏览器 profile 与日常浏览器分离，账号资料按受管目录隔离。
-- 安全执行：全局浏览器锁、稳定身份校验、重复保护、确认与不确定结果停止。
-- 延迟安全重试：只有可证明未发生发送动作的错误才会进入 retry_pending；恢复后压制旧失败通知。
-- Windows 托盘：单实例、打开管理台、状态和日志入口、服务复用、受控重启与安全退出。
-- 安装生命周期：MSI 的安装、修复、升级和卸载；程序与可写数据分离。
-- 服务发现：优先端口 8765；无关监听者占用时安全回退至 8766–8799，不结束无关进程。
+## 主要能力
 
-## 架构摘要
+- 本地 Dashboard、账号/目标、文案、计划、状态、历史和诊断。
+- 受管浏览器资料隔离，身份不一致、草稿、附件或不确定结果时停止。
+- 安全重试、恢复状态、最终失败通知去重和已解决历史标记。
+- Windows 托盘单实例、服务身份验证、已验证服务复用和计划任务独立运行。
+- 首选端口 8765；无关监听者占用时安全回退到 8766–8799，不终止对方。
+- MSI 安装、Repair、升级和卸载；程序目录与 %LocalAppData%\AutoDy 数据目录分离。
 
-React/Vite Dashboard 通过 FastAPI 本地 API 访问任务、配置、历史和模块。Python 领域逻辑负责计划、状态与安全边界；Playwright 使用受管浏览器资料；PowerShell 托盘负责本地单实例、端口与服务身份验证；WiX MSI 负责当前用户安装、升级和数据目录分离。完整设计见[系统设计](docs/software-engineering/system-design.md)。
+## 安装摘要
 
-## 安装
-
-普通用户应在正式 Release 下载 MSI 和同名 SHA-256 sidecar。MSI 包含固定 Python 运行时、依赖和 Chromium。新安装优先 D:\AutoDy；D: 不可用时回退到 %LocalAppData%\Programs\AutoDy，并可在向导中选择其他可写目录。用户可写数据始终保留在 %LocalAppData%\AutoDy，升级和卸载不会默认清除它。
-
-portable 包适合技术用户：包含生产前端，但需要 Python 3.11 和网络来恢复依赖。源码归档用于开发，不能作为普通用户安装器。详情见[安装与使用指南](docs/software-engineering/installation-and-user-guide.md)。
-
-## 快速开始
-
-安装完成后，从开始菜单、桌面快捷方式或 AutoDy 托盘图标打开管理台。管理台地址是 127.0.0.1:<selected-port>。通常端口是 8765；若该端口由无关监听者占用，应用会安全选择 8766–8799 中的空闲端口并在下次启动复核。请优先使用托盘“打开管理台”，不要手动结束端口进程。
-
-开发环境使用项目 .venv：
+普通用户请在正式 Release 下载 MSI 与同名 SHA-256 文件。新安装优先 D:\AutoDy，D: 不可用时回退至 %LocalAppData%\Programs\AutoDy；用户可写数据始终位于 %LocalAppData%\AutoDy，卸载默认保留。portable 包适合技术用户，仍需要 Python 3.11 与网络；源码包只用于开发。
 
 ~~~powershell
-..venvScriptspython.exe -m autody.cli doctor
-cd frontend
-npm test
-npm run build
-cd ..
+Get-FileHash -Algorithm SHA256 '.\AutoDy-1.4.2-x64.msi'
 ~~~
 
-真实私信操作不属于快速开始或测试流程。开发、演示、排障和文档验收只能使用假页面、夹具或只读检查，不得在真实编辑器中输入、准备、粘贴、模拟或发送内容。
+结果必须和同名 .sha256 文件一致。安装、端口、修复、升级和卸载的完整步骤见[安装部署与用户手册](docs/软件工程/03-安装部署与用户手册.md)。
 
-## 安装目录与数据边界
+## 安全使用
 
-| 类型 | 位置 | 说明 |
-| --- | --- | --- |
-| MSI 程序 | D:\AutoDy 或 %LocalAppData%\Programs\AutoDy | 由安装器登记，升级/修复复用。 |
-| MSI 数据 | %LocalAppData%\AutoDy | 包含本地状态、计划、受管资料与备份；卸载默认保留。 |
-| portable/源码数据 | 配置目录下 data | 不应提交、复制到发布包或随意删除。 |
-| 本地管理台 | 127.0.0.1:<selected-port> | 只监听本机回环地址。 |
-
-## 测试与发布状态
-
-已记录的验证基线包括 Python 378 passed，1 warning；前端 49 passed；MSI 打包 10 passed；本次聚焦托盘/端口与 MSI 打包单元测试为 23 passed。另有 MSI 安装、修复、卸载、v1.4.1 升级、同 PID 服务复用、8765 冲突回退至 8766、D3DCompiler_47.dll payload 和字节级 MSI 可重复性的完成验证证据。
-
-这些结果不替代最终 Release CI。v1.4.2 在 CI 成功前不得打标签或发布。详情见[测试与验收报告](docs/software-engineering/test-and-acceptance-report.md)。
-
-## 隐私与限制
-
-AutoDy 的运行、浏览器资料和可写数据保留在本机。Git、发布包、日志导出与文档不得包含真实账号、目标、消息、Cookie、浏览器 profile、备份或私有路径。MSI 当前未声称代码签名，可能受到 Windows 信任策略提示；请通过正式 Release 与 SHA-256 校验来源。完整边界见[隐私与安全设计](docs/software-engineering/privacy-and-security.md)。
+开发、测试、演示和排障不得在真实 Douyin 编辑器输入、准备、粘贴、模拟或发送内容。不要共享账号、目标、消息、Cookie、令牌、浏览器 profile、日志或备份。遇到端口冲突、登录失效、服务身份异常或未知页面状态时，应先阅读[运维维护与故障排查](docs/软件工程/05-运维维护与故障排查.md)。
 
 ## 文档
 
-- [文档索引](docs/README.md)
-- [软件需求规格说明](docs/software-engineering/software-requirements-specification.md)
-- [系统设计](docs/software-engineering/system-design.md)
-- [安装与使用指南](docs/software-engineering/installation-and-user-guide.md)
-- [测试与验收报告](docs/software-engineering/test-and-acceptance-report.md)
-- [维护与排障指南](docs/software-engineering/maintenance-and-troubleshooting.md)
-- [隐私与安全设计](docs/software-engineering/privacy-and-security.md)
-- [项目交接](docs/PROJECT_HANDOFF.md)、[发布说明](docs/RELEASE_NOTES.md)、[变更记录](CHANGELOG.md)
+- [文档总览](docs/文档总览.md)
+- [软件需求规格说明书](docs/软件工程/01-软件需求规格说明书.md)
+- [系统设计说明书](docs/软件工程/02-系统设计说明书.md)
+- [安装部署与用户手册](docs/软件工程/03-安装部署与用户手册.md)
+- [测试与验收报告](docs/软件工程/04-测试与验收报告.md)
+- [运维维护与故障排查](docs/软件工程/05-运维维护与故障排查.md)
+- [隐私与安全设计](docs/软件工程/06-隐私与安全设计.md)
+- [项目交接说明](docs/软件工程/07-项目交接说明.md)
+- [v1.4.2 发布说明](docs/软件工程/08-v1.4.2发布说明.md)
+- [变更记录](CHANGELOG.md)
 
 ## 许可证
 
