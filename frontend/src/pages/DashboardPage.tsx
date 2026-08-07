@@ -5,10 +5,22 @@ import { StatusRail } from "../components/StatusRail";
 import type { DashboardStatus, FailureDetail } from "../types";
 import type { ViewName } from "../components/Sidebar";
 
-const statusLabel = {
+const deliveryStatusLabel = {
   success: "已发送",
-  failed: "异常",
+  failed: "今日失败",
   pending: "待发送"
+};
+
+const healthLabel = {
+  healthy: "正常",
+  abnormal: "异常",
+  unknown: "未知"
+};
+
+const healthTag = {
+  healthy: "success",
+  abnormal: "failed",
+  unknown: "pending"
 };
 
 const triggerLabel = {
@@ -35,50 +47,75 @@ const stageLabel: Record<string, string> = {
 };
 
 interface FailureOccurrence {
-  rowIndex: number;
-  rowEndTime: string;
   targetId: string;
   failure: FailureDetail;
 }
 
 interface FailureGroup {
   key: string;
+  label: string;
   items: FailureOccurrence[];
+  resolved: boolean;
+}
+
+const reasonLabel: Record<string, string> = {
+  conversation_not_found: "会话定位异常",
+  binding_missing: "目标绑定异常",
+  binding_stale: "目标绑定异常",
+  binding_revalidation_required: "目标绑定异常",
+  identity_ambiguous: "身份校验异常",
+  account_scope_mismatch: "账号校验异常",
+  login_required: "账号校验异常",
+  confirmation_failed_uncertain: "发送结果异常",
+  send_failed: "发送异常"
+};
+
+function failureLabel(failure: FailureDetail) {
+  if (reasonLabel[failure.reason_code]) return reasonLabel[failure.reason_code];
+  if (failure.stage === "conversation_located") return "会话定位异常";
+  if (failure.stage === "target_binding_resolved") return "目标绑定异常";
+  if (failure.stage === "account_verified" || failure.stage === "identity_verified") return "身份校验异常";
+  if (["send_boundary_reached", "confirmation_observed"].includes(failure.stage)) return "发送异常";
+  return "运行异常";
+}
+
+function failureGroupDescription(label: string, count: number) {
+  if (label === "会话定位异常") {
+    return `${count} 个目标在本次执行中未完成会话定位。`;
+  }
+  return `${count} 个目标在本次执行中出现${label}。`;
 }
 
 function groupedHistoryFailures(status: DashboardStatus): {
   historyRows: DashboardStatus["history"];
-  groupByOccurrence: Map<string, FailureGroup>;
+  groupsByRow: Map<number, FailureGroup[]>;
 } {
   const historyRows = status.history.slice(0, 7);
-  const groups = new Map<string, FailureOccurrence[]>();
+  const groupsByRow = new Map<number, FailureGroup[]>();
   historyRows.forEach((row, rowIndex) => {
+    const rowGroups = new Map<string, FailureGroup>();
     Object.entries(row.target_failures || {}).forEach(([targetId, failure]) => {
       const key = JSON.stringify([
-        row.date,
+        row.run_id,
+        row.end_time,
         failure.category,
         failure.reason_code,
-        targetId,
-        failure.suggested_action
+        failure.stage,
+        failure.suggested_action,
+        failure.resolved === true
       ]);
-      const items = groups.get(key) || [];
-      items.push({ rowIndex, rowEndTime: row.end_time, targetId, failure });
-      groups.set(key, items);
+      const group = rowGroups.get(key) || {
+        key,
+        label: failureLabel(failure),
+        items: [],
+        resolved: failure.resolved === true
+      };
+      group.items.push({ targetId, failure });
+      rowGroups.set(key, group);
     });
+    if (rowGroups.size) groupsByRow.set(rowIndex, [...rowGroups.values()]);
   });
-  const groupByOccurrence = new Map<string, FailureGroup>();
-  groups.forEach((items, key) => {
-    items.sort((left, right) => (
-      right.failure.timestamp.localeCompare(left.failure.timestamp)
-      || right.rowEndTime.localeCompare(left.rowEndTime)
-    ));
-    const newest = items[0];
-    groupByOccurrence.set(
-      `${newest.rowIndex}\0${newest.targetId}`,
-      { key, items }
-    );
-  });
-  return { historyRows, groupByOccurrence };
+  return { historyRows, groupsByRow };
 }
 
 export function DashboardPage({
@@ -86,18 +123,25 @@ export function DashboardPage({
   busy,
   onAction,
   onNavigate,
-  onRetryTarget
+  onRetryTargets
 }: {
   status: DashboardStatus;
   busy: string | null;
   onAction: (action: string) => void;
   onNavigate: (view: ViewName) => void;
-  onRetryTarget?: (targetId: string) => void;
+  onRetryTargets?: (targetIds: string[]) => void;
 }) {
-  const [expandedFailureGroups, setExpandedFailureGroups] = useState<Set<string>>(
-    () => new Set()
-  );
-  const { historyRows, groupByOccurrence } = groupedHistoryFailures(status);
+  const [expandedFailureGroup, setExpandedFailureGroup] = useState<string | null>(null);
+  const { historyRows, groupsByRow } = groupedHistoryFailures(status);
+  const safeRetryTargetIds = status.friends.flatMap((friend) => (
+    friend.target_id
+    && friend.status === "failed"
+    && friend.failure
+    && !friend.failure.resolved
+    && (friend.failure.retry_action_available ?? friend.failure.safe_retry_available)
+      ? [friend.target_id]
+      : []
+  ));
   const handleIssue = (action: string) => {
     if (["friends", "messages", "packs", "scheduler", "logs", "backup", "settings"].includes(action)) {
       onNavigate(action as ViewName);
@@ -109,19 +153,8 @@ export function DashboardPage({
     status.friends.find((friend) => friend.target_id === targetId)?.name
     || "失败目标"
   );
-  const failureAction = (targetId: string, action: string) => {
-    if (action === "retry") onRetryTarget?.(targetId);
-    else if (action === "reassociate") onNavigate("friends");
-    else if (action === "switch_account") onAction("login");
-    else onNavigate("logs");
-  };
   const toggleFailureGroup = (key: string) => {
-    setExpandedFailureGroups((current) => {
-      const next = new Set(current);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
+    setExpandedFailureGroup((current) => current === key ? null : key);
   };
   return (
     <>
@@ -143,7 +176,7 @@ export function DashboardPage({
       </section>
       <div className="dashboard-grid">
         <section className="panel history-panel">
-          <div className="panel-heading"><h2>结构化运行记录</h2><span>{status.history.length} 条记录</span></div>
+          <div className="panel-heading"><h2>结构化运行记录</h2><span className="inline-actions"><span>{status.history.length} 条记录</span>{groupsByRow.size ? <button className="action-button primary" disabled={!!busy || !safeRetryTargetIds.length || !onRetryTargets} onClick={() => onRetryTargets?.(safeRetryTargetIds)}>重试所有目标</button> : null}</span></div>
           <div className="table-wrap">
             <table>
               <thead><tr><th>结束时间</th><th>来源</th><th>成功/总数</th><th>重试</th><th>状态</th></tr></thead>
@@ -157,86 +190,44 @@ export function DashboardPage({
                       <td>{row.retry_count}</td>
                       <td><span className={row.final_status === "completed" || row.final_status === "already_done" ? "tag success" : "tag warning"}>{row.final_status === "completed" || row.final_status === "already_done" ? "成功" : "部分失败"}</span></td>
                     </tr>
-                    {Object.keys(row.target_failures || {}).map((targetId) => {
-                      const group = groupByOccurrence.get(`${rowIndex}\0${targetId}`);
-                      if (!group) return null;
-                      const expandable = group.items.length > 1;
-                      const expanded = expandable && expandedFailureGroups.has(group.key);
-                      const visibleItems = expanded ? group.items : group.items.slice(0, 1);
-                      const newest = group.items[0].failure;
-                      const resolved = newest.resolved === true;
+                    {(groupsByRow.get(rowIndex) || []).map((group) => {
+                      const expanded = expandedFailureGroup === group.key;
+                      const first = group.items[0].failure;
+                      const retryable = group.items.some(({ failure }) => (
+                        !failure.resolved
+                        && (failure.retry_action_available ?? failure.safe_retry_available)
+                      ));
+                      const statusText = group.resolved
+                        ? "已解决"
+                        : retryable
+                          ? "可安全重试"
+                          : "需要人工处理";
+                      const targetNames = group.items.map(({ targetId }) => targetName(targetId));
                       return (
-                        <tr className={resolved ? "history-failure-row resolved" : "history-failure-row"} key={`${row.run_id}-${targetId}`}>
+                        <tr className={group.resolved ? "history-failure-row resolved" : "history-failure-row"} key={group.key}>
                           <td colSpan={5}>
-                            <div
-                              className={[
-                                "history-failure-group",
-                                expandable ? "expandable" : "",
-                                resolved ? "resolved" : ""
-                              ].filter(Boolean).join(" ")}
-                              role={expandable ? "button" : undefined}
-                              tabIndex={expandable ? 0 : undefined}
-                              aria-expanded={expandable ? expanded : undefined}
-                              aria-label={expandable ? `${targetName(targetId)} ${newest.user_summary_zh}` : undefined}
-                              onClick={expandable ? () => toggleFailureGroup(group.key) : undefined}
-                              onKeyDown={expandable ? (event) => {
-                                if (event.key === "Enter" || event.key === " ") {
-                                  event.preventDefault();
-                                  toggleFailureGroup(group.key);
-                                }
-                              } : undefined}
+                            <button
+                              type="button"
+                              className={group.resolved ? "history-failure-summary resolved" : "history-failure-summary"}
+                              aria-expanded={expanded}
+                              aria-label={`${group.label}，${group.items.length} 个目标`}
+                              onClick={() => toggleFailureGroup(group.key)}
                             >
-                              {visibleItems.map(({ targetId: occurrenceTargetId, failure }, failureIndex) => {
-                                const occurrenceResolved = failure.resolved === true;
-                                const retryActionAvailable = (
-                                  failure.retry_action_available
-                                  ?? failure.safe_retry_available
-                                );
-                                return (
-                                <div className={occurrenceResolved ? "history-failure resolved" : "history-failure"} key={`${failure.run_id}-${failure.timestamp}-${failureIndex}`}>
-                                  {failureIndex === 0 && expandable ? (
-                                    <span className="history-failure-badge" aria-label={`共 ${group.items.length} 条重复通知`}>
-                                      {group.items.length}
-                                    </span>
-                                  ) : null}
-                                  <div>
-                                    <strong>
-                                      <span>{targetName(occurrenceTargetId)} · </span>
-                                      <b>{failure.user_summary_zh}</b>
-                                    </strong>
-                                    <small>
-                                      {new Date(failure.timestamp).toLocaleString("zh-CN")}
-                                      {" · "}
-                                      失败阶段：{stageLabel[failure.stage] || failure.stage}
-                                      {" · "}
-                                      {occurrenceResolved
-                                        ? failure.resolution_zh || "已解决"
-                                        : retryActionAvailable
-                                          ? "可安全重试"
-                                          : failure.uncertain_send
-                                            ? "禁止自动重试"
-                                            : "需要处理后再运行"}
-                                    </small>
-                                    <span>{failure.user_detail_zh}</span>
-                                  </div>
-                                  {occurrenceResolved ? (
-                                    <span className="history-failure-resolved">已解决</span>
-                                  ) : (
-                                    <button
-                                      className="action-button"
-                                      disabled={!!busy}
-                                      onClick={(event) => {
-                                        event.stopPropagation();
-                                        failureAction(occurrenceTargetId, failure.suggested_action);
-                                      }}
-                                    >
-                                      {retryActionAvailable ? "仅重试此目标" : failure.suggested_action_zh}
-                                    </button>
-                                  )}
-                                </div>
-                                );
-                              })}
-                            </div>
+                              <time>{new Date(first.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}</time>
+                              <strong>{group.label} · {group.items.length} 个目标</strong>
+                              <span className={group.resolved ? "tag success" : "tag warning"}>{group.resolved ? "已解决" : "异常"}</span>
+                            </button>
+                            {expanded ? <div className={group.resolved ? "history-failure-detail resolved" : "history-failure-detail"}>
+                              <strong>{group.label}</strong>
+                              <p>{failureGroupDescription(group.label, group.items.length)}</p>
+                              <div className="history-failure-detail-grid">
+                                <span>时间：{new Date(first.timestamp).toLocaleString("zh-CN")}</span>
+                                <span>失败阶段：{stageLabel[first.stage] || first.stage}</span>
+                                <span>当前状态：{statusText}</span>
+                                <span>受影响目标：{group.items.length} 个</span>
+                              </div>
+                              <small>{targetNames.join(" · ")}</small>
+                            </div> : null}
                           </td>
                         </tr>
                       );
@@ -262,16 +253,23 @@ export function DashboardPage({
         <div className="panel-heading"><h2>好友状态</h2><span>共 {status.friends.length} 位</span></div>
         <div className="table-wrap">
           <table>
-            <thead><tr><th>好友名称</th><th>状态</th><th>今日发送</th><th>异常信息</th></tr></thead>
+            <thead><tr><th>好友名称</th><th>当前绑定</th><th>今日发送</th><th>当前说明</th></tr></thead>
             <tbody>
-              {status.friends.map((friend) => (
-                <tr key={friend.name}>
-                  <td><span className="avatar">{friend.name.slice(0, 1)}</span>{friend.name}</td>
-                  <td><span className={`tag ${friend.status}`}>{statusLabel[friend.status]}</span></td>
-                  <td>{friend.status === "success" ? "已发送" : "未完成"}</td>
-                  <td className="muted">{friend.error || "—"}</td>
-                </tr>
-              ))}
+              {status.friends.map((friend) => {
+                const health = friend.current_health || {
+                  status: "unknown" as const,
+                  reason_code: "scan_unavailable",
+                  summary_zh: "当前扫描不可用"
+                };
+                return (
+                  <tr key={friend.name}>
+                    <td><span className="avatar">{friend.name.slice(0, 1)}</span>{friend.name}</td>
+                    <td><span className={`tag ${healthTag[health.status]}`}>{healthLabel[health.status]}</span></td>
+                    <td>{deliveryStatusLabel[friend.status]}</td>
+                    <td className="muted">{health.summary_zh}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

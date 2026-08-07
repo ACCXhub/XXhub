@@ -1,5 +1,6 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import type { FailureDetail } from "../types";
 import { DashboardPage } from "./DashboardPage";
 
 const apiMocks = vi.hoisted(() => ({
@@ -17,6 +18,26 @@ beforeEach(() => {
   apiMocks.serviceIdentity.mockResolvedValue({ application: "AutoDy", version: "1.0.0", git_commit: "abc123", python_executable: "python.exe", package_path: "src/autody", project_path: "project", frontend_build_version: "1.0.0" });
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
+
+test("shows current binding health without treating a historical failure as current abnormal", () => {
+  const currentStatus = {
+    ...status,
+    friends: [{
+      target_id: "target-one", name: "当前有效目标", status: "failed" as const,
+      error: "历史会话定位失败",
+      current_health: { status: "healthy" as const, reason_code: "binding_valid", summary_zh: "绑定有效" }
+    }]
+  };
+
+  render(<DashboardPage status={currentStatus} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} />);
+
+  const panel = screen.getByText("好友状态").closest("section");
+  expect(panel).not.toBeNull();
+  expect(within(panel as HTMLElement).getByText("正常")).toBeInTheDocument();
+  expect(within(panel as HTMLElement).getByText("绑定有效")).toBeInTheDocument();
+  expect(within(panel as HTMLElement).getByText("今日失败")).toBeInTheDocument();
+  expect(within(panel as HTMLElement).queryByText("历史会话定位失败")).not.toBeInTheDocument();
+});
 
 test("does not render a preflight card or request preflight status on the normal dashboard", async () => {
   render(<DashboardPage status={status} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} />);
@@ -38,223 +59,120 @@ test("keeps Test Center panels out of the normal dashboard", async () => {
   expect(apiMocks.serviceIdentity).not.toHaveBeenCalled();
 });
 
-test("shows target-level Chinese reason, stage, retryability and action under partial history", () => {
-  const partial = {
-    ...status,
-    history: [{
-      run_id: "run-partial", date: "2026-07-16", task_type: "daily_send",
-      trigger_source: "scheduled" as const, success_count: 8, failed_count: 1,
-      skipped_count: 0, total_targets: 9, retry_count: 0,
-      final_status: "retry_pending", end_time: "2026-07-16T07:31:00",
-      target_failures: {
-        "target-one": {
-          category: "navigation", stage: "conversation_located",
-          reason_code: "conversation_not_found",
-          user_summary_zh: "无法在当前会话列表中找到目标",
-          user_detail_zh: "会话定位：尚未访问输入框。",
-          retryable: true, send_attempted: false, send_attempts: 0,
-          uncertain_send: false, suggested_action: "retry",
-          suggested_action_zh: "仅重试此目标",
-          timestamp: "2026-07-16T07:30:10", run_id: "run-partial",
-          target_stable_id: "target-one", account_scope: "account-one",
-          binding_valid: true, account_scope_matches: true,
-          safe_retry_available: true, diagnostic_details: {}
-        }
-      }
-    }]
-  };
-
-  render(<DashboardPage status={partial} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} />);
-
-  expect(screen.getByText("8/9")).toBeInTheDocument();
-  expect(screen.getByText("无法在当前会话列表中找到目标")).toBeInTheDocument();
-  expect(screen.getByText(/失败阶段：会话定位/)).toBeInTheDocument();
-  expect(screen.getByText(/可安全重试/)).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "仅重试此目标" })).toBeInTheDocument();
-  expect(screen.queryByText(/退出码 3/)).not.toBeInTheDocument();
-});
-
-test("shows reassociation or details instead of retry for unsafe failures", () => {
-  const makeFailure = (reasonCode: string, action: string, actionZh: string, uncertain: boolean) => ({
-    category: "identity", stage: "identity_verified", reason_code: reasonCode,
-    user_summary_zh: reasonCode === "binding_stale" ? "目标绑定已过期，需要重新关联" : "消息发送状态无法确认，为防止重复发送已停止",
-    user_detail_zh: "已安全停止。", retryable: false,
-    send_attempted: uncertain, send_attempts: uncertain ? 1 : 0,
-    uncertain_send: uncertain, suggested_action: action,
-    suggested_action_zh: actionZh, timestamp: "2026-07-16T07:30:10",
-    run_id: "run", target_stable_id: reasonCode, account_scope: "account",
-    binding_valid: reasonCode !== "binding_stale", account_scope_matches: true,
-    safe_retry_available: false, diagnostic_details: {}
-  });
-  const partial = {
-    ...status,
-    history: [{
-      run_id: "run-actions", date: "2026-07-16", task_type: "daily_send",
-      trigger_source: "scheduled" as const, success_count: 7, failed_count: 2,
-      skipped_count: 0, total_targets: 9, retry_count: 0,
-      final_status: "uncertain", end_time: "2026-07-16T07:31:00",
-      target_failures: {
-        stale: makeFailure("binding_stale", "reassociate", "重新关联", false),
-        uncertain: makeFailure("confirmation_failed_uncertain", "details", "查看详情", true)
-      }
-    }]
-  };
-
-  render(<DashboardPage status={partial} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} />);
-
-  expect(screen.getByRole("button", { name: "重新关联" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "查看详情" })).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "仅重试此目标" })).not.toBeInTheDocument();
-});
-
-test("groups only identical same-day target failures and expands newest first", () => {
-  const makeFailure = (
-    targetId: string,
-    reasonCode: string,
-    timestamp: string,
-    summary: string
-  ) => ({
-    category: "navigation", stage: "conversation_located", reason_code: reasonCode,
-    user_summary_zh: summary, user_detail_zh: `${timestamp} 的失败原因`,
-    retryable: true, send_attempted: false, send_attempts: 0,
-    uncertain_send: false, suggested_action: "retry",
-    suggested_action_zh: "仅重试此目标", timestamp, run_id: timestamp,
-    target_stable_id: targetId, account_scope: "account",
-    binding_valid: true, account_scope_matches: true,
-    safe_retry_available: true, diagnostic_details: {}
-  });
-  const row = (
-    runId: string,
-    endTime: string,
-    targetId: string,
-    failure: ReturnType<typeof makeFailure>
-  ) => ({
-    run_id: runId, date: "2026-07-16", task_type: "daily_send",
-    trigger_source: "retry" as const, success_count: 0, failed_count: 1,
-    skipped_count: 0, total_targets: 1, retry_count: 1,
-    final_status: "retry_pending", end_time: endTime,
-    target_failures: { [targetId]: failure }
-  });
-  const groupedStatus = {
-    ...status,
-    friends: [
-      { target_id: "target-one", name: "目标一", status: "failed" as const },
-      { target_id: "target-two", name: "目标二", status: "failed" as const }
-    ],
-    history: [
-      row("run-new", "2026-07-16T09:01:00", "target-one", makeFailure("target-one", "conversation_not_found", "2026-07-16T09:00:00", "最新重复失败")),
-      row("run-middle", "2026-07-16T08:01:00", "target-one", makeFailure("target-one", "conversation_not_found", "2026-07-16T08:00:00", "最新重复失败")),
-      row("run-old", "2026-07-16T07:01:00", "target-one", makeFailure("target-one", "conversation_not_found", "2026-07-16T07:00:00", "最新重复失败")),
-      row("run-other-target", "2026-07-16T06:01:00", "target-two", makeFailure("target-two", "conversation_not_found", "2026-07-16T06:00:00", "其他目标失败")),
-      row("run-other-reason", "2026-07-16T05:01:00", "target-one", makeFailure("target-one", "page_load_timeout", "2026-07-16T05:00:00", "不同原因失败"))
-    ]
-  };
-
-  render(<DashboardPage status={groupedStatus} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} />);
-
-  const group = screen.getByRole("button", { name: /目标一 最新重复失败/ });
-  expect(screen.getAllByText("最新重复失败")).toHaveLength(1);
-  expect(screen.getByLabelText("共 3 条重复通知")).toHaveTextContent("3");
-  expect(screen.getByText("2026-07-16T09:00:00 的失败原因")).toBeInTheDocument();
-  expect(screen.getByText("其他目标失败")).toBeInTheDocument();
-  expect(screen.getByText("不同原因失败")).toBeInTheDocument();
-  expect(screen.queryByText(/点击展开|点击查看全部|点击卡片可展开/)).not.toBeInTheDocument();
-
-  fireEvent.click(group);
-  expect(screen.getAllByText("最新重复失败")).toHaveLength(3);
-  const expandedReasons = screen.getAllByText(/T0[789]:00:00 的失败原因/);
-  expect(expandedReasons.map((item) => item.textContent)).toEqual([
-    "2026-07-16T09:00:00 的失败原因",
-    "2026-07-16T08:00:00 的失败原因",
-    "2026-07-16T07:00:00 的失败原因"
-  ]);
-
-  fireEvent.click(group);
-  expect(screen.getAllByText("最新重复失败")).toHaveLength(1);
-});
-
-test("marks later-confirmed failures as resolved without hiding unresolved retry", () => {
-  const makeFailure = (
-    targetId: string,
-    timestamp: string,
-    resolved: boolean
-  ) => ({
+function failure(
+  targetId: string,
+  overrides: Partial<FailureDetail> = {}
+): FailureDetail {
+  return {
     category: "navigation", stage: "conversation_located",
     reason_code: "conversation_not_found",
-    user_summary_zh: resolved ? "已补发的历史失败" : "仍待处理的失败",
-    user_detail_zh: `${timestamp} 的失败原因`,
+    user_summary_zh: "无法在当前会话列表中找到目标",
+    user_detail_zh: "会话定位：尚未访问输入框。",
     retryable: true, send_attempted: false, send_attempts: 0,
     uncertain_send: false, suggested_action: "retry",
-    suggested_action_zh: "仅重试此目标", timestamp,
-    run_id: timestamp, target_stable_id: targetId,
-    account_scope: "account", binding_valid: true,
-    account_scope_matches: true, safe_retry_available: true,
-    retry_action_available: !resolved, resolved,
-    resolved_at: resolved ? "2026-07-16T09:30:00" : null,
-    resolution_zh: resolved ? "已通过后续成功补发解决" : null,
-    diagnostic_details: {}
-  });
-  const row = (
-    runId: string,
-    endTime: string,
-    targetId: string,
-    failure: ReturnType<typeof makeFailure>
-  ) => ({
-    run_id: runId, date: "2026-07-16", task_type: "daily_send",
-    trigger_source: "retry" as const, success_count: 0, failed_count: 1,
-    skipped_count: 0, total_targets: 1, retry_count: 1,
-    final_status: "retry_pending", end_time: endTime,
-    target_failures: { [targetId]: failure }
-  });
-  const resolvedStatus = {
-    ...status,
-    friends: [
-      { target_id: "target-resolved", name: "已解决目标", status: "success" as const },
-      { target_id: "target-open", name: "未解决目标", status: "failed" as const }
-    ],
-    history: [
-      row("resolved-new", "2026-07-16T09:01:00", "target-resolved", makeFailure("target-resolved", "2026-07-16T09:00:00", true)),
-      row("resolved-old", "2026-07-16T08:01:00", "target-resolved", makeFailure("target-resolved", "2026-07-16T08:00:00", true)),
-      row("open", "2026-07-16T07:01:00", "target-open", makeFailure("target-open", "2026-07-16T07:00:00", false))
-    ]
+    suggested_action_zh: "仅重试此目标",
+    timestamp: "2026-07-16T07:30:10", run_id: "run-partial",
+    target_stable_id: targetId, account_scope: "account-one",
+    binding_valid: true, account_scope_matches: true,
+    safe_retry_available: true, diagnostic_details: {},
+    ...overrides
   };
+}
 
-  render(<DashboardPage status={resolvedStatus} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} />);
-
-  expect(screen.getByText(/已通过后续成功补发解决/)).toBeInTheDocument();
-  expect(screen.getByText("已解决")).toBeInTheDocument();
-  expect(screen.getByLabelText("共 2 条重复通知")).toHaveTextContent("2");
-  expect(screen.getAllByRole("button", { name: "仅重试此目标" })).toHaveLength(1);
-  expect(screen.getByText("仍待处理的失败")).toBeInTheDocument();
-});
-
-test("target retry action keeps the stable target id", () => {
-  const retry = vi.fn();
+test("groups eight same-event failures into one collapsed anomaly summary", () => {
+  const retryAll = vi.fn();
+  const targetIds = Array.from({ length: 8 }, (_, index) => `target-${index + 1}`);
   const partial = {
     ...status,
+    friends: targetIds.map((targetId, index) => ({
+      target_id: targetId, name: `目标${index + 1}`, status: "failed" as const,
+      failure: failure(targetId)
+    })),
     history: [{
       run_id: "run-partial", date: "2026-07-16", task_type: "daily_send",
-      trigger_source: "scheduled" as const, success_count: 0, failed_count: 1,
-      skipped_count: 0, total_targets: 1, retry_count: 0,
+      trigger_source: "scheduled" as const, success_count: 0, failed_count: 8,
+      skipped_count: 0, total_targets: 8, retry_count: 0,
       final_status: "retry_pending", end_time: "2026-07-16T07:31:00",
+      target_failures: Object.fromEntries(
+        targetIds.map((targetId) => [targetId, failure(targetId)])
+      )
+    }]
+  };
+
+  render(<DashboardPage status={partial} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} onRetryTargets={retryAll} />);
+
+  const summary = screen.getByRole("button", { name: "会话定位异常，8 个目标" });
+  expect(screen.getAllByText("会话定位异常 · 8 个目标")).toHaveLength(1);
+  expect(screen.queryByText("8 个目标在本次执行中未完成会话定位。")).not.toBeInTheDocument();
+  expect(screen.getAllByRole("button", { name: "重试所有目标" })).toHaveLength(1);
+  expect(screen.queryByRole("button", { name: "仅重试此目标" })).not.toBeInTheDocument();
+
+  fireEvent.click(summary);
+  expect(screen.getByText("8 个目标在本次执行中未完成会话定位。")).toBeInTheDocument();
+  expect(screen.getByText(/受影响目标：8 个/)).toBeInTheDocument();
+
+  fireEvent.click(summary);
+  expect(screen.queryByText("8 个目标在本次执行中未完成会话定位。")).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "重试所有目标" }));
+  expect(retryAll).toHaveBeenCalledWith(targetIds);
+});
+
+test("retry-all excludes manual-action and later-resolved failure groups", () => {
+  const retryAll = vi.fn();
+  const mixed = {
+    ...status,
+    friends: [
+      {
+        target_id: "target-safe", name: "安全目标", status: "failed" as const,
+        failure: failure("target-safe", { run_id: "run-mixed" })
+      },
+      {
+        target_id: "target-missing", name: "缺少绑定", status: "failed" as const,
+        failure: failure("target-missing", {
+          category: "identity", stage: "target_binding_resolved",
+          reason_code: "binding_missing", retryable: false,
+          suggested_action: "reassociate", suggested_action_zh: "重新关联",
+          binding_valid: false, safe_retry_available: false, run_id: "run-mixed"
+        })
+      },
+      {
+        target_id: "target-resolved", name: "已解决", status: "success" as const,
+        failure: failure("target-resolved", {
+          resolved: true, retry_action_available: false,
+          resolved_at: "2026-07-16T09:00:00", run_id: "run-mixed"
+        })
+      }
+    ],
+    history: [{
+      run_id: "run-mixed", date: "2026-07-16", task_type: "daily_send",
+      trigger_source: "retry" as const, success_count: 1, failed_count: 2,
+      skipped_count: 0, total_targets: 3, retry_count: 1,
+      final_status: "retry_pending", end_time: "2026-07-16T08:31:00",
       target_failures: {
-        "stable-target-id": {
-          category: "navigation", stage: "conversation_located",
-          reason_code: "conversation_not_found", user_summary_zh: "失败",
-          user_detail_zh: "失败原因", retryable: true, send_attempted: false,
-          send_attempts: 0, uncertain_send: false, suggested_action: "retry",
-          suggested_action_zh: "仅重试此目标", timestamp: "2026-07-16T07:30:10",
-          run_id: "run-partial", target_stable_id: "stable-target-id",
-          account_scope: "account", binding_valid: true,
-          account_scope_matches: true, safe_retry_available: true,
-          diagnostic_details: {}
-        }
+        "target-safe": failure("target-safe", { run_id: "run-mixed" }),
+        "target-missing": failure("target-missing", {
+          category: "identity", stage: "target_binding_resolved",
+          reason_code: "binding_missing", user_summary_zh: "目标缺少稳定绑定",
+          user_detail_zh: "需要重新关联。", retryable: false,
+          suggested_action: "reassociate", suggested_action_zh: "重新关联",
+          binding_valid: false, safe_retry_available: false, run_id: "run-mixed"
+        }),
+        "target-resolved": failure("target-resolved", {
+          resolved: true, retry_action_available: false,
+          resolved_at: "2026-07-16T09:00:00",
+          resolution_zh: "已通过后续成功补发解决", run_id: "run-mixed"
+        })
       }
     }]
   };
 
-  render(<DashboardPage status={partial} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} onRetryTarget={retry} />);
-  fireEvent.click(screen.getByRole("button", { name: "仅重试此目标" }));
+  render(<DashboardPage status={mixed} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} onRetryTargets={retryAll} />);
+  fireEvent.click(screen.getByRole("button", { name: "重试所有目标" }));
 
-  expect(retry).toHaveBeenCalledWith("stable-target-id");
+  expect(retryAll).toHaveBeenCalledWith(["target-safe"]);
+  expect(screen.getAllByText("已解决").length).toBeGreaterThan(0);
+  fireEvent.click(screen.getByRole("button", { name: "目标绑定异常，1 个目标" }));
+  expect(screen.getByText(/需要人工处理/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "仅重试此目标" })).not.toBeInTheDocument();
 });

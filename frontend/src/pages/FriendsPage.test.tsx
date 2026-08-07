@@ -111,6 +111,34 @@ test("shows local avatars, adds a discovered friend on click, and removes candid
 
   expect(screen.queryByRole("checkbox", { name: "选择 新朋友" })).not.toBeInTheDocument();
   const candidate = await screen.findByRole("button", { name: "添加 新朋友" });
+  apiMocks.friends.mockResolvedValue({
+    friends: [
+      {
+        id: "friend-xiaoming", target_id: "friend-xiaoming", display_name: "小明",
+        enabled: true, avatar_url: "/api/avatars/friend-xiaoming",
+        avatar_status: "cached", today_status: "success",
+        last_success_date: "2026-07-04", note: ""
+      },
+      {
+        id: "candidate-new", target_id: "candidate-new", display_name: "新朋友",
+        enabled: true, avatar_url: "/api/avatars/candidate-new",
+        avatar_status: "cached", today_status: "pending",
+        last_success_date: null, note: ""
+      }
+    ]
+  });
+  apiMocks.discoveredFriends.mockResolvedValue({
+    ...discovered,
+    candidates: discovered.candidates.map((item) => (
+      item.candidate_id === "candidate-new"
+        ? {
+            ...item, match_status: "configured", configured: true,
+            target_id: "candidate-new", configured_target_id: "candidate-new",
+            enabled: true, configured_enabled: true
+          }
+        : item
+    ))
+  });
   fireEvent.click(candidate);
 
   await waitFor(() => expect(apiMocks.addCandidateToTargets).toHaveBeenCalledWith("candidate-new"));
@@ -156,6 +184,94 @@ test("selects target cards by click and keyboard without letting nested controls
   expect(confirm).toHaveBeenCalledWith("删除目标「小明」？");
   expect(apiMocks.friendBatch).toHaveBeenCalledWith(["friend-xiaoming"], "delete");
   expect(checkbox).not.toBeChecked();
+});
+
+test("cancels one continuation target immediately and revalidates in the background", async () => {
+  render(<FriendsPage notify={vi.fn()} onDataChanged={vi.fn()} />);
+  const cancel = await screen.findByRole("button", { name: "取消续火 小明" });
+  apiMocks.friends.mockImplementation(() => new Promise(() => undefined));
+
+  fireEvent.click(cancel);
+
+  await waitFor(() => {
+    expect(apiMocks.friendBatch).toHaveBeenCalledWith(["friend-xiaoming"], "disable");
+  });
+  expect(screen.getByRole("button", { name: "加入续火 小明" })).toBeInTheDocument();
+  expect(screen.getByText("已停用")).toBeInTheDocument();
+  expect(apiMocks.config).toHaveBeenCalledTimes(2);
+});
+
+test("rejoins a disabled continuation target with one click and no manual refresh", async () => {
+  apiMocks.friends.mockResolvedValueOnce({
+    friends: [{
+      id: "friend-xiaoming", target_id: "friend-xiaoming", display_name: "小明",
+      enabled: false, avatar_url: "/api/avatars/friend-xiaoming",
+      avatar_status: "cached", today_status: "pending", last_success_date: null,
+      note: ""
+    }]
+  });
+  apiMocks.discoveredFriends.mockResolvedValueOnce({
+    ...discovered,
+    candidates: discovered.candidates.map((candidate) => (
+      candidate.candidate_id === "friend-xiaoming"
+        ? { ...candidate, enabled: false, configured_enabled: false }
+        : candidate
+    ))
+  });
+  render(<FriendsPage notify={vi.fn()} onDataChanged={vi.fn()} />);
+  const join = await screen.findByRole("button", { name: "加入续火 小明" });
+  apiMocks.friends.mockImplementation(() => new Promise(() => undefined));
+
+  fireEvent.click(join);
+
+  await waitFor(() => {
+    expect(apiMocks.friendBatch).toHaveBeenCalledWith(["friend-xiaoming"], "enable");
+  });
+  expect(screen.getByRole("button", { name: "取消续火 小明" })).toBeInTheDocument();
+  expect(screen.getByText("已启用")).toBeInTheDocument();
+});
+
+test("keeps the row unchanged when a direct continuation mutation fails", async () => {
+  const notify = vi.fn();
+  apiMocks.friendBatch.mockRejectedValueOnce(new Error("保存失败"));
+  render(<FriendsPage notify={notify} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "取消续火 小明" }));
+
+  await waitFor(() => expect(notify).toHaveBeenCalledWith("保存失败"));
+  expect(screen.getByRole("button", { name: "取消续火 小明" })).toBeInTheDocument();
+  expect(screen.getByText("已启用")).toBeInTheDocument();
+});
+
+test("selects and clears every visible target with an explicit count", async () => {
+  apiMocks.friends.mockResolvedValueOnce({
+    friends: [
+      {
+        id: "friend-xiaoming", target_id: "friend-xiaoming", display_name: "小明",
+        enabled: true, avatar_url: "", avatar_status: "missing",
+        today_status: "pending", last_success_date: null, note: ""
+      },
+      {
+        id: "friend-xiaohong", target_id: "friend-xiaohong", display_name: "小红",
+        enabled: false, avatar_url: "", avatar_status: "missing",
+        today_status: "pending", last_success_date: null, note: ""
+      }
+    ]
+  });
+  render(<FriendsPage notify={vi.fn()} />);
+
+  const selectAll = await screen.findByRole("checkbox", { name: "全选续火目标" });
+  expect(screen.getByText("已选择 0 个目标")).toBeInTheDocument();
+  fireEvent.click(selectAll);
+
+  expect(screen.getByRole("checkbox", { name: "选择 小明" })).toBeChecked();
+  expect(screen.getByRole("checkbox", { name: "选择 小红" })).toBeChecked();
+  expect(screen.getByText("已选择 2 个目标")).toBeInTheDocument();
+
+  fireEvent.click(selectAll);
+  expect(screen.getByRole("checkbox", { name: "选择 小明" })).not.toBeChecked();
+  expect(screen.getByRole("checkbox", { name: "选择 小红" })).not.toBeChecked();
+  expect(screen.getByText("已选择 0 个目标")).toBeInTheDocument();
 });
 
 test("renders the target delete control as a compact absolute card action", async () => {

@@ -6,6 +6,13 @@ export interface Friend {
   status: FriendStatus;
   error?: string | null;
   failure?: FailureDetail | null;
+  current_health?: CurrentTargetHealth;
+}
+
+export interface CurrentTargetHealth {
+  status: "healthy" | "abnormal" | "unknown";
+  reason_code: string;
+  summary_zh: string;
 }
 
 export interface FailureDetail {

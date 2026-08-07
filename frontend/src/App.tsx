@@ -175,21 +175,24 @@ export default function App() {
       setBusy(null);
     }
   };
-  const retryTarget = async (targetId: string) => {
-    setBusy(`retry-${targetId}`);
+  const retryTargets = async (targetIds: string[]) => {
+    if (!targetIds.length) return;
+    setBusy("retry-all-targets");
     try {
-      const job = await api.retryFailedTarget(targetId);
-      const finished = await api.waitForAction(job.id);
-      const nextStatus = await refreshAll();
-      if (finished.status === "failed") {
-        const failure = nextStatus.friends.find(
-          (friend) => friend.target_id === targetId
-        )?.failure;
-        throw new Error(failure?.user_summary_zh || "该目标重试未完成，请查看失败详情");
+      for (const targetId of targetIds) {
+        const job = await api.retryFailedTarget(targetId);
+        const finished = await api.waitForAction(job.id);
+        const nextStatus = await refreshAll();
+        if (finished.status === "failed") {
+          const failure = nextStatus.friends.find(
+            (friend) => friend.target_id === targetId
+          )?.failure;
+          throw new Error(failure?.user_summary_zh || "目标重试未完成，请查看失败详情");
+        }
       }
-      notify("已仅重试所选目标");
+      notify(`已完成 ${targetIds.length} 个安全目标的重试`);
     } catch (error) {
-      notify(error instanceof Error ? error.message : "目标重试失败");
+      notify(error instanceof Error ? error.message : "批量重试失败");
     } finally {
       setBusy(null);
     }
@@ -234,7 +237,7 @@ export default function App() {
         onOpenTestCenter={() => setView("test-center")}
       />
       <main className="workspace">
-        {view === "dashboard" && <DashboardPage status={status} busy={busy} onAction={action} onNavigate={setView as (view: ViewName) => void} onRetryTarget={(targetId) => void retryTarget(targetId)} />}
+        {view === "dashboard" && <DashboardPage status={status} busy={busy} onAction={action} onNavigate={setView as (view: ViewName) => void} onRetryTargets={(targetIds) => void retryTargets(targetIds)} />}
         {view === "friends" && <FriendsPage notify={notify} onDataChanged={() => void refreshAll()} />}
         {view === "messages" && <MessagesPage notify={notify} onNavigate={setView} />}
         {view === "packs" && <MessagePacksPage notify={notify} />}
