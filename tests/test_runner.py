@@ -103,6 +103,27 @@ def test_second_run_same_day_sends_nothing(tmp_path: Path):
     assert chat.sent[0][1].endswith(" —— gpt小助手")
 
 
+def test_modern_run_excludes_enabled_records_without_an_executable_binding(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.targets = [
+        Target(
+            name="当前有效目标",
+            stable_id="target-current",
+            candidate_id="candidate-current",
+        ),
+        Target(name="缺少绑定目标"),
+    ]
+    chat = FakeChat()
+
+    result = run_daily(config, chat, date(2026, 7, 30))
+
+    assert result.total_targets == 1
+    assert result.sent_count == 1
+    assert [name for name, _message in chat.sent] == ["当前有效目标"]
+
+
 def test_running_denominator_is_immutable_and_next_run_uses_latest_targets(
     tmp_path: Path,
 ):

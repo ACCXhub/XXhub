@@ -129,6 +129,45 @@ def _report_daily_result(config: AppConfig, result: RunResult) -> None:
     _clear_attention(config)
 
 
+def _merge_discovered_target_bindings(
+    config_path: Path, discovered_config: AppConfig
+) -> AppConfig:
+    """Merge scan-owned binding fields into the latest user configuration."""
+    latest = load_config(config_path)
+    for discovered in discovered_config.targets:
+        if not discovered.stable_id and not discovered.candidate_id:
+            continue
+        matches = [
+            target
+            for target in latest.targets
+            if (
+                discovered.stable_id
+                and target.stable_id == discovered.stable_id
+            )
+            or (
+                discovered.candidate_id
+                and target.candidate_id == discovered.candidate_id
+            )
+        ]
+        if not matches:
+            matches = [
+                target
+                for target in latest.targets
+                if target.name == discovered.name
+                and not target.stable_id
+                and not target.candidate_id
+            ]
+        if len(matches) != 1:
+            continue
+        target = matches[0]
+        if discovered.stable_id:
+            target.stable_id = discovered.stable_id
+        if discovered.candidate_id:
+            target.candidate_id = discovered.candidate_id
+    save_config(config_path, latest)
+    return latest
+
+
 def _run_friend_scan(
     loaded: AppConfig,
     config_path: Path,
@@ -172,12 +211,16 @@ def _run_friend_scan(
                         progress=progress.update,
                     )
                     if result.config_changed:
-                        save_config(config_path, loaded)
+                        persisted = _merge_discovered_target_bindings(
+                            config_path, loaded
+                        )
+                    else:
+                        persisted = loaded
                     complete_binding_revalidation(
-                        loaded.state_file.parent,
+                        persisted.state_file.parent,
                         account_scope=result.account_scope,
                         target_candidate_ids=[
-                            target.candidate_id for target in loaded.targets
+                            target.candidate_id for target in persisted.targets
                         ],
                         current_candidate_ids={
                             candidate.candidate_id
@@ -333,12 +376,14 @@ def login(config: Path = typer.Option(Path("config.yaml"), "--config")):
                         loaded.state_file.parent / "discovered_friends.json",
                     )
                     if result.config_changed:
-                        save_config(config, loaded)
+                        persisted = _merge_discovered_target_bindings(config, loaded)
+                    else:
+                        persisted = loaded
                     complete_binding_revalidation(
-                        loaded.state_file.parent,
+                        persisted.state_file.parent,
                         account_scope=result.account_scope,
                         target_candidate_ids=[
-                            target.candidate_id for target in loaded.targets
+                            target.candidate_id for target in persisted.targets
                         ],
                         current_candidate_ids={
                             candidate.candidate_id
@@ -441,12 +486,17 @@ def health_check(config: Path = typer.Option(Path("config.yaml"), "--config")):
                                 loaded, page, DOUYIN_SELECTORS, discovery_path
                             )
                             if result.config_changed:
-                                save_config(config, loaded)
+                                persisted = _merge_discovered_target_bindings(
+                                    config, loaded
+                                )
+                            else:
+                                persisted = loaded
                             complete_binding_revalidation(
-                                loaded.state_file.parent,
+                                persisted.state_file.parent,
                                 account_scope=result.account_scope,
                                 target_candidate_ids=[
-                                    target.candidate_id for target in loaded.targets
+                                    target.candidate_id
+                                    for target in persisted.targets
                                 ],
                                 current_candidate_ids={
                                     candidate.candidate_id

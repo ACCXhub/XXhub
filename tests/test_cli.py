@@ -4,7 +4,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from autody.cli import app
-from autody.config import load_config
+from autody.config import load_config, save_config
 from autody.failures import failure_detail
 from autody.friend_discovery import AvatarRefreshResult, FriendDiscoveryResult
 from autody.account_profile import mark_bindings_for_revalidation
@@ -253,6 +253,48 @@ def test_refresh_friend_avatars_uses_identity_safe_discovery_correction(
     assert "头像校正完成：更新 1 个，失败 0 个。" in result.stdout
     assert calls[0][1]["force_avatar_refresh"] is True
     assert "stable_id: friend-xiaoming" in config.read_text(encoding="utf-8")
+
+
+def test_friend_scan_merges_bindings_without_reverting_concurrent_membership(
+    tmp_path: Path, monkeypatch
+):
+    (tmp_path / "messages.txt").write_text("早安\n", encoding="utf-8")
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "targets:\n  - name: 小明\nmessages_file: messages.txt\n",
+        encoding="utf-8",
+    )
+
+    class Context:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return False
+
+    def discover(loaded, _page, _selectors, output, **_kwargs):
+        latest = load_config(config)
+        latest.targets[0].enabled = False
+        save_config(config, latest)
+        loaded.targets[0].stable_id = "friend-xiaoming"
+        loaded.targets[0].candidate_id = "candidate-xiaoming"
+        return FriendDiscoveryResult(
+            "2026-07-05T08:00:00",
+            [],
+            output,
+            config_changed=True,
+        )
+
+    monkeypatch.setattr("autody.cli.open_chat", lambda *_args, **_kwargs: Context())
+    monkeypatch.setattr("autody.cli.discover_friends", discover)
+
+    result = runner.invoke(app, ["refresh-friend-avatars", "--config", str(config)])
+
+    restored = load_config(config)
+    assert result.exit_code == 0
+    assert restored.targets[0].enabled is False
+    assert restored.targets[0].stable_id == "friend-xiaoming"
+    assert restored.targets[0].candidate_id == "candidate-xiaoming"
 
 
 def test_login_success_starts_one_read_only_friend_scan(tmp_path: Path, monkeypatch):

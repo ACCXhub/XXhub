@@ -116,6 +116,20 @@ def test_status_returns_dashboard_summary(tmp_path: Path):
     assert data["login"]["status"] == "unknown"
 
 
+def test_friend_scan_status_handles_missing_optional_progress_file(tmp_path: Path):
+    response = TestClient(create_app(make_project(tmp_path))).get(
+        "/api/friends/scan-status"
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "refresh_running": False,
+        "stage": "completed",
+        "progress": {},
+        "last_result": {},
+    }
+
+
 def test_status_reads_legacy_state_and_skips_malformed_history_without_rewrite(
     tmp_path: Path,
 ):
@@ -468,6 +482,63 @@ def test_target_settings_and_today_plan_are_test_center_routes(tmp_path: Path):
     assert (tmp_path / "data" / "state.json").read_bytes() == before
 
 
+def test_dashboard_and_plan_count_only_enabled_targets_with_executable_bindings(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets = [
+        Target(
+            name="当前有效目标",
+            stable_id="target-current",
+            candidate_id="candidate-current",
+        ),
+        Target(name="缺少绑定目标"),
+    ]
+    save_config(config_path, config)
+    account_id = write_verified_account(tmp_path)
+    (tmp_path / "data" / "discovered_friends.json").write_text(
+        json.dumps(
+            {
+                "scanned_at": "2026-06-24T07:20:00",
+                "account_scope": account_id,
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-current",
+                        "display_name": "当前有效目标",
+                        "avatar_status": "missing",
+                        "discovered_at": "2026-06-24T07:20:00",
+                        "match_status": "configured",
+                        "presence_status": "current",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _install_test_center(config_path)
+    client = TestClient(
+        create_app(config_path, now_provider=lambda: datetime(2026, 6, 24, 8, 0))
+    )
+
+    dashboard = client.get("/api/status?today=2026-06-24").json()
+    plan = client.get(
+        "/api/modules/autody-test-center/today-plan?today=2026-06-24"
+    ).json()
+
+    assert dashboard["today"]["total"] == 1
+    assert dashboard["statistics"]["enabled_friend_count"] == 1
+    assert plan["enabled_target_count"] == 1
+    assert plan["pending_count"] == 1
+    assert plan["blocked_count"] == 1
+    missing = next(
+        item for item in plan["targets"] if item["display_name"] == "缺少绑定目标"
+    )
+    assert missing["status"] == "blocked"
+    assert missing["blocked_reason"] == "目标缺少稳定绑定，需要重新关联。"
+
+
 def test_failed_target_center_is_shared_by_overview_and_test_center(tmp_path: Path):
     config_path = make_project(tmp_path)
     config = load_config(config_path)
@@ -566,13 +637,20 @@ def test_status_exposes_target_failure_detail_in_overview_and_history(
         )
     )
 
-    status = TestClient(create_app(config_path)).get(
+    status = TestClient(create_app(
+        config_path, now_provider=lambda: datetime(2026, 6, 24, 8, 0)
+    )).get(
         "/api/status?today=2026-06-24"
     ).json()
 
     failed_friend = next(
         item for item in status["friends"] if item["status"] == "failed"
     )
+    assert failed_friend["current_health"] == {
+        "status": "healthy",
+        "reason_code": "binding_valid",
+        "summary_zh": "绑定有效",
+    }
     assert failed_friend["failure"]["stage"] == "conversation_located"
     assert failed_friend["failure"]["user_summary_zh"] == (
         "无法在当前会话列表中找到目标"
@@ -580,6 +658,97 @@ def test_status_exposes_target_failure_detail_in_overview_and_history(
     assert status["history"][0]["target_failures"]["target-one"][
         "suggested_action_zh"
     ] == "仅重试此目标"
+
+
+def test_status_current_health_rejects_missing_binding_and_unavailable_snapshot(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets = [Target(name="缺少绑定")]
+    save_config(config_path, config)
+
+    missing = TestClient(create_app(config_path)).get(
+        "/api/status?today=2026-06-24"
+    ).json()["friends"][0]["current_health"]
+
+    assert missing == {
+        "status": "abnormal",
+        "reason_code": "binding_missing",
+        "summary_zh": "目标缺少稳定绑定，需要重新关联",
+    }
+
+    config.targets[0].stable_id = "target-one"
+    config.targets[0].candidate_id = "candidate-one"
+    save_config(config_path, config)
+    unavailable = TestClient(create_app(config_path)).get(
+        "/api/status?today=2026-06-24"
+    ).json()["friends"][0]["current_health"]
+
+    assert unavailable == {
+        "status": "unknown",
+        "reason_code": "scan_unavailable",
+        "summary_zh": "当前扫描不可用",
+    }
+
+
+def test_status_current_health_rejects_ambiguous_candidate_and_account_mismatch(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets = [
+        Target(
+            name="当前绑定",
+            stable_id="target-one",
+            candidate_id="candidate-one",
+        )
+    ]
+    save_config(config_path, config)
+    account_id = write_verified_account(tmp_path)
+    snapshot = {
+        "scanned_at": "2026-06-24T07:20:00",
+        "account_scope": account_id,
+        "candidates": [
+            {
+                "candidate_id": "candidate-one",
+                "display_name": "当前绑定",
+                "avatar_status": "missing",
+                "discovered_at": "2026-06-24T07:20:00",
+                "match_status": "ambiguous",
+                "presence_status": "current",
+            }
+        ],
+    }
+    path = tmp_path / "data" / "discovered_friends.json"
+    path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+
+    ambiguous = TestClient(create_app(
+        config_path, now_provider=lambda: datetime(2026, 6, 24, 8, 0)
+    )).get(
+        "/api/status?today=2026-06-24"
+    ).json()["friends"][0]["current_health"]
+
+    assert ambiguous == {
+        "status": "abnormal",
+        "reason_code": "identity_ambiguous",
+        "summary_zh": "当前候选身份存在歧义，未自动关联",
+    }
+
+    snapshot["candidates"][0]["match_status"] = "configured"
+    snapshot["account_scope"] = "account-" + "b" * 24
+    path.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+    mismatch = TestClient(create_app(
+        config_path, now_provider=lambda: datetime(2026, 6, 24, 8, 0)
+    )).get(
+        "/api/status?today=2026-06-24"
+    ).json()["friends"][0]["current_health"]
+
+    assert mismatch == {
+        "status": "abnormal",
+        "reason_code": "account_scope_mismatch",
+        "summary_zh": "当前登录账号与目标所属账号不一致",
+    }
 
 
 def test_status_enriches_matching_legacy_history_with_stable_target_failure(

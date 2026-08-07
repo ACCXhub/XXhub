@@ -1,6 +1,8 @@
 from enum import Enum
 import os
 from pathlib import Path
+import time
+import uuid
 
 from pydantic import BaseModel, Field, model_validator
 import yaml
@@ -93,6 +95,23 @@ class AppConfig(BaseModel):
         return self
 
 
+def enabled_execution_targets(config: AppConfig) -> list[Target]:
+    """Return the enabled target set that a modern binding-aware run can use.
+
+    Legacy name-only projects remain supported until at least one candidate
+    binding exists. Once candidate bindings are present, partially migrated or
+    detached records must not inflate planning counts or reach the sender.
+    """
+    enabled = [target for target in config.targets if target.enabled]
+    if not any(target.candidate_id for target in config.targets):
+        return enabled
+    return [
+        target
+        for target in enabled
+        if target.stable_id and target.candidate_id
+    ]
+
+
 def load_config(path: Path) -> AppConfig:
     path = path.resolve()
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -152,8 +171,19 @@ def save_config(path: Path, config: AppConfig) -> None:
         "friend_scan_max_rounds": config.friend_scan_max_rounds,
         "avatar_capture_timeout_ms": config.avatar_capture_timeout_ms,
     }
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
-    )
-    os.replace(temporary, path)
+    temporary = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(
+            yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+        for attempt in range(8):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 7:
+                    raise
+                time.sleep(0.01 * (attempt + 1))
+    finally:
+        temporary.unlink(missing_ok=True)

@@ -27,6 +27,7 @@ from autody.config import (
     AppConfig,
     MessageSuffixConfig,
     Target,
+    enabled_execution_targets,
     load_config,
     save_config,
 )
@@ -505,6 +506,88 @@ def _daily_failure_detail(
     ))
 
 
+def _current_target_health(
+    target: Target,
+    *,
+    discovered,
+    profile,
+    binding_guarded: bool,
+    now: datetime,
+) -> dict[str, str]:
+    if not target.stable_id or not target.candidate_id:
+        return {
+            "status": "abnormal",
+            "reason_code": "binding_missing",
+            "summary_zh": "目标缺少稳定绑定，需要重新关联",
+        }
+    if discovered is None:
+        return {
+            "status": "unknown",
+            "reason_code": "scan_unavailable",
+            "summary_zh": "当前扫描不可用",
+        }
+    if is_discovery_stale(discovered.scanned_at, now):
+        return {
+            "status": "unknown",
+            "reason_code": "scan_stale",
+            "summary_zh": "当前扫描已过期",
+        }
+    if (
+        discovered.last_result.get("partial") is True
+        or discovered.last_result.get("completed_bottom_reached") is False
+    ):
+        return {
+            "status": "unknown",
+            "reason_code": "scan_incomplete",
+            "summary_zh": "当前扫描未完成",
+        }
+    evaluation = evaluate_account_scope(
+        profile,
+        binding_scope=discovered.account_scope,
+    )
+    if evaluation.reason_code == "account_scope_mismatch":
+        return {
+            "status": "abnormal",
+            "reason_code": "account_scope_mismatch",
+            "summary_zh": "当前登录账号与目标所属账号不一致",
+        }
+    if evaluation.reason_code == "login_required" or evaluation.compatible is None:
+        return {
+            "status": "unknown",
+            "reason_code": "account_scope_unverified",
+            "summary_zh": "当前账号范围尚未验证",
+        }
+    if binding_guarded:
+        return {
+            "status": "abnormal",
+            "reason_code": "binding_revalidation_required",
+            "summary_zh": "目标绑定待重新验证",
+        }
+    matches = [
+        candidate
+        for candidate in discovered.candidates
+        if candidate.candidate_id == target.candidate_id
+        and candidate.presence_status == "current"
+    ]
+    if len(matches) != 1:
+        return {
+            "status": "abnormal",
+            "reason_code": "binding_stale",
+            "summary_zh": "当前扫描未找到稳定绑定对应的候选",
+        }
+    if matches[0].match_status == "ambiguous":
+        return {
+            "status": "abnormal",
+            "reason_code": "identity_ambiguous",
+            "summary_zh": "当前候选身份存在歧义，未自动关联",
+        }
+    return {
+        "status": "healthy",
+        "reason_code": "binding_valid",
+        "summary_zh": "绑定有效",
+    }
+
+
 def _history_target_failures(
     config: AppConfig,
     record,
@@ -597,10 +680,11 @@ def _today_plan(config: AppConfig, state, day: date, overrides: dict[str, dict] 
     daily = state.daily.get(day.isoformat(), {})
     succeeded = set(daily.get("succeeded", []))
     failures = daily.get("failures", {})
+    executable = enabled_execution_targets(config)
+    executable_ids = {id(target) for target in executable}
     normalized: dict[str, int] = defaultdict(int)
-    for target in config.targets:
-        if target.enabled:
-            normalized[" ".join(target.name.split()).casefold()] += 1
+    for target in executable:
+        normalized[" ".join(target.name.split()).casefold()] += 1
     base = datetime.combine(day, datetime.strptime(config.daily_send_time, "%H:%M").time())
     enabled = [target for target in config.targets if target.enabled]
     ordered = sorted(
@@ -611,10 +695,11 @@ def _today_plan(config: AppConfig, state, day: date, overrides: dict[str, dict] 
     blocked = 0
     for fallback_order, target in ordered:
         identity = _target_id(target)
+        binding_missing = id(target) not in executable_ids
         ambiguous = normalized[" ".join(target.name.split()).casefold()] > 1
         failure = failures.get(target.name)
         code = _failure_code(failure, daily.get("confirmation_results", {}).get(identity)) if failure else None
-        status = "success" if target.name in succeeded else "blocked" if ambiguous or code == "blocked_ambiguous_target" else "failed" if failure else "pending"
+        status = "success" if target.name in succeeded else "blocked" if binding_missing or ambiguous or code == "blocked_ambiguous_target" else "failed" if failure else "pending"
         if status == "blocked":
             blocked += 1
         settings = _effective_target_settings(target, config, (overrides or {}).get(identity))
@@ -623,14 +708,20 @@ def _today_plan(config: AppConfig, state, day: date, overrides: dict[str, dict] 
             "display_name": target.name,
             "planned_at": (base + timedelta(minutes=settings["delay_offset_minutes"])).isoformat(timespec="minutes"),
             "status": status,
-            "blocked_reason": "昵称存在歧义，已阻止自动发送。" if ambiguous else _FAILURE_EXPLANATIONS.get(code or "", None),
+            "blocked_reason": (
+                "目标缺少稳定绑定，需要重新关联。"
+                if binding_missing
+                else "昵称存在歧义，已阻止自动发送。"
+                if ambiguous
+                else _FAILURE_EXPLANATIONS.get(code or "", None)
+            ),
             **settings,
         })
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "configuration_source": "current",
         "main_scheduled_time": config.daily_send_time,
-        "enabled_target_count": len(enabled),
+        "enabled_target_count": len(executable),
         "completed_count": sum(row["status"] == "success" for row in rows),
         "pending_count": sum(row["status"] == "pending" for row in rows),
         "blocked_count": blocked,
@@ -1129,6 +1220,15 @@ def create_app(
         )
         succeeded = set(daily.get("succeeded", []))
         failures = daily.get("failures", {})
+        executable_targets = enabled_execution_targets(config)
+        executable_names = {target.name for target in executable_targets}
+        executable_succeeded = succeeded & executable_names
+        executable_failures = executable_names & set(failures)
+        discovered = load_discovered_friends(
+            config.state_file.parent / "discovered_friends.json"
+        )
+        profile = load_account_profile(config.state_file.parent.parent)
+        binding_guarded = bindings_revalidation_required(config.state_file.parent)
         friends = []
         for target in config.targets:
             detail = _daily_failure_detail(config, target, daily)
@@ -1153,6 +1253,13 @@ def create_app(
                         detail.model_dump(mode="json")
                         if detail is not None
                         else None
+                    ),
+                    "current_health": _current_target_health(
+                        target,
+                        discovered=discovered,
+                        profile=profile,
+                        binding_guarded=binding_guarded,
+                        now=current_time(),
                     ),
                 }
             )
@@ -1210,7 +1317,6 @@ def create_app(
                 "explanation": "抖音登录已失效或需要安全验证。",
                 "action": "login", "action_label": "扫码登录",
             })
-        binding_guarded = bindings_revalidation_required(config.state_file.parent)
         if binding_guarded:
             issues.append({
                 "id": "account_bindings_revalidation_required",
@@ -1294,11 +1400,11 @@ def create_app(
         except (OSError, json.JSONDecodeError, TypeError):
             pack_count = 0
         statistics.update({
-            "successful_today": len(succeeded),
-            "failed_today": len(failures),
+            "successful_today": len(executable_succeeded),
+            "failed_today": len(executable_failures),
             "configured_friend_count": len(config.targets),
             "enabled_friend_count": (
-                0 if binding_guarded else sum(target.enabled for target in config.targets)
+                0 if binding_guarded else len(executable_targets)
             ),
             "local_message_count": message_count,
             "active_message_pack_count": pack_count,
@@ -1311,9 +1417,9 @@ def create_app(
             "today": {
                 "date": key,
                 "message": daily.get("message", ""),
-                "succeeded": len(succeeded),
-                "failed": len(failures),
-                "total": len(config.targets),
+                "succeeded": len(executable_succeeded),
+                "failed": len(executable_failures),
+                "total": len(executable_targets),
                 "complete": bool(daily.get("consumed")),
             },
             "friends": friends,
@@ -2172,6 +2278,13 @@ def create_app(
     @app.get("/api/friends/scan-status")
     def friend_scan_status():
         config = load_config(config_path)
+        progress_path = config.state_file.parent / "friend_scan_progress.json"
+        try:
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            progress = {}
+        if not isinstance(progress, dict):
+            progress = {}
         result = load_discovered_friends(
             config.state_file.parent / "discovered_friends.json"
         )

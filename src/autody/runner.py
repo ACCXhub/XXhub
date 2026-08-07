@@ -9,7 +9,12 @@ import random
 import time
 
 from autody.chat import DeliveryResult, DeliveryStatus, FatalChatError
-from autody.config import AppConfig, MessageSuffixConfig, Target
+from autody.config import (
+    AppConfig,
+    MessageSuffixConfig,
+    Target,
+    enabled_execution_targets,
+)
 from autody.account_profile import (
     bindings_revalidation_required,
     evaluate_account_scope,
@@ -86,7 +91,7 @@ def record_safe_pre_send_failure(config: AppConfig, reason: str, *, now: datetim
         persisted = outcomes.safe_failure(run_id, started, reason, max_retries=config.retry_count)
         status = RunStatus.RETRY_PENDING if persisted.outcome is TaskOutcome.RETRY_PENDING else RunStatus.FINAL_FAILED
         retries = persisted.retry_attempts
-    total = sum(target.enabled for target in config.targets)
+    total = len(enabled_execution_targets(config))
     return RunResult(status, total, 0, 0, total, reason, run_id=run_id, retry_count=retries)
 
 
@@ -348,7 +353,7 @@ def run_daily(
         "task_run_id",
         _daily_run_id(today),
     )
-    targets = [target for target in config.targets if target.enabled]
+    targets = enabled_execution_targets(config)
     if config.friend_order == "randomized":
         random.SystemRandom().shuffle(targets)
     requested_target_ids = set(target_ids) if target_ids is not None else None

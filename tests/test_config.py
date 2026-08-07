@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,21 @@ def test_save_config_persists_suffix_and_remote_pack_url(tmp_path: Path):
     assert restored.message_suffix.text == "每日问候"
     assert restored.message_suffix.style is MessageSuffixStyle.BRACKET
     assert restored.message_pack_index_url == "https://example.com/index.json"
+
+
+def test_concurrent_config_updates_each_commit_one_complete_document(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    path.write_text("targets: []\n", encoding="utf-8")
+    send_times = [f"07:{minute:02d}" for minute in range(32)]
+
+    def write(send_time: str) -> None:
+        save_config(path, AppConfig(daily_send_time=send_time))
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        list(executor.map(write, send_times))
+
+    assert load_config(path).daily_send_time in send_times
+    assert list(tmp_path.glob("config.yaml.*.tmp")) == []
 
 
 def test_new_recovery_and_log_defaults_keep_old_config_compatible(tmp_path: Path):

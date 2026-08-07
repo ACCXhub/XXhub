@@ -109,6 +109,36 @@ def test_versioned_migration_preserves_current_data_with_rollback_manifest(
     assert load_config(config_path).profile_dir == profile_root / "browser-profile"
 
 
+def test_versioned_migration_recovers_when_the_verified_browser_already_exists(
+    tmp_path: Path,
+):
+    config_path = _make_project(tmp_path)
+    store = MultiAccountStore(tmp_path, config_path)
+    authoritative = "account-" + "a" * 24
+    previous_browser = store.profile_root(authoritative) / "browser-profile"
+    previous_browser.mkdir(parents=True)
+    (previous_browser / "previous-session").write_text(
+        "same-account-previous-session",
+        encoding="utf-8",
+    )
+
+    registry = store.ensure_migrated()
+
+    profile_root = store.profile_root(authoritative)
+    assert registry["active_profile_id"] == authoritative
+    assert (profile_root / "browser-profile" / "auth-a").is_file()
+    recovery = Path(registry["migration"]["rollback_manifest"]).parent
+    assert (
+        recovery / "previous-browser-profile" / "previous-session"
+    ).read_text(encoding="utf-8") == "same-account-previous-session"
+    restored = load_config(config_path)
+    assert [target.stable_id for target in restored.targets] == ["target-a"]
+    assert restored.daily_send_time == "07:31"
+    assert json.loads(restored.state_file.read_text(encoding="utf-8"))["daily"] == {
+        "a": {}
+    }
+
+
 def test_two_profiles_keep_targets_schedules_candidates_test_center_and_auth_isolated(
     tmp_path: Path,
 ):
@@ -239,6 +269,39 @@ def test_pending_profile_is_associated_with_new_authoritative_identity(
     assert load_config(config_path).profile_dir == (
         store.profile_root(authoritative) / "browser-profile"
     )
+
+
+def test_pending_relogin_to_same_stable_account_restores_existing_local_state(
+    tmp_path: Path,
+):
+    config_path = _make_project(tmp_path)
+    store = MultiAccountStore(tmp_path, config_path)
+    authoritative = store.ensure_migrated()["active_profile_id"]
+    pending = store.create_empty_profile()["profile_id"]
+    store.activate(pending)
+    pending_browser = store.profile_root(pending) / "browser-profile"
+    (pending_browser / "new-session").write_text(
+        "verified-same-account-session",
+        encoding="utf-8",
+    )
+    _write_verified_profile(tmp_path, authoritative, "账号甲")
+
+    associated = store.associate_active_verified_profile()
+
+    assert associated["profile_id"] == authoritative
+    assert store.public_payload()["active_profile_id"] == authoritative
+    assert pending not in {
+        item["profile_id"] for item in store.public_payload()["profiles"]
+    }
+    restored = load_config(config_path)
+    assert [target.stable_id for target in restored.targets] == ["target-a"]
+    assert restored.daily_send_time == "07:31"
+    assert json.loads(restored.state_file.read_text(encoding="utf-8"))["daily"] == {
+        "a": {}
+    }
+    assert (
+        store.profile_root(authoritative) / "browser-profile" / "new-session"
+    ).read_text(encoding="utf-8") == "verified-same-account-session"
 
 
 def test_unverified_project_returns_empty_public_profile_list_without_migrating(

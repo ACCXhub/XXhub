@@ -219,6 +219,7 @@ class MultiAccountStore:
         legacy_config = load_config(self.config_path)
         legacy_browser = legacy_config.profile_dir.resolve()
         browser_destination = destination / "browser-profile"
+        previous_browser = backup / "previous-browser-profile"
         manifest = backup / "rollback-manifest.json"
         _atomic_json(
             manifest,
@@ -228,19 +229,29 @@ class MultiAccountStore:
                 "config_backup": str(config_backup),
                 "browser_from": str(legacy_browser),
                 "browser_to": str(browser_destination),
+                "previous_browser_backup": str(previous_browser),
             },
         )
         destination.mkdir(parents=True, exist_ok=True)
         moved_browser = False
+        backed_up_browser = False
         try:
             if (
                 legacy_browser != browser_destination.resolve()
                 and legacy_browser.exists()
             ):
                 if browser_destination.exists():
-                    raise AccountProfileStoreError(
-                        "目标账号认证目录已存在，迁移已停止"
-                    )
+                    unexpected = [
+                        item
+                        for item in destination.iterdir()
+                        if item.name != "browser-profile"
+                    ]
+                    if unexpected:
+                        raise AccountProfileStoreError(
+                            "目标账号目录包含未登记状态，迁移已停止"
+                        )
+                    shutil.move(str(browser_destination), str(previous_browser))
+                    backed_up_browser = True
                 shutil.move(str(legacy_browser), str(browser_destination))
                 moved_browser = True
             else:
@@ -277,6 +288,12 @@ class MultiAccountStore:
             if moved_browser and browser_destination.exists() and not legacy_browser.exists():
                 legacy_browser.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(browser_destination), str(legacy_browser))
+            if (
+                backed_up_browser
+                and previous_browser.exists()
+                and not browser_destination.exists()
+            ):
+                shutil.move(str(previous_browser), str(browser_destination))
             shutil.copy2(config_backup, self.config_path)
             raise
 
@@ -393,7 +410,50 @@ class MultiAccountStore:
         if not active.startswith("pending-"):
             raise AccountProfileStoreError("当前本地账号与已验证身份不一致")
         if authoritative in registry["profiles"]:
-            raise AccountProfileStoreError("该账号已保存在本机，请直接切换到已有账号")
+            self.persist_active()
+            source = self.profile_root(active)
+            destination = self.profile_root(authoritative)
+            source_browser = source / "browser-profile"
+            destination_browser = destination / "browser-profile"
+            if not source_browser.is_dir():
+                raise AccountProfileStoreError("当前登录会话目录不可用")
+            recovery = (
+                destination
+                / "relogin-recovery"
+                / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            )
+            recovery.mkdir(parents=True, exist_ok=False)
+            previous_browser = recovery / "previous-browser-profile"
+            try:
+                if destination_browser.exists():
+                    shutil.move(str(destination_browser), str(previous_browser))
+                shutil.move(str(source_browser), str(destination_browser))
+                self.activate(authoritative)
+                registry = self.ensure_migrated()
+                entry = registry["profiles"][authoritative]
+                entry.update(
+                    {
+                        "display_name": metadata.display_name,
+                        "profile_status": "verified",
+                        "logged_in": True,
+                        "last_active_at": _timestamp(),
+                        "reassociated_at": _timestamp(),
+                    }
+                )
+                registry["profiles"].pop(active, None)
+                self._save_registry(registry)
+                if source.exists():
+                    shutil.move(
+                        str(source),
+                        str(recovery / "pending-profile-state"),
+                    )
+                return entry
+            except Exception:
+                if destination_browser.exists() and not source_browser.exists():
+                    shutil.move(str(destination_browser), str(source_browser))
+                if previous_browser.exists() and not destination_browser.exists():
+                    shutil.move(str(previous_browser), str(destination_browser))
+                raise
 
         self.persist_active()
         registry = self.ensure_migrated()
