@@ -1,4 +1,5 @@
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 
 def test_wix_project_is_sdk_style_and_per_user():
@@ -37,6 +38,29 @@ def test_msi_shortcuts_use_the_hidden_launcher():
     assert 'Id="StartMenuShortcut"' in product
 
 
+def test_msi_stops_only_verified_existing_tray_hosts_after_installing_files():
+    namespace = {"w": "http://wixtoolset.org/schemas/v4/wxs"}
+    root = ET.parse("packaging/wix/Product.wxs").getroot()
+
+    action = root.find(".//w:CustomAction[@Id='StopExistingAutoDyTray']", namespace)
+    assert action is not None
+    assert action.attrib["Directory"] == "INSTALLFOLDER"
+    assert "scripts\\autody-tray.ps1" in action.attrib["ExeCommand"]
+    assert "-StopExisting" in action.attrib["ExeCommand"]
+    assert "-ProjectRoot" not in action.attrib["ExeCommand"]
+    assert "-DataRoot" not in action.attrib["ExeCommand"]
+    assert action.attrib["Execute"] == "deferred"
+    assert action.attrib["Impersonate"] == "yes"
+
+    scheduled = root.find(
+        ".//w:InstallExecuteSequence/w:Custom[@Action='StopExistingAutoDyTray']",
+        namespace,
+    )
+    assert scheduled is not None
+    assert scheduled.attrib["After"] == "InstallFiles"
+    assert scheduled.attrib["Condition"] == 'NOT REMOVE~="ALL"'
+
+
 def test_msi_uninstall_shortcut_and_install_folder_resolution_are_msi_native():
     product = Path("packaging/wix/Product.wxs").read_text(encoding="utf-8")
 
@@ -63,6 +87,7 @@ def test_msi_builder_uses_explicit_allowlist_and_clean_runtime():
 
     for token in [
         "$releaseFiles = [ordered]@{",
+        "scripts\\install-shortcut.ps1",
         "runtime\\python\\python.exe",
         "runtime\\ms-playwright",
         "packaging\\runtime-requirements.txt",

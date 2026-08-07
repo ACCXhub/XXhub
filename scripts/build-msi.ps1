@@ -411,6 +411,7 @@ if (Test-Path -LiteralPath $playwrightLinks) {
 $releaseFiles = [ordered]@{
     "scripts\autody-tray.ps1" = "scripts\autody-tray.ps1"
     "scripts\health-check.ps1" = "scripts\health-check.ps1"
+    "scripts\install-shortcut.ps1" = "scripts\install-shortcut.ps1"
     "scripts\install-task.ps1" = "scripts\install-task.ps1"
     "scripts\remove-task.ps1" = "scripts\remove-task.ps1"
     "scripts\repair-playwright.ps1" = "scripts\repair-playwright.ps1"

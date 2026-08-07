@@ -2,6 +2,7 @@
     [string]$ProjectRoot = (Join-Path $PSScriptRoot ".."),
     [string]$DataRoot,
     [switch]$DefineOnly,
+    [switch]$StopExisting,
     [switch]$OpenDashboardOnly
 )
 
@@ -68,9 +69,13 @@ if ($IsPackaged) {
     }
 }
 
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-if (-not ("AutoDyMenuRenderer" -as [type])) {
+ $script:TrayRendererInitialized = $false
+function Initialize-TrayRenderer {
+    if ($script:TrayRendererInitialized) { return }
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Drawing
+        if (-not ("AutoDyMenuRenderer" -as [type])) {
     Add-Type -ReferencedAssemblies @("System.Windows.Forms", "System.Drawing") -TypeDefinition @"
 using System;
 using System.Drawing;
@@ -146,11 +151,54 @@ public static class AutoDyMenuWindow {
     }
 }
 "@
+        }
+        $script:TrayRendererInitialized = $true
+    } catch {
+        throw "AutoDy tray menu renderer could not be initialized."
+    }
 }
 
 function Write-TrayLog([string]$Message) {
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
     "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message" | Add-Content -LiteralPath $TrayLog -Encoding UTF8
+}
+
+function Test-ExactTrayHostCommandLine(
+    [string]$CommandLine,
+    [string]$ExpectedScript
+) {
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $false }
+    $escaped = [Regex]::Escape([IO.Path]::GetFullPath($ExpectedScript))
+    $pattern = '(?i)(?:^|\s)-File\s+(?:"' + $escaped + '"|' + $escaped + ')(?:\s|$)'
+    return [Regex]::IsMatch($CommandLine, $pattern)
+}
+
+function Stop-ExistingAutoDyTrayHosts {
+    $expectedScript = Join-Path $ProjectRoot "scripts\autody-tray.ps1"
+    $currentOwner = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $stopped = 0
+    $processes = Get-CimInstance -ClassName Win32_Process -ErrorAction Stop |
+        Where-Object {
+            $_.ProcessId -ne $PID -and
+            ($_.Name -eq "powershell.exe" -or $_.Name -eq "pwsh.exe") -and
+            (Test-ExactTrayHostCommandLine $_.CommandLine $expectedScript)
+        }
+    foreach ($process in $processes) {
+        $ownerResult = Invoke-CimMethod -InputObject $process -MethodName GetOwner -ErrorAction Stop
+        $owner = if ($ownerResult.ReturnValue -eq 0 -and $ownerResult.User) {
+            if ($ownerResult.Domain) {
+                "$($ownerResult.Domain)\$($ownerResult.User)"
+            } else {
+                [string]$ownerResult.User
+            }
+        } else {
+            $null
+        }
+        if ($owner -ne $currentOwner) { continue }
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction Stop
+        $stopped += 1
+    }
+    return $stopped
 }
 
 function Set-ServicePort([int]$Port) {
@@ -194,6 +242,7 @@ function Test-SystemDarkTheme {
 function Set-AutoDyMenuTheme {
     param([Parameter(Mandatory = $true)][System.Windows.Forms.ContextMenuStrip]$Menu)
 
+    Initialize-TrayRenderer
     $dark = Test-SystemDarkTheme
     $Menu.Renderer = New-Object AutoDyMenuRenderer -ArgumentList ([bool]$dark)
     $Menu.Font = New-Object System.Drawing.Font -ArgumentList @("Segoe UI", 10.0)
@@ -452,6 +501,10 @@ function Get-TrayState {
     return "运行正常"
 }
 
+if ($StopExisting) {
+    Stop-ExistingAutoDyTrayHosts | Out-Null
+    return
+}
 if ($DefineOnly) { return }
 if ($OpenDashboardOnly) {
     try {

@@ -56,6 +56,15 @@ def test_tray_reuses_a_persisted_fallback_port_for_dashboard_and_shutdown():
     assert "function Stop-ManagedService" in text
 
 
+def test_tray_renderer_is_initialized_only_by_the_tray_menu_path():
+    text = Path("scripts/autody-tray.ps1").read_text(encoding="utf-8-sig")
+
+    assert "function Initialize-TrayRenderer" in text
+    assert "Initialize-TrayRenderer" in text[text.index("function Set-AutoDyMenuTheme"):]
+    renderer = text[text.index("function Initialize-TrayRenderer"):text.index("function Write-TrayLog")]
+    assert "$script:TrayRendererInitialized" in renderer
+
+
 def test_tray_revalidates_a_stale_persisted_port_before_selecting_a_new_service_port():
     text = Path("scripts/autody-tray.ps1").read_text(encoding="utf-8-sig")
 
@@ -189,6 +198,56 @@ def test_duplicate_tray_launch_opens_dashboard_without_starting_another_host_or_
     assert "Wait-ForExistingHealthyService" in opener
 
 
+def test_stop_existing_tray_targets_only_the_exact_installed_script(tmp_path: Path):
+    fake_root = tmp_path / "fake install"
+    fake_scripts = fake_root / "scripts"
+    fake_scripts.mkdir(parents=True)
+    fake_tray = fake_scripts / "autody-tray.ps1"
+    fake_tray.write_text("Start-Sleep -Seconds 30\n", encoding="utf-8")
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    target = subprocess.Popen(
+        ["powershell.exe", "-NoProfile", "-File", str(fake_tray)],
+        creationflags=creation_flags,
+    )
+    unrelated = subprocess.Popen(
+        ["powershell.exe", "-NoProfile", "-Command", "Start-Sleep -Seconds 30"],
+        creationflags=creation_flags,
+    )
+    controller = None
+    try:
+        controller = subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-File",
+                str(Path("scripts/autody-tray.ps1").resolve()),
+                "-ProjectRoot",
+                str(fake_root),
+                "-DataRoot",
+                str(tmp_path / "data"),
+                "-StopExisting",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creation_flags,
+        )
+        _stdout, stderr = controller.communicate(timeout=15)
+
+        assert controller.returncode == 0, stderr
+        target.wait(timeout=5)
+        assert unrelated.poll() is None
+    finally:
+        for process in (controller, target, unrelated):
+            if process is None:
+                continue
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+
+
 def test_ui_automation_failure_is_optional_and_returns_fallback_without_throwing():
     script_path = Path("scripts/autody-tray.ps1").resolve()
     command = r"""
@@ -249,6 +308,7 @@ def test_tray_menu_theme_helpers_execute_in_powershell():
     command = r"""
     $ErrorActionPreference = "Stop"
     . $env:AUTODY_TEST_TRAY_SCRIPT -DefineOnly
+    Add-Type -AssemblyName System.Windows.Forms
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
     [void]$menu.Items.Add("测试项目")
     Set-AutoDyMenuTheme -Menu $menu
