@@ -332,6 +332,7 @@ try {
                 [pscustomobject]@{ Action = 'SetExistingInstallFolder'; Type = '51'; Source = 'INSTALLFOLDER'; Target = '[AUTODY_EXISTING_INSTALLFOLDER]' },
                 [pscustomobject]@{ Action = 'SetDDriveInstallFolder'; Type = '51'; Source = 'INSTALLFOLDER'; Target = 'D:\AutoDy' },
                 [pscustomobject]@{ Action = 'StopExistingAutoDyTray'; Type = '1058'; Source = 'INSTALLFOLDER'; Target = '"[SystemFolder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "[INSTALLFOLDER]scripts\autody-tray.ps1" -StopExisting' },
+                [pscustomobject]@{ Action = 'RepairInstalledAutoDyTasks'; Type = '1058'; Source = 'INSTALLFOLDER'; Target = '"[INSTALLFOLDER]runtime\python\python.exe" -m autody.cli repair-scheduler --config "[AUTODYDATAROOT]config.yaml" --program-root "[INSTALLFOLDER]." --if-config-exists' },
                 [pscustomobject]@{ Action = 'Wix4RemoveFoldersEx_X64'; Type = '65'; Source = 'Wix4UtilCA_X64'; Target = 'WixRemoveFoldersEx' }
             )
             $unexpectedCustomAction = $customActionRows.Count -ne $expectedCustomActions.Count

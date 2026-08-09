@@ -210,6 +210,7 @@ def test_release_privacy_verifier_covers_all_release_artifacts():
         "SetExistingInstallFolder",
         "SetDDriveInstallFolder",
         "StopExistingAutoDyTray",
+        "RepairInstalledAutoDyTasks",
         '"/a `"$Msi`" /qn',
         "AutoDy-Windows-Portable-$Version.zip",
         "AutoDy-Test-Center.autody-module.zip",
