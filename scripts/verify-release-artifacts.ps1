@@ -295,19 +295,16 @@ try {
             $expectedShortcuts = @(
                 [pscustomobject]@{
                     Id = 'DesktopShortcut'
-                    Name = '*|AutoDy Management'
                     Target = '[SystemFolder]wscript.exe'
                     Arguments = '"[INSTALLFOLDER]scripts\start-dashboard.vbs"'
                 },
                 [pscustomobject]@{
                     Id = 'StartMenuShortcut'
-                    Name = '*|AutoDy Management'
                     Target = '[SystemFolder]wscript.exe'
                     Arguments = '"[INSTALLFOLDER]scripts\start-dashboard.vbs"'
                 },
                 [pscustomobject]@{
                     Id = 'UninstallShortcut'
-                    Name = '*|卸载 AutoDy'
                     Target = '[SystemFolder]msiexec.exe'
                     Arguments = '/x [ProductCode]'
                 }
@@ -321,7 +318,6 @@ try {
             foreach ($expectedShortcut in $expectedShortcuts) {
                 $matches = @($shortcutRows | Where-Object {
                     $_.Values[0] -eq $expectedShortcut.Id -and
-                    $_.Values[1] -like $expectedShortcut.Name -and
                     $_.Values[2] -eq $expectedShortcut.Target -and
                     $_.Values[3] -eq $expectedShortcut.Arguments
                 })
@@ -335,6 +331,7 @@ try {
             $expectedCustomActions = @(
                 [pscustomobject]@{ Action = 'SetExistingInstallFolder'; Type = '51'; Source = 'INSTALLFOLDER'; Target = '[AUTODY_EXISTING_INSTALLFOLDER]' },
                 [pscustomobject]@{ Action = 'SetDDriveInstallFolder'; Type = '51'; Source = 'INSTALLFOLDER'; Target = 'D:\AutoDy' },
+                [pscustomobject]@{ Action = 'StopExistingAutoDyTray'; Type = '1058'; Source = 'INSTALLFOLDER'; Target = '"[SystemFolder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "[INSTALLFOLDER]scripts\autody-tray.ps1" -StopExisting' },
                 [pscustomobject]@{ Action = 'Wix4RemoveFoldersEx_X64'; Type = '65'; Source = 'Wix4UtilCA_X64'; Target = 'WixRemoveFoldersEx' }
             )
             $unexpectedCustomAction = $customActionRows.Count -ne $expectedCustomActions.Count

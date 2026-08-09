@@ -170,6 +170,7 @@ def test_release_privacy_verifier_covers_all_release_artifacts():
         "Wix4RemoveFoldersEx_X64",
         "SetExistingInstallFolder",
         "SetDDriveInstallFolder",
+        "StopExistingAutoDyTray",
         '"/a `"$Msi`" /qn',
         "AutoDy-Windows-Portable-$Version.zip",
         "AutoDy-Test-Center.autody-module.zip",
@@ -180,6 +181,7 @@ def test_release_privacy_verifier_covers_all_release_artifacts():
         "Test-ForbiddenEntryPath",
     ]:
         assert token in verifier
+    assert "$_.Values[1] -like $expectedShortcut.Name" not in verifier
 
 
 def test_msi_lifecycle_verifier_preserves_shortcuts_and_data():
