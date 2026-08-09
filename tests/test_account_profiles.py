@@ -55,6 +55,12 @@ def _make_project(tmp_path: Path) -> Path:
     config.messages_file.write_text("测试", encoding="utf-8")
     config.state_file.parent.mkdir(parents=True, exist_ok=True)
     config.state_file.write_text('{"daily":{"a":{}}}', encoding="utf-8")
+    history = tmp_path / "data" / "history"
+    history.mkdir()
+    (history / "task-runs.jsonl").write_text(
+        '{"run_id":"account-a-history"}\n',
+        encoding="utf-8",
+    )
     (tmp_path / "data" / "discovered_friends.json").write_text(
         '{"candidates":[{"candidate_id":"candidate-a"}]}',
         encoding="utf-8",
@@ -160,6 +166,12 @@ def test_two_profiles_keep_targets_schedules_candidates_test_center_and_auth_iso
     second_config.daily_send_time = "09:45"
     save_config(config_path, second_config)
     second_config.state_file.write_text('{"daily":{"b":{}}}', encoding="utf-8")
+    second_history = tmp_path / "data" / "history"
+    second_history.mkdir()
+    (second_history / "task-runs.jsonl").write_text(
+        '{"run_id":"account-b-history"}\n',
+        encoding="utf-8",
+    )
     (tmp_path / "data" / "discovered_friends.json").write_text(
         '{"candidates":[{"candidate_id":"candidate-b"}]}',
         encoding="utf-8",
@@ -194,6 +206,12 @@ def test_two_profiles_keep_targets_schedules_candidates_test_center_and_auth_iso
     )
     assert (first_config.profile_dir / "auth-a").is_file()
     assert not (first_config.profile_dir / "auth-b").exists()
+    assert "account-a-history" in (
+        tmp_path / "data" / "history" / "task-runs.jsonl"
+    ).read_text(encoding="utf-8")
+    assert "account-b-history" not in (
+        tmp_path / "data" / "history" / "task-runs.jsonl"
+    ).read_text(encoding="utf-8")
 
     store.activate(second)
     active = load_config(config_path)
@@ -207,6 +225,12 @@ def test_two_profiles_keep_targets_schedules_candidates_test_center_and_auth_iso
     )
     assert (active.profile_dir / "auth-b").is_file()
     assert not (active.profile_dir / "auth-a").exists()
+    assert "account-b-history" in (
+        tmp_path / "data" / "history" / "task-runs.jsonl"
+    ).read_text(encoding="utf-8")
+    assert "account-a-history" not in (
+        tmp_path / "data" / "history" / "task-runs.jsonl"
+    ).read_text(encoding="utf-8")
 
 
 def test_logout_affects_only_active_auth_and_preserves_profile_settings(
@@ -299,6 +323,24 @@ def test_pending_relogin_to_same_stable_account_restores_existing_local_state(
     assert json.loads(restored.state_file.read_text(encoding="utf-8"))["daily"] == {
         "a": {}
     }
+    assert "candidate-a" in (
+        tmp_path / "data" / "discovered_friends.json"
+    ).read_text(encoding="utf-8")
+    assert "account-a-history" in (
+        tmp_path / "data" / "history" / "task-runs.jsonl"
+    ).read_text(encoding="utf-8")
+    assert "target-a" in (
+        tmp_path
+        / "data"
+        / "modules"
+        / "autody-test-center"
+        / "data"
+        / "settings.json"
+    ).read_text(encoding="utf-8")
+    metadata = json.loads(
+        (tmp_path / "data" / "account-profile.json").read_text(encoding="utf-8")
+    )
+    assert metadata["profile_status"] == "verified"
     assert (
         store.profile_root(authoritative) / "browser-profile" / "new-session"
     ).read_text(encoding="utf-8") == "verified-same-account-session"

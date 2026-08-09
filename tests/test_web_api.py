@@ -6,7 +6,7 @@ import zipfile
 
 from fastapi.testclient import TestClient
 
-from autody.web_api import create_app
+from autody.web_api import _scheduler_status_rows, create_app
 from autody.history import TaskHistoryStore, TaskRunRecord
 from autody.config import Target, load_config, save_config
 from autody.preflight import PreflightStore
@@ -168,6 +168,46 @@ def test_status_degrades_when_an_optional_scheduler_section_fails(
     assert response.status_code == 200
     assert response.json()["scheduler"] == []
     assert response.json()["statistics"]["next_daily_send"] is None
+
+
+def test_scheduler_status_marks_duplicate_or_drifted_windows_tasks(tmp_path: Path):
+    config = load_config(make_project(tmp_path))
+    live = {
+        "name": "AutoDy-DailySpark",
+        "state": "Ready",
+        "next_run": "2026-06-25T08:00:00",
+        "last_run": "",
+        "last_result": 0,
+        "start_boundary": "2026-06-24T08:00:00",
+    }
+
+    rows = _scheduler_status_rows(config, [live, dict(live)], 8)
+
+    send = next(row for row in rows if row["name"] == "AutoDy-DailySpark")
+    assert send["target_count"] == 8
+    assert send["configured_time"] == "07:30"
+    assert send["windows_time"] == "08:00"
+    assert send["duplicate_count"] == 1
+    assert send["drift"] is True
+
+
+def test_scheduler_status_marks_missing_windows_trigger_as_drift(tmp_path: Path):
+    config = load_config(make_project(tmp_path))
+    live = {
+        "name": "AutoDy-DailySpark",
+        "state": "Ready",
+        "next_run": "",
+        "last_run": "",
+        "last_result": None,
+        "start_boundary": "",
+    }
+
+    rows = _scheduler_status_rows(config, [live], 8)
+
+    send = next(row for row in rows if row["name"] == "AutoDy-DailySpark")
+    assert send["installed"] is True
+    assert send["windows_time"] is None
+    assert send["drift"] is True
 
 
 def test_service_identity_reports_local_runtime_without_private_browser_data(tmp_path: Path):
@@ -484,6 +524,7 @@ def test_target_settings_and_today_plan_are_test_center_routes(tmp_path: Path):
 
 def test_dashboard_and_plan_count_only_enabled_targets_with_executable_bindings(
     tmp_path: Path,
+    monkeypatch,
 ):
     config_path = make_project(tmp_path)
     config = load_config(config_path)
@@ -518,6 +559,19 @@ def test_dashboard_and_plan_count_only_enabled_targets_with_executable_bindings(
         encoding="utf-8",
     )
     _install_test_center(config_path)
+    monkeypatch.setattr(
+        "autody.web_api._task_rows",
+        lambda: [
+            {
+                "name": "AutoDy-DailySpark",
+                "state": "Ready",
+                "next_run": "2026-06-25T07:30:00",
+                "last_run": "2026-06-24T07:30:00",
+                "last_result": 0,
+                "start_boundary": "2026-06-24T07:30:00",
+            }
+        ],
+    )
     client = TestClient(
         create_app(config_path, now_provider=lambda: datetime(2026, 6, 24, 8, 0))
     )
@@ -529,6 +583,14 @@ def test_dashboard_and_plan_count_only_enabled_targets_with_executable_bindings(
 
     assert dashboard["today"]["total"] == 1
     assert dashboard["statistics"]["enabled_friend_count"] == 1
+    send_task = next(
+        task
+        for task in dashboard["scheduler"]
+        if task["name"] == "AutoDy-DailySpark"
+    )
+    assert send_task["target_count"] == 1
+    assert send_task["configured_time"] == "07:30"
+    assert send_task["drift"] is False
     assert plan["enabled_target_count"] == 1
     assert plan["pending_count"] == 1
     assert plan["blocked_count"] == 1
@@ -658,6 +720,153 @@ def test_status_exposes_target_failure_detail_in_overview_and_history(
     assert status["history"][0]["target_failures"]["target-one"][
         "suggested_action_zh"
     ] == "仅重试此目标"
+
+
+def test_daily_summary_uses_each_targets_latest_execution_result(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets[0].stable_id = "target-one"
+    config.targets[1].stable_id = "target-two"
+    save_config(config_path, config)
+
+    original_failure = failure_detail(
+        "conversation_not_found",
+        stage="conversation_located",
+        run_id="run-morning-failure",
+        target_stable_id="target-one",
+        binding_valid=True,
+        account_scope_matches=True,
+    )
+    state_path = tmp_path / "data" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    daily = state["daily"]["2026-06-24"]
+    daily["succeeded"] = []
+    daily["failures"] = {"小明": "conversation_not_found"}
+    daily["target_failures"] = {
+        "target-one": original_failure.model_dump(mode="json")
+    }
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    store = TaskHistoryStore(
+        tmp_path / "data" / "history" / "task-runs.jsonl"
+    )
+    store.append(
+        TaskRunRecord(
+            run_id="run-morning-failure",
+            date="2026-06-24",
+            task_type="daily_send",
+            trigger_source="scheduled",
+            start_time="2026-06-24T09:00:00",
+            end_time="2026-06-24T09:01:00",
+            total_targets=2,
+            failed_count=1,
+            skipped_count=1,
+            final_status="retry_pending",
+            failed_target_ids=["target-one"],
+            target_failures={"target-one": original_failure},
+        )
+    )
+    store.append(
+        TaskRunRecord(
+            run_id="run-evening-success",
+            date="2026-06-24",
+            task_type="daily_send",
+            trigger_source="retry",
+            start_time="2026-06-24T19:30:00",
+            end_time="2026-06-24T19:31:00",
+            total_targets=2,
+            success_count=1,
+            skipped_count=1,
+            final_status="completed",
+            confirmation_results={"target-one": "retry_confirmed"},
+        )
+    )
+
+    _install_test_center(config_path)
+    client = TestClient(create_app(config_path))
+    status = client.get("/api/status?today=2026-06-24").json()
+    plan = client.get(
+        "/api/modules/autody-test-center/today-plan?today=2026-06-24"
+    )
+
+    assert status["statistics"]["successful_today"] == 1
+    assert status["statistics"]["failed_today"] == 0
+    assert status["today"] == {
+        "date": "2026-06-24",
+        "message": "早安",
+        "succeeded": 1,
+        "failed": 0,
+        "total": 2,
+        "complete": False,
+    }
+    assert next(
+        friend for friend in status["friends"]
+        if friend["target_id"] == "target-one"
+    )["status"] == "success"
+    assert status["history"][1]["target_failures"]["target-one"][
+        "resolved"
+    ] is True
+    assert plan.status_code == 200
+    assert plan.json()["completed_count"] == 1
+    assert plan.json()["pending_count"] == 1
+    assert plan.json()["blocked_count"] == 0
+
+
+def test_daily_summary_uses_target_day_history_beyond_recent_dashboard_page(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets[0].stable_id = "target-one"
+    save_config(config_path, config)
+
+    state_path = tmp_path / "data" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    daily = state["daily"]["2026-06-24"]
+    daily["succeeded"] = []
+    daily["failures"] = {"小明": "conversation_not_found"}
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    store = TaskHistoryStore(
+        tmp_path / "data" / "history" / "task-runs.jsonl"
+    )
+    store.append(
+        TaskRunRecord(
+            run_id="run-retry-success",
+            date="2026-06-24",
+            task_type="daily_send",
+            trigger_source="retry",
+            start_time="2026-06-24T19:30:00",
+            end_time="2026-06-24T19:31:00",
+            total_targets=2,
+            success_count=1,
+            skipped_count=1,
+            final_status="completed",
+            confirmation_results={"target-one": "retry_confirmed"},
+        )
+    )
+    for index in range(31):
+        store.append(
+            TaskRunRecord(
+                run_id=f"later-health-check-{index}",
+                date="2026-06-25",
+                task_type="health_check",
+                trigger_source="scheduled",
+                start_time="2026-06-25T08:00:00",
+                end_time="2026-06-25T08:00:01",
+                total_targets=0,
+                final_status="completed",
+            )
+        )
+
+    status = TestClient(create_app(config_path)).get(
+        "/api/status?today=2026-06-24"
+    ).json()
+
+    assert status["statistics"]["successful_today"] == 1
+    assert status["statistics"]["failed_today"] == 0
 
 
 def test_status_current_health_rejects_missing_binding_and_unavailable_snapshot(

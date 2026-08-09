@@ -676,11 +676,62 @@ def _history_failure_views(
     return views
 
 
+def _effective_daily_target_statuses(
+    config: AppConfig,
+    state,
+    day: date,
+    records: list | None = None,
+) -> dict[str, str]:
+    """Return each executable target's latest effective result for ``day``.
+
+    The daily state remains the compatibility fallback for legacy data. Modern
+    structured history is authoritative whenever it contains a target-level
+    event, so a later confirmed retry resolves an earlier failure without
+    deleting that historical failure record.
+    """
+    daily = state.daily.get(day.isoformat(), {})
+    succeeded_names = set(daily.get("succeeded", []))
+    failed_names = set(daily.get("failures", {}))
+    targets = enabled_execution_targets(config)
+    statuses = {
+        _target_id(target): (
+            "success"
+            if target.name in succeeded_names
+            else "failed"
+            if target.name in failed_names
+            else "pending"
+        )
+        for target in targets
+    }
+    if records is None:
+        records = TaskHistoryStore(
+            config.state_file.parent / "history" / "task-runs.jsonl"
+        ).query(start_date=day, end_date=day, page_size=100).items
+    target_ids = set(statuses)
+    event_statuses: dict[str, str] = {}
+    for record in reversed(records):
+        if record.task_type != "daily_send" or record.date != day.isoformat():
+            continue
+        failed_target_ids = set(record.failed_target_ids) | set(
+            record.target_failures
+        )
+        for target_id in failed_target_ids & target_ids:
+            event_statuses[target_id] = "failed"
+        for target_id, result in record.confirmation_results.items():
+            if target_id in target_ids and result in {
+                "confirmed",
+                "retry_confirmed",
+            }:
+                event_statuses[target_id] = "success"
+    statuses.update(event_statuses)
+    return statuses
+
+
 def _today_plan(config: AppConfig, state, day: date, overrides: dict[str, dict] | None = None) -> dict:
     daily = state.daily.get(day.isoformat(), {})
-    succeeded = set(daily.get("succeeded", []))
     failures = daily.get("failures", {})
     executable = enabled_execution_targets(config)
+    effective_statuses = _effective_daily_target_statuses(config, state, day)
     executable_ids = {id(target) for target in executable}
     normalized: dict[str, int] = defaultdict(int)
     for target in executable:
@@ -699,7 +750,12 @@ def _today_plan(config: AppConfig, state, day: date, overrides: dict[str, dict] 
         ambiguous = normalized[" ".join(target.name.split()).casefold()] > 1
         failure = failures.get(target.name)
         code = _failure_code(failure, daily.get("confirmation_results", {}).get(identity)) if failure else None
-        status = "success" if target.name in succeeded else "blocked" if binding_missing or ambiguous or code == "blocked_ambiguous_target" else "failed" if failure else "pending"
+        effective_status = effective_statuses.get(identity)
+        status = (
+            "blocked"
+            if binding_missing or ambiguous or code == "blocked_ambiguous_target"
+            else effective_status or "pending"
+        )
         if status == "blocked":
             blocked += 1
         settings = _effective_target_settings(target, config, (overrides or {}).get(identity))
@@ -852,9 +908,13 @@ foreach($name in @('AutoDy-Health-Daily','AutoDy-DailySpark','AutoDy-Health-Week
   $task=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
   if($task){
     $info=Get-ScheduledTaskInfo -TaskName $name
+    $trigger=$task.Triggers | Select-Object -First 1
+    $startBoundary=''
+    if($trigger){$startBoundary=[string]$trigger.StartBoundary}
     $rows += [pscustomobject]@{
       name=$name; state=[string]$task.State; next_run=$info.NextRunTime.ToString('s');
-      last_run=$info.LastRunTime.ToString('s'); last_result=$info.LastTaskResult
+      last_run=$info.LastRunTime.ToString('s'); last_result=$info.LastTaskResult;
+      start_boundary=$startBoundary
     }
   }
 }
@@ -875,6 +935,69 @@ $rows | ConvertTo-Json -Compress
         return data if isinstance(data, list) else [data]
     except Exception:
         return []
+
+
+def _scheduler_status_rows(
+    config: AppConfig,
+    rows: list[dict],
+    executable_target_count: int,
+) -> list[dict]:
+    """Combine configured intent with the small live Windows task snapshot."""
+    expected = {
+        "AutoDy-Health-Daily": (True, config.daily_health_check_time, None),
+        "AutoDy-DailySpark": (
+            True,
+            config.daily_send_time,
+            executable_target_count,
+        ),
+        "AutoDy-Health-Weekly": (
+            config.weekly_health_check_enabled,
+            config.weekly_health_check_time,
+            None,
+        ),
+    }
+    by_name: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        name = str(row.get("name", ""))
+        if name in expected:
+            by_name[name].append(row)
+
+    result = []
+    for name, (configured_enabled, configured_time, target_count) in expected.items():
+        matches = by_name[name]
+        live = matches[0] if matches else {}
+        installed = bool(matches)
+        state = str(live.get("state") or "Missing")
+        windows_enabled = installed and state.casefold() != "disabled"
+        start_boundary = str(live.get("start_boundary") or "")
+        time_match = re.search(r"T(\d{2}:\d{2})", start_boundary)
+        windows_time = time_match.group(1) if time_match else None
+        drift = (
+            len(matches) > 1
+            or windows_enabled != configured_enabled
+            or (
+                configured_enabled
+                and installed
+                and windows_time != configured_time
+            )
+        )
+        result.append(
+            {
+                "name": name,
+                "state": state,
+                "next_run": live.get("next_run") or "",
+                "last_run": live.get("last_run") or "",
+                "last_result": live.get("last_result"),
+                "installed": installed,
+                "configured_enabled": configured_enabled,
+                "configured_time": configured_time,
+                "windows_time": windows_time,
+                "target_count": target_count,
+                "duplicate_count": max(0, len(matches) - 1),
+                "drift": drift,
+            }
+        )
+    return result
 
 
 def _portable_config(config_path: Path, config: AppConfig) -> bytes:
@@ -1221,9 +1344,26 @@ def create_app(
         succeeded = set(daily.get("succeeded", []))
         failures = daily.get("failures", {})
         executable_targets = enabled_execution_targets(config)
-        executable_names = {target.name for target in executable_targets}
-        executable_succeeded = succeeded & executable_names
-        executable_failures = executable_names & set(failures)
+        history_store = TaskHistoryStore(
+            config.state_file.parent / "history" / "task-runs.jsonl"
+        )
+        bootstrap_legacy_daily_history(history_store, state.daily, len(config.targets))
+        history_page = history_store.query(page_size=30)
+        effective_statuses = _effective_daily_target_statuses(
+            config,
+            state,
+            date.fromisoformat(key),
+        )
+        executable_succeeded = {
+            target_id
+            for target_id, target_status in effective_statuses.items()
+            if target_status == "success"
+        }
+        executable_failures = {
+            target_id
+            for target_id, target_status in effective_statuses.items()
+            if target_status == "failed"
+        }
         discovered = load_discovered_friends(
             config.state_file.parent / "discovered_friends.json"
         )
@@ -1231,9 +1371,17 @@ def create_app(
         binding_guarded = bindings_revalidation_required(config.state_file.parent)
         friends = []
         for target in config.targets:
-            detail = _daily_failure_detail(config, target, daily)
+            target_id = _target_id(target)
+            effective_status = effective_statuses.get(target_id)
+            detail = (
+                None
+                if effective_status == "success"
+                else _daily_failure_detail(config, target, daily)
+            )
             friend_status = (
-                "success"
+                effective_status
+                if effective_status is not None
+                else "success"
                 if target.name in succeeded
                 else "failed"
                 if detail is not None
@@ -1241,7 +1389,7 @@ def create_app(
             )
             friends.append(
                 {
-                    "target_id": _target_id(target),
+                    "target_id": target_id,
                     "name": target.name,
                     "status": friend_status,
                     "error": (
@@ -1263,9 +1411,6 @@ def create_app(
                     ),
                 }
             )
-        history_store = TaskHistoryStore(config.state_file.parent / "history" / "task-runs.jsonl")
-        bootstrap_legacy_daily_history(history_store, state.daily, len(config.targets))
-        history_page = history_store.query(page_size=30)
         records = list(reversed(history_page.items))
         history_failure_views = _history_failure_views(
             config,
@@ -1289,10 +1434,17 @@ def create_app(
             }
             for index, item in enumerate(history_page.items)
         ]
+        scheduler_available = True
         try:
             tasks = cached_task_rows()
         except Exception:
             tasks = []
+            scheduler_available = False
+        scheduler_rows = (
+            _scheduler_status_rows(config, tasks, len(executable_targets))
+            if scheduler_available
+            else []
+        )
         message_count = _message_count(config.messages_file)
         next_run = next(
             (
@@ -1424,7 +1576,7 @@ def create_app(
             },
             "friends": friends,
             "history": history[:30],
-            "scheduler": tasks,
+            "scheduler": scheduler_rows,
             "next_run": next_run,
             "login": {"status": login_status},
             "message_count": message_count,
