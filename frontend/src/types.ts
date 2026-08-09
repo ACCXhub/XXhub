@@ -62,7 +62,14 @@ export interface SchedulerTask {
   state: string;
   next_run: string;
   last_run: string;
-  last_result: number;
+  last_result: number | null;
+  installed: boolean;
+  configured_enabled: boolean;
+  configured_time: string;
+  windows_time: string | null;
+  target_count: number | null;
+  duplicate_count: number;
+  drift: boolean;
 }
 
 export interface ScheduleSettings {

@@ -1,4 +1,4 @@
-import { Check, Radar, RefreshCw, Trash2 } from "lucide-react";
+import { Radar, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { AppConfig, ConfiguredFriend, FriendDiscovery } from "../types";
@@ -35,7 +35,6 @@ export function FriendsPage({
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [friends, setFriends] = useState<ConfiguredFriend[]>([]);
   const [discovery, setDiscovery] = useState<FriendDiscovery | null>(null);
-  const [batchSelected, setBatchSelected] = useState<Set<string>>(() => new Set());
   const [busyAction, setBusyAction] = useState<"scan" | "avatar" | null>(null);
   const [addingCandidateId, setAddingCandidateId] = useState<string | null>(null);
   const [targetMutationId, setTargetMutationId] = useState<string | null>(null);
@@ -49,7 +48,7 @@ export function FriendsPage({
       ]);
       setConfig(nextConfig);
       setFriends(nextFriends.friends);
-      setDiscovery(nextDiscovery.scanned_at ? nextDiscovery : null);
+      setDiscovery(nextDiscovery);
       return nextDiscovery;
     } catch (error) {
       notify(error instanceof Error ? error.message : "好友配置加载失败");
@@ -175,64 +174,79 @@ export function FriendsPage({
     }
   };
 
-  const batch = async (action: "enable" | "disable" | "delete") => {
-    if (!batchSelected.size) return notify("请先勾选好友");
-    if (action === "delete" && !window.confirm(`删除所选 ${batchSelected.size} 位好友？`)) return;
-    try {
-      const result = await api.friendBatch([...batchSelected], action);
-      await load();
-      onDataChanged?.();
-      setBatchSelected(new Set());
-      notify(`已处理 ${result.affected} 位好友`);
-    } catch (error) {
-      notify(error instanceof Error ? error.message : "批量操作失败");
-    }
-  };
-
-  const setTargetEnabled = (targetId: string, enabled: boolean) => {
+  const setTargetsEnabled = (targetIds: string[], enabled: boolean) => {
+    const ids = new Set(targetIds);
     setFriends((current) => current.map((friend) => (
-      (friend.target_id || friend.id) === targetId
+      ids.has(friend.target_id || friend.id || "")
         ? { ...friend, enabled }
         : friend
     )));
     setDiscovery((current) => current ? {
       ...current,
       candidates: current.candidates.map((candidate) => (
-        candidate.configured_target_id === targetId || candidate.target_id === targetId
+        ids.has(candidate.configured_target_id || candidate.target_id || "")
           ? { ...candidate, enabled, configured_enabled: enabled }
           : candidate
       ))
     } : current);
   };
 
-  const toggleContinuationTarget = async (
-    targetId: string,
-    enabled: boolean,
+  const removeTargets = (targetIds: string[]) => {
+    const ids = new Set(targetIds);
+    setFriends((current) => current.filter((friend) => !ids.has(friend.target_id || friend.id || "")));
+    setDiscovery((current) => current ? {
+      ...current,
+      candidates: current.candidates.map((candidate) => (
+        ids.has(candidate.configured_target_id || candidate.target_id || "")
+          ? {
+              ...candidate,
+              match_status: "unconfigured",
+              configured: false,
+              target_id: null,
+              configured_target_id: null,
+              enabled: null,
+              configured_enabled: null
+            }
+          : candidate
+      ))
+    } : current);
+  };
+
+  const mutateTargets = async (
+    targetIds: string[],
+    action: "enable" | "disable" | "delete",
+    mutationId: string,
   ) => {
-    if (targetMutationId) return;
-    setTargetMutationId(targetId);
+    if (!targetIds.length || targetMutationId) return;
+    setTargetMutationId(mutationId);
     try {
-      const result = await api.friendBatch(
-        [targetId],
-        enabled ? "enable" : "disable",
-      );
-      if (result.affected !== 1) throw new Error("续火目标状态未更新");
-      setTargetEnabled(targetId, enabled);
+      const result = await api.friendBatch(targetIds, action);
+      if (result.affected !== targetIds.length) throw new Error("好友记录未完整更新");
+      if (action === "delete") removeTargets(targetIds);
+      else setTargetsEnabled(targetIds, action === "enable");
       onDataChanged?.();
-      notify(enabled ? "已加入续火" : "已取消续火");
+      notify(action === "enable" ? "已加入续火" : action === "disable" ? "已取消续火" : `已删除 ${result.affected} 位好友记录`);
       void load();
     } catch (error) {
-      notify(error instanceof Error ? error.message : "续火目标更新失败");
+      await load();
+      notify(error instanceof Error ? error.message : "好友记录更新失败");
     } finally {
       setTargetMutationId(null);
     }
   };
 
-  const visibleTargetIds = friends
+  const toggleContinuationTarget = async (
+    targetId: string,
+    enabled: boolean,
+  ) => {
+    await mutateTargets([targetId], enabled ? "enable" : "disable", targetId);
+  };
+
+  const allTargetIds = friends
     .map((friend) => friend.target_id || friend.id)
     .filter((targetId): targetId is string => Boolean(targetId));
-  const allTargetsSelected = visibleTargetIds.length > 0
-    && visibleTargetIds.every((targetId) => batchSelected.has(targetId));
+  const enabledFriends = friends.filter((friend) => friend.enabled);
+  const disabledFriends = friends.filter((friend) => !friend.enabled);
 
   return (
     <section className="editor-page">
@@ -245,32 +259,39 @@ export function FriendsPage({
       </header>
 
       <div className="panel form-panel">
-        <div className="panel-heading"><h2>续火目标</h2><span className="inline-actions"><label className="select-all-control"><input aria-label="全选续火目标" type="checkbox" checked={allTargetsSelected} onChange={(event) => setBatchSelected(event.target.checked ? new Set(visibleTargetIds) : new Set())} />全选</label><strong className="selection-count">已选择 {batchSelected.size} 个目标</strong><button className="text-button" onClick={() => void batch("enable")}>批量启用</button><button className="text-button" onClick={() => void batch("disable")}>批量停用</button><button className="text-button" onClick={() => void batch("delete")}>批量删除记录</button></span></div>
+        <div className="panel-heading"><h2>续火目标 <small>{enabledFriends.length}</small></h2><span className="inline-actions"><button className="text-button" disabled={!allTargetIds.length || targetMutationId !== null} onClick={() => void mutateTargets(allTargetIds, "enable", "all")}>全部启用</button><button className="text-button" disabled={!allTargetIds.length || targetMutationId !== null} onClick={() => void mutateTargets(allTargetIds, "disable", "all")}>全部停用</button><button className="text-button danger-link" disabled={!allTargetIds.length || targetMutationId !== null} onClick={() => { if (window.confirm(`删除全部 ${allTargetIds.length} 位好友记录？此操作不会作为取消续火处理。`)) void mutateTargets(allTargetIds, "delete", "all"); }}>全部删除</button></span></div>
         {duplicateTargets.length ? <p className="discovery-progress">检测到重复昵称的启用目标；为避免选错聊天，自动发送会跳过这些目标。</p> : null}
         <div className="friend-editor-list">
-          {friends.map((friend) => {
+          {enabledFriends.map((friend) => {
             const targetId = friend.target_id || friend.id;
             if (!targetId) return null;
-            const toggle = () => setBatchSelected((current) => { const next = new Set(current); if (next.has(targetId)) next.delete(targetId); else next.add(targetId); return next; });
-            const selected = batchSelected.has(targetId);
-            return <div className={`friend-editor-row${selected ? " selected" : ""}${friend.enabled ? "" : " disabled-target"}`} key={targetId} role="button" tabIndex={0} aria-selected={selected} onClick={toggle} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle(); } }}>
-              <input className="row-check" aria-label={`选择 ${friend.display_name}`} type="checkbox" checked={batchSelected.has(targetId)} onClick={(event) => event.stopPropagation()} onChange={(event) => { const next = new Set(batchSelected); if (event.target.checked) next.add(targetId); else next.delete(targetId); setBatchSelected(next); }} />
+            const cancel = () => void toggleContinuationTarget(targetId, false);
+            return <div className="friend-editor-row" key={targetId} role="button" tabIndex={0} aria-label={`取消续火 ${friend.display_name}`} aria-disabled={targetMutationId !== null} onClick={cancel} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); cancel(); } }}>
               <FriendAvatar name={friend.display_name} url={friend.avatar_url} />
               <div className="friend-editor-copy">
                 <strong>{friend.display_name}</strong>
                 <small><span className={friend.enabled ? "target-status" : "target-status paused"}>{friend.enabled ? "已启用" : "已停用"}</span>{friend.binding_status === "revalidation_required" ? <span className="target-status paused">绑定待重新验证</span> : todayLabel(friend.today_status)}{friend.binding_status !== "revalidation_required" && friend.last_success_date ? ` · 最近成功：${friend.last_success_date}` : ""}</small>
               </div>
-              {selected ? <span className="selection-indicator" aria-label="已选择"><Check size={13} /></span> : null}
-              <button className="text-button friend-target-toggle" aria-label={`${friend.enabled ? "取消续火" : "加入续火"} ${friend.display_name}`} disabled={targetMutationId !== null} onClick={(event) => { event.stopPropagation(); void toggleContinuationTarget(targetId, !friend.enabled); }}>{targetMutationId === targetId ? "保存中…" : friend.enabled ? "取消续火" : "加入续火"}</button>
-              <button className="icon-button danger" aria-label={`删除目标 ${friend.display_name}`} title="删除目标" onClick={(event) => { event.stopPropagation(); if (window.confirm(`删除目标「${friend.display_name}」？`)) void api.friendBatch([targetId], "delete").then(async () => { await load(); onDataChanged?.(); }); }}><Trash2 size={17} /></button>
+              <small className="friend-row-hint">{targetMutationId === targetId ? "保存中…" : "点击取消续火"}</small>
+              <button className="icon-button danger" aria-label={`删除目标 ${friend.display_name}`} title="删除目标" disabled={targetMutationId !== null} onClick={(event) => { event.stopPropagation(); if (window.confirm(`删除目标「${friend.display_name}」？`)) void mutateTargets([targetId], "delete", targetId); }}><Trash2 size={17} /></button>
             </div>;
           })}
+          {!enabledFriends.length ? <p className="empty-list-copy">暂无启用的续火目标，可从候选好友中点击加入。</p> : null}
         </div>
       </div>
 
       {discovery ? <section className="panel discovery-panel">
         <div className="panel-heading"><div><h2>识别到的候选好友</h2><small className="discovery-status">候选好友来自本地缓存{discovery.scanned_at ? ` · 上次扫描：${discovery.scanned_at.replace("T", " ")}` : ""}{discovery.stale ? " · 缓存待更新" : " · 缓存当前"}</small>{discovery.refresh_running ? <small className="discovery-progress">{discovery.progress?.message ?? "正在后台更新候选好友和头像…"}{discovery.progress?.current ? `：已识别 ${discovery.progress.current}${discovery.progress.total ? ` / ${discovery.progress.total}` : ""}` : ""}</small> : null}{discovery.progress?.status === "partial_timeout" ? <small className="discovery-progress">扫描超时，已保留上次结果。</small> : null}</div></div>
-        <div className="candidate-grid">{discovery.candidates.filter((candidate) => candidate.presence_status !== "stale").sort((left, right) => {
+        <div className="candidate-grid">{disabledFriends.map((friend) => {
+          const targetId = friend.target_id || friend.id;
+          if (!targetId) return null;
+          const join = () => void toggleContinuationTarget(targetId, true);
+          return <div className="candidate stored-candidate" key={`stored-${targetId}`} role="button" tabIndex={0} aria-label={`加入续火 ${friend.display_name}`} aria-disabled={targetMutationId !== null} onClick={join} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); join(); } }}>
+            <FriendAvatar name={friend.display_name} url={friend.avatar_url} />
+            <span>{friend.display_name}</span><small>{targetMutationId === targetId ? "保存中…" : "点击加入续火目标"}</small>
+            <button className="icon-button danger" aria-label={`删除目标 ${friend.display_name}`} title="删除目标" disabled={targetMutationId !== null} onClick={(event) => { event.stopPropagation(); if (window.confirm(`删除目标「${friend.display_name}」？`)) void mutateTargets([targetId], "delete", targetId); }}><Trash2 size={16} /></button>
+          </div>;
+        })}{discovery.candidates.filter((candidate) => candidate.presence_status !== "stale" && !candidate.configured && candidate.match_status !== "configured").sort((left, right) => {
           const group = (candidate: FriendDiscovery["candidates"][number]) => candidate.presence_status === "stale" ? 2 : candidate.configured ? 1 : 0;
           return group(left) - group(right);
         }).map((candidate) => {

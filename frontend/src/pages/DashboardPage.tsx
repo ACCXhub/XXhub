@@ -1,5 +1,5 @@
 import { Fragment, useState } from "react";
-import { AlertTriangle, ArchiveRestore, CalendarPlus2, Download, Play, ScanLine, ShieldCheck, Wrench } from "lucide-react";
+import { AlertTriangle, ArchiveRestore, CalendarPlus2, ChevronDown, Download, Play, ScanLine, ShieldCheck, Wrench } from "lucide-react";
 import { ActionButton } from "../components/ActionButton";
 import { StatusRail } from "../components/StatusRail";
 import type { DashboardStatus, FailureDetail } from "../types";
@@ -131,7 +131,7 @@ export function DashboardPage({
   onNavigate: (view: ViewName) => void;
   onRetryTargets?: (targetIds: string[]) => void;
 }) {
-  const [expandedFailureGroup, setExpandedFailureGroup] = useState<string | null>(null);
+  const [expandedRun, setExpandedRun] = useState<string | null>(null);
   const { historyRows, groupsByRow } = groupedHistoryFailures(status);
   const safeRetryTargetIds = status.friends.flatMap((friend) => (
     friend.target_id
@@ -153,8 +153,8 @@ export function DashboardPage({
     status.friends.find((friend) => friend.target_id === targetId)?.name
     || "失败目标"
   );
-  const toggleFailureGroup = (key: string) => {
-    setExpandedFailureGroup((current) => current === key ? null : key);
+  const toggleRun = (key: string) => {
+    setExpandedRun((current) => current === key ? null : key);
   };
   return (
     <>
@@ -178,62 +178,72 @@ export function DashboardPage({
         <section className="panel history-panel">
           <div className="panel-heading"><h2>结构化运行记录</h2><span className="inline-actions"><span>{status.history.length} 条记录</span>{groupsByRow.size ? <button className="action-button primary" disabled={!!busy || !safeRetryTargetIds.length || !onRetryTargets} onClick={() => onRetryTargets?.(safeRetryTargetIds)}>重试所有目标</button> : null}</span></div>
           <div className="table-wrap">
-            <table>
+            <table aria-label="结构化运行记录">
               <thead><tr><th>结束时间</th><th>来源</th><th>成功/总数</th><th>重试</th><th>状态</th></tr></thead>
               <tbody>
-                {historyRows.map((row, rowIndex) => (
-                  <Fragment key={`${row.run_id}-${row.end_time}-${rowIndex}`}>
-                    <tr>
+                {historyRows.map((row, rowIndex) => {
+                  const groups = groupsByRow.get(rowIndex) || [];
+                  const anomalyCount = groups.reduce((total, group) => total + group.items.length, 0);
+                  const runKey = `${row.run_id}-${row.end_time}-${rowIndex}`;
+                  const expanded = expandedRun === runKey;
+                  const toggle = () => anomalyCount && toggleRun(runKey);
+                  return (
+                  <Fragment key={runKey}>
+                    <tr
+                      className={anomalyCount ? "history-run-row expandable" : "history-run-row"}
+                      role={anomalyCount ? "button" : undefined}
+                      tabIndex={anomalyCount ? 0 : undefined}
+                      aria-expanded={anomalyCount ? expanded : undefined}
+                      aria-label={anomalyCount ? `运行记录异常详情，${anomalyCount} 个目标` : undefined}
+                      onClick={toggle}
+                      onKeyDown={(event) => {
+                        if (anomalyCount && (event.key === "Enter" || event.key === " ")) {
+                          event.preventDefault();
+                          toggleRun(runKey);
+                        }
+                      }}
+                    >
                       <td>{new Date(row.end_time).toLocaleString("zh-CN")}</td>
                       <td>{triggerLabel[row.trigger_source]}</td>
-                      <td>{row.success_count + row.skipped_count}/{row.total_targets}</td>
+                      <td>{row.success_count}/{row.total_targets}</td>
                       <td>{row.retry_count}</td>
-                      <td><span className={row.final_status === "completed" || row.final_status === "already_done" ? "tag success" : "tag warning"}>{row.final_status === "completed" || row.final_status === "already_done" ? "成功" : "部分失败"}</span></td>
+                      <td className="history-run-status">
+                        <span className={row.final_status === "completed" || row.final_status === "already_done" ? "tag success" : "tag warning"}>{row.final_status === "completed" || row.final_status === "already_done" ? "成功" : "部分失败"}</span>
+                        {anomalyCount ? <span className="history-anomaly-count"><AlertTriangle size={14} />{anomalyCount} 项异常<ChevronDown className={expanded ? "expanded" : ""} size={15} /></span> : null}
+                      </td>
                     </tr>
-                    {(groupsByRow.get(rowIndex) || []).map((group) => {
-                      const expanded = expandedFailureGroup === group.key;
-                      const first = group.items[0].failure;
-                      const retryable = group.items.some(({ failure }) => (
-                        !failure.resolved
-                        && (failure.retry_action_available ?? failure.safe_retry_available)
-                      ));
-                      const statusText = group.resolved
-                        ? "已解决"
-                        : retryable
-                          ? "可安全重试"
-                          : "需要人工处理";
-                      const targetNames = group.items.map(({ targetId }) => targetName(targetId));
-                      return (
-                        <tr className={group.resolved ? "history-failure-row resolved" : "history-failure-row"} key={group.key}>
-                          <td colSpan={5}>
-                            <button
-                              type="button"
-                              className={group.resolved ? "history-failure-summary resolved" : "history-failure-summary"}
-                              aria-expanded={expanded}
-                              aria-label={`${group.label}，${group.items.length} 个目标`}
-                              onClick={() => toggleFailureGroup(group.key)}
-                            >
-                              <time>{new Date(first.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })}</time>
+                    {expanded ? <tr className="history-run-detail-row"><td colSpan={5}>
+                      <div className="history-run-detail">
+                        {groups.map((group) => {
+                          const first = group.items[0].failure;
+                          const retryable = group.items.some(({ failure }) => (
+                            !failure.resolved
+                            && (failure.retry_action_available ?? failure.safe_retry_available)
+                          ));
+                          const statusText = group.resolved
+                            ? "历史失败 · 已解决"
+                            : retryable
+                              ? "历史失败 · 当前可重试"
+                              : "历史失败 · 需要人工处理";
+                          return <article className={group.resolved ? "history-anomaly-group resolved" : "history-anomaly-group"} key={group.key}>
+                            <div className="history-anomaly-heading">
                               <strong>{group.label} · {group.items.length} 个目标</strong>
                               <span className={group.resolved ? "tag success" : "tag warning"}>{group.resolved ? "已解决" : "异常"}</span>
-                            </button>
-                            {expanded ? <div className={group.resolved ? "history-failure-detail resolved" : "history-failure-detail"}>
-                              <strong>{group.label}</strong>
-                              <p>{failureGroupDescription(group.label, group.items.length)}</p>
-                              <div className="history-failure-detail-grid">
-                                <span>时间：{new Date(first.timestamp).toLocaleString("zh-CN")}</span>
-                                <span>失败阶段：{stageLabel[first.stage] || first.stage}</span>
-                                <span>当前状态：{statusText}</span>
-                                <span>受影响目标：{group.items.length} 个</span>
-                              </div>
-                              <small>{targetNames.join(" · ")}</small>
-                            </div> : null}
-                          </td>
-                        </tr>
-                      );
-                    })}
+                            </div>
+                            <p>{failureGroupDescription(group.label, group.items.length)}</p>
+                            <div className="history-failure-detail-grid">
+                              <span>时间：{new Date(first.timestamp).toLocaleString("zh-CN")}</span>
+                              <span>失败阶段：{stageLabel[first.stage] || first.stage}</span>
+                              <span>当前状态：{statusText}</span>
+                              <span>受影响目标：{group.items.length} 个</span>
+                            </div>
+                            <small>{group.items.map(({ targetId }) => targetName(targetId)).join(" · ")}</small>
+                          </article>;
+                        })}
+                      </div>
+                    </td></tr> : null}
                   </Fragment>
-                ))}
+                );})}
               </tbody>
             </table>
           </div>

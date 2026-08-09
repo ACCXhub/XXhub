@@ -101,17 +101,23 @@ test("groups eight same-event failures into one collapsed anomaly summary", () =
 
   render(<DashboardPage status={partial} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} onRetryTargets={retryAll} />);
 
-  const summary = screen.getByRole("button", { name: "会话定位异常，8 个目标" });
-  expect(screen.getAllByText("会话定位异常 · 8 个目标")).toHaveLength(1);
+  const runRow = screen.getByRole("button", { name: "运行记录异常详情，8 个目标" });
+  const runTable = screen.getByRole("table", { name: "结构化运行记录" });
+  expect(runTable.querySelectorAll("tbody > tr")).toHaveLength(1);
+  expect(within(runRow).getByText("8 项异常")).toBeInTheDocument();
+  expect(screen.queryByText("会话定位异常 · 8 个目标")).not.toBeInTheDocument();
   expect(screen.queryByText("8 个目标在本次执行中未完成会话定位。")).not.toBeInTheDocument();
   expect(screen.getAllByRole("button", { name: "重试所有目标" })).toHaveLength(1);
   expect(screen.queryByRole("button", { name: "仅重试此目标" })).not.toBeInTheDocument();
 
-  fireEvent.click(summary);
+  fireEvent.click(runRow);
+  expect(runTable.querySelectorAll("tbody > tr")).toHaveLength(2);
+  expect(screen.getByText("会话定位异常 · 8 个目标")).toBeInTheDocument();
   expect(screen.getByText("8 个目标在本次执行中未完成会话定位。")).toBeInTheDocument();
   expect(screen.getByText(/受影响目标：8 个/)).toBeInTheDocument();
 
-  fireEvent.click(summary);
+  fireEvent.click(runRow);
+  expect(runTable.querySelectorAll("tbody > tr")).toHaveLength(1);
   expect(screen.queryByText("8 个目标在本次执行中未完成会话定位。")).not.toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("button", { name: "重试所有目标" }));
@@ -171,8 +177,8 @@ test("retry-all excludes manual-action and later-resolved failure groups", () =>
   fireEvent.click(screen.getByRole("button", { name: "重试所有目标" }));
 
   expect(retryAll).toHaveBeenCalledWith(["target-safe"]);
+  fireEvent.click(screen.getByRole("button", { name: "运行记录异常详情，3 个目标" }));
   expect(screen.getAllByText("已解决").length).toBeGreaterThan(0);
-  fireEvent.click(screen.getByRole("button", { name: "目标绑定异常，1 个目标" }));
   expect(screen.getByText(/需要人工处理/)).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "仅重试此目标" })).not.toBeInTheDocument();
 });
