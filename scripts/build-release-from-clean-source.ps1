@@ -43,7 +43,7 @@ try {
 
 & (Join-Path $PSScriptRoot 'build-portable.ps1') -Version $Version
 if ($LASTEXITCODE -ne 0) { throw 'Portable build failed.' }
-& (Join-Path $PSScriptRoot 'build-msi.ps1') -Version $Version
+& (Join-Path $PSScriptRoot 'build-msi.ps1') -Version $Version -Commit $Commit
 if ($LASTEXITCODE -ne 0) { throw 'MSI Release build failed.' }
 & (Join-Path $PSScriptRoot 'verify-release-artifacts.ps1') `
     -Version $Version -ArtifactDirectory $ReleaseDirectory -ReportDirectory $ReleaseDirectory

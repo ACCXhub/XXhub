@@ -1,6 +1,8 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
     [string]$Version = "1.4.2",
+    [ValidatePattern('^$|^[0-9a-fA-F]{40}$')]
+    [string]$Commit = '',
     [switch]$ReuseRuntime,
     [switch]$PlanOnly
 )
@@ -38,8 +40,22 @@ $WixCli = Join-Path $NuGetPackages 'wixtoolset.sdk\7.0.0\tools\net8.0\wix.dll'
 $WixUiExtension = Join-Path $NuGetPackages 'wixtoolset.ui.wixext\7.0.0\wixext7\WixToolset.UI.wixext.dll'
 $WixUtilExtension = Join-Path $NuGetPackages 'wixtoolset.util.wixext\7.0.0\wixext7\WixToolset.Util.wixext.dll'
 $BuiltMsi = Join-Path $DotnetOutput "AutoDy-$Version-x64.msi"
+if (Test-Path -LiteralPath (Join-Path $Root '.git')) {
+    $head = (& git -C $Root rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0 -or $head -notmatch '^[0-9a-fA-F]{40}$') {
+        throw 'Unable to resolve the current source commit.'
+    }
+    if ([string]::IsNullOrWhiteSpace($Commit)) {
+        $Commit = $head
+    } elseif ($Commit -ne $head) {
+        throw 'Requested MSI source commit does not match HEAD.'
+    }
+} elseif ([string]::IsNullOrWhiteSpace($Commit)) {
+    throw 'Pass -Commit when building an MSI from a source archive.'
+}
 $ProductCode = Get-ReproducibleMsiGuid -Purpose product -Version $Version
-$PackageCode = Get-ReproducibleMsiGuid -Purpose package -Version $Version
+$PackageCode = Get-ReproducibleMsiGuid `
+    -Purpose package -Version $Version -IdentitySeed $Commit
 $CompileArguments = @(
     'build', $WixProject, '--nologo', '--verbosity', 'quiet', '--no-incremental',
     '--configuration', $Configuration,
@@ -65,6 +81,7 @@ $LinkArguments = @(
 if ($PlanOnly) {
     [ordered]@{
         version = $Version
+        source_revision = $Commit.ToLowerInvariant()
         configuration = $Configuration
         release_directory = $ReleaseDirectory
         artifact = $Msi

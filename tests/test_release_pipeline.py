@@ -182,6 +182,14 @@ def test_public_build_plans_use_release_configuration_and_canonical_outputs(
     assert completed.returncode == 0, completed.stderr
     plans = json.loads(completed.stdout)
     assert plans["msi"]["configuration"] == "Release"
+    source_revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout.strip()
+    assert plans["msi"]["source_revision"] == source_revision
     assert plans["msi"]["artifact"].endswith(
         r"output\release\v1.4.2\AutoDy-1.4.2-x64.msi"
     )
@@ -195,6 +203,37 @@ def test_public_build_plans_use_release_configuration_and_canonical_outputs(
         token not in plans["msi"]["artifact"].casefold()
         for token in ("\\obj\\", "\\debug\\")
     )
+
+
+def test_msi_package_identity_changes_with_revision_without_changing_product_identity(
+    monkeypatch,
+):
+    monkeypatch.setenv("AUTODY_RELEASE_COMMON", str(RELEASE_COMMON))
+    completed = run_powershell(
+        r"""
+        $ErrorActionPreference = "Stop"
+        . $env:AUTODY_RELEASE_COMMON
+        [pscustomobject]@{
+          product_a = Get-ReproducibleMsiGuid `
+            -Purpose product -Version "1.4.2" -IdentitySeed ('a' * 40)
+          product_b = Get-ReproducibleMsiGuid `
+            -Purpose product -Version "1.4.2" -IdentitySeed ('b' * 40)
+          package_a = Get-ReproducibleMsiGuid `
+            -Purpose package -Version "1.4.2" -IdentitySeed ('a' * 40)
+          package_a_repeat = Get-ReproducibleMsiGuid `
+            -Purpose package -Version "1.4.2" -IdentitySeed ('a' * 40)
+          package_b = Get-ReproducibleMsiGuid `
+            -Purpose package -Version "1.4.2" -IdentitySeed ('b' * 40)
+        } | ConvertTo-Json -Compress
+        """,
+        env=dict(__import__("os").environ),
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    identities = json.loads(completed.stdout)
+    assert identities["product_a"] == identities["product_b"]
+    assert identities["package_a"] == identities["package_a_repeat"]
+    assert identities["package_a"] != identities["package_b"]
 
 
 def test_portable_release_archive_is_byte_reproducible(monkeypatch):

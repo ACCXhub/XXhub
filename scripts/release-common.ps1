@@ -22,12 +22,20 @@ function Get-ReproducibleMsiGuid {
         [string]$Purpose,
         [Parameter(Mandatory = $true)]
         [ValidatePattern('^\d+\.\d+\.\d+$')]
-        [string]$Version
+        [string]$Version,
+        [ValidatePattern('^$|^[0-9a-fA-F]{40}$')]
+        [string]$IdentitySeed = ''
     )
 
     $algorithm = [Security.Cryptography.SHA256]::Create()
     try {
         $value = "AutoDy MSI $Purpose identity:$Version"
+        if ($Purpose -eq 'package') {
+            if ([string]::IsNullOrWhiteSpace($IdentitySeed)) {
+                throw 'MSI package identity requires a source revision.'
+            }
+            $value += ":$($IdentitySeed.ToLowerInvariant())"
+        }
         $hash = $algorithm.ComputeHash([Text.Encoding]::UTF8.GetBytes($value))
         $guidBytes = New-Object byte[] 16
         [Array]::Copy($hash, $guidBytes, $guidBytes.Length)
