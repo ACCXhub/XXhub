@@ -147,6 +147,16 @@ jobs:
             -ArtifactDirectory $release `
             -PreviousMsiPath $previous `
             -ReportDirectory $release
+      - name: Upload MSI lifecycle diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autody-${{ env.AUTODY_RELEASE_VERSION }}-msi-lifecycle-diagnostics
+          path: |
+            output/release/v${{ env.AUTODY_RELEASE_VERSION }}/msi-lifecycle-report.json
+            output/release/v${{ env.AUTODY_RELEASE_VERSION }}/msi-lifecycle-report.md
+          if-no-files-found: warn
+          retention-days: 7
       - name: Write guarded release manifest
         shell: powershell
         run: .\scripts\write-release-manifest.ps1 -Version $env:AUTODY_RELEASE_VERSION -Commit $env:GITHUB_SHA

@@ -232,6 +232,26 @@ def test_ci_restores_wix_sdk_and_parses_release_scripts():
     assert "clean-windows-acceptance" in workflow
 
 
+def test_ci_uploads_msi_lifecycle_diagnostics_after_failure():
+    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    lifecycle_step = workflow.index(
+        "- name: Run clean-user MSI lifecycle and upgrade acceptance"
+    )
+    diagnostic_step = workflow.index(
+        "- name: Upload MSI lifecycle diagnostics", lifecycle_step
+    )
+    manifest_step = workflow.index("- name: Write guarded release manifest")
+    diagnostic_block = workflow[diagnostic_step:manifest_step]
+
+    assert lifecycle_step < diagnostic_step < manifest_step
+    assert "if: always()" in diagnostic_block
+    assert "uses: actions/upload-artifact@v4" in diagnostic_block
+    assert "msi-lifecycle-report.json" in diagnostic_block
+    assert "msi-lifecycle-report.md" in diagnostic_block
+    assert "if-no-files-found: warn" in diagnostic_block
+
+
 def test_release_workflow_publishes_only_versioned_public_assets():
     workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
 
