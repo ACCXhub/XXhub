@@ -115,6 +115,7 @@ td { height: 43px; padding: 0 14px; border-top: 1px solid #edf1f5; color: #26344
 .history-run-row.expandable:hover td { background: #f8fbff; }
 .history-run-row.expandable:focus-visible { position: relative; z-index: 1; outline: 2px solid #4388ee; outline-offset: -2px; }
 .history-run-status { min-width: 190px; white-space: nowrap; }
+.history-progress-cell small { display: block; margin-top: 2px; color: #8a96a9; font-size: 10px; }
 .history-anomaly-count { margin-left: 9px; display: inline-flex; align-items: center; gap: 4px; color: #a86100; font-size: 11px; font-weight: 650; }
 .history-anomaly-count svg:last-child { color: #78869a; transition: transform .16s ease; }
 .history-anomaly-count svg.expanded { transform: rotate(180deg); }

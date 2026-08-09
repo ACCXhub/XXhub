@@ -1,8 +1,10 @@
-from datetime import date
+from datetime import date, datetime
+import hashlib
 import json
-from datetime import datetime
 import logging
 from pathlib import Path
+
+import pytest
 
 from autody.config import AppConfig, Target
 from autody.chat import DeliveryResult, DeliveryStatus, FatalChatError
@@ -251,6 +253,109 @@ def test_runner_passes_current_stable_binding_to_navigation(tmp_path: Path):
     assert chat.calls == [
         ("显示名称", "target-current", "candidate-current")
     ]
+
+
+@pytest.mark.parametrize("trigger_source", ["scheduled", "startup_recovery", "manual"])
+def test_runner_resolves_account_scoped_bindings_to_current_conversation_identity(
+    tmp_path: Path,
+    trigger_source: str,
+):
+    config = make_config(tmp_path)
+    config.min_delay_seconds = 0
+    config.max_delay_seconds = 0
+    account_scope = "account-" + "a" * 24
+    identities = [f"avatar:{index:064x}" for index in range(1, 9)]
+    persistent_ids = [
+        "candidate-"
+        + hashlib.sha256(f"{account_scope}\0{identity}".encode()).hexdigest()[:32]
+        for identity in identities
+    ]
+    conversation_ids = [
+        "candidate-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
+        for identity in identities
+    ]
+    config.targets = [
+        Target(
+            name=f"当前有效目标 {index}",
+            stable_id=f"target-{index}",
+            candidate_id=persistent_id,
+        )
+        for index, persistent_id in enumerate(persistent_ids, start=1)
+    ] + [Target(name="缺少绑定目标", stable_id="target-missing")]
+    write_verified_retry_scope(
+        tmp_path,
+        persistent_ids,
+        account_scope=account_scope,
+    )
+    discovered_path = tmp_path / "discovered_friends.json"
+    discovered = json.loads(discovered_path.read_text(encoding="utf-8"))
+    discovered["last_result"] = {
+        "status": "completed_bottom_reached",
+        "completed_bottom_reached": True,
+    }
+    for index, (candidate, identity) in enumerate(
+        zip(discovered["candidates"], identities, strict=True),
+        start=1,
+    ):
+        candidate["identity_key"] = identity
+        candidate["identity_source"] = "avatar_source"
+        candidate["configured_target_id"] = f"target-{index}"
+    discovered_path.write_text(
+        json.dumps(discovered, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    class NavigationOnlyChat:
+        def __init__(self):
+            self.calls = []
+
+        def send(
+            self,
+            target,
+            _message,
+            *,
+            selected_target_id=None,
+            expected_conversation_id=None,
+        ):
+            self.calls.append(
+                (target, selected_target_id, expected_conversation_id)
+            )
+            if expected_conversation_id not in conversation_ids:
+                return DeliveryResult(
+                    DeliveryStatus.BLOCKED,
+                    send_attempts=0,
+                    error="conversation_not_found",
+                    failure_stage="conversation_located",
+                    reason_code="conversation_not_found",
+                )
+            return DeliveryResult(
+                DeliveryStatus.SEND_FAILED,
+                send_attempts=0,
+                error="test_stop_before_send",
+                failure_stage="composer_verified",
+                reason_code="send_failed_before_action",
+            )
+
+    chat = NavigationOnlyChat()
+    result = run_daily(
+        config,
+        chat,
+        date(2026, 8, 9),
+        now=datetime(2026, 8, 9, 7, 30),
+        trigger_source=trigger_source,
+    )
+
+    assert result.total_targets == 8
+    assert result.sent_count == 0
+    assert len(chat.calls) == 8
+    assert [call[1] for call in chat.calls] == [
+        f"target-{index}" for index in range(1, 9)
+    ]
+    assert [call[2] for call in chat.calls] == conversation_ids
+    assert all(
+        detail.reason_code != "conversation_not_found"
+        for detail in result.target_failures.values()
+    )
 
 
 def test_pre_send_failure_records_target_level_chinese_reason_and_exact_stage(

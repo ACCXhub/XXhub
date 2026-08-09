@@ -44,6 +44,7 @@ from autody.recovery import recovery_due
 from autody.retry_state import TaskOutcomeStore
 from autody.runner import RunResult, RunStatus, record_safe_pre_send_failure, run_daily
 from autody.runtime import configure_runtime, doctor_playwright, repair_playwright
+from autody.scheduler import SchedulerService
 from autody.state import StateStore
 from autody.web_api import create_app
 
@@ -697,6 +698,27 @@ def ui(
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     typer.echo(f"AutoDy 管理台正在运行：{url}")
     uvicorn.run(create_app(config), host="127.0.0.1", port=port, log_level="warning")
+
+
+@app.command("repair-scheduler")
+def repair_scheduler(
+    config: Path = typer.Option(Path("config.yaml"), "--config"),
+    program_root: Path = typer.Option(..., "--program-root"),
+    if_config_exists: bool = typer.Option(False, "--if-config-exists"),
+):
+    """Rewrite AutoDy tasks from the canonical config and runtime roots."""
+    config = config.resolve()
+    if not config.is_file():
+        if if_config_exists:
+            typer.echo("AutoDy 配置尚未创建，跳过定时任务修复。")
+            return
+        raise typer.BadParameter("AutoDy 配置不存在")
+    loaded = load_config(config)
+    SchedulerService(
+        program_root.resolve(),
+        data_root=config.parent,
+    ).repair(loaded)
+    typer.echo("AutoDy 定时任务已按当前安装位置修复。")
 
 
 @app.command()

@@ -40,7 +40,8 @@ def test_installer_reuses_valid_environment_and_checks_native_stages():
     assert "function Update-FrontendBuild" in text
     assert "Source frontend production build" in text
     assert "Stop-ProjectAutoDyService" in text
-    assert "Get-ScheduledTask" in text
+    assert "repair-scheduler" in text
+    assert '& (Join-Path $Root "scripts\\install-task.ps1")' not in text
     assert "taskkill /IM python.exe" not in text
     assert "py -3.11 -m venv .venv" not in text
     assert "python -m venv .venv" not in text

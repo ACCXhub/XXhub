@@ -59,7 +59,7 @@ def test_schedule_preview_lists_affected_windows_tasks(tmp_path: Path):
     }
 
 
-def test_packaged_scheduler_passes_program_and_data_roots(
+def test_packaged_scheduler_repair_passes_program_and_data_roots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     program_root = tmp_path / "program"
@@ -72,7 +72,7 @@ def test_packaged_scheduler_passes_program_and_data_roots(
 
     monkeypatch.setattr(scheduler.subprocess, "run", fake_run)
 
-    SchedulerService(program_root, data_root=data_root).install(
+    SchedulerService(program_root, data_root=data_root).repair(
         AppConfig(targets=[Target(name="fixture")])
     )
 

@@ -1,16 +1,22 @@
 import { CalendarCheck2, Clock3, ShieldCheck } from "lucide-react";
 import type { DashboardStatus } from "../types";
 
-function formatNext(value: string | null) {
+function formatNext(value: string | null, now = new Date()) {
   if (!value) return "未安装";
   const date = new Date(value);
   if (Number.isNaN(date.valueOf())) return value;
-  return date.toLocaleString("zh-CN", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit"
-  });
+  const calendarDay = (item: Date) => Date.UTC(
+    item.getFullYear(),
+    item.getMonth(),
+    item.getDate(),
+  );
+  const dayOffset = Math.round(
+    (calendarDay(date) - calendarDay(now)) / 86_400_000,
+  );
+  const time = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  return dayOffset === 1
+    ? `明日 ${time}`
+    : `${date.getMonth() + 1}月${date.getDate()}日 ${time}`;
 }
 
 export function StatusRail({ status }: { status: DashboardStatus }) {

@@ -143,20 +143,7 @@ class ActionManager:
                 "--config",
                 str(self.config_path),
             ]
-        script = {
-            "install-scheduler": "install-task.ps1",
-            "remove-scheduler": "remove-task.ps1",
-        }.get(action)
-        if not script:
-            raise ValueError(f"unsupported action: {action}")
-        return [
-            "powershell.exe",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(self.root / "scripts" / script),
-        ]
+        raise ValueError(f"unsupported action: {action}")
 
     def _execute(self, job: ActionJob) -> None:
         try:

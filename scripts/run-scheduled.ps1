@@ -1,12 +1,34 @@
 ﻿param(
     [string]$ProgramRoot,
-    [string]$DataRoot
+    [string]$DataRoot,
+    [switch]$DevelopmentMode
 )
 
 $ErrorActionPreference = "Stop"
 $env:PYTHONUTF8 = "1"
+$Registration = Get-ItemProperty -LiteralPath "HKCU:\Software\AutoDy" -ErrorAction SilentlyContinue
+$RegisteredProgramRoot = if ($Registration) { [string]$Registration.InstallFolder } else { "" }
+$RegisteredDataRoot = if ($Registration) { [string]$Registration.DataRoot } else { "" }
+$RegisteredInstalledMode = (
+    -not $DevelopmentMode -and
+    -not [string]::IsNullOrWhiteSpace($RegisteredProgramRoot) -and
+    -not [string]::IsNullOrWhiteSpace($RegisteredDataRoot)
+)
+if ($RegisteredInstalledMode -and (-not $ProgramRoot -or -not $DataRoot)) {
+    throw "Registered installed AutoDy requires explicit ProgramRoot and DataRoot. Repair the scheduled task from AutoDy."
+}
 $Root = if ($ProgramRoot) { [IO.Path]::GetFullPath($ProgramRoot) } else { (Resolve-Path (Join-Path $PSScriptRoot "..")).Path }
 $DataRoot = if ($DataRoot) { [IO.Path]::GetFullPath($DataRoot) } elseif ($env:AUTODY_HOME) { [IO.Path]::GetFullPath($env:AUTODY_HOME) } else { $Root }
+if ($RegisteredInstalledMode) {
+    $ExpectedProgramRoot = [IO.Path]::GetFullPath($RegisteredProgramRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $ExpectedDataRoot = [IO.Path]::GetFullPath($RegisteredDataRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    if (
+        $Root.TrimEnd([IO.Path]::DirectorySeparatorChar) -ine $ExpectedProgramRoot -or
+        $DataRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) -ine $ExpectedDataRoot
+    ) {
+        throw "Registered installed AutoDy runtime roots do not match. Repair the scheduled task from AutoDy."
+    }
+}
 $env:AUTODY_HOME = $DataRoot
 $env:AUTODY_PROGRAM_ROOT = $Root
 $BrowserRoot = if (Test-Path -LiteralPath (Join-Path $Root "runtime\ms-playwright")) { Join-Path $Root "runtime\ms-playwright" } else { Join-Path $DataRoot "data\ms-playwright" }

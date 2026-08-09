@@ -8,7 +8,12 @@ import logging
 import random
 import time
 
-from autody.chat import DeliveryResult, DeliveryStatus, FatalChatError
+from autody.chat import (
+    DeliveryResult,
+    DeliveryStatus,
+    FatalChatError,
+    conversation_candidate_id,
+)
 from autody.config import (
     AppConfig,
     MessageSuffixConfig,
@@ -21,8 +26,13 @@ from autody.account_profile import (
     load_account_profile,
 )
 from autody.failures import FailureDetail, failure_detail
-from autody.friend_discovery import load_discovered_friends
-from autody.history import TaskHistoryStore, TaskRunRecord, stable_target_id
+from autody.friend_discovery import FriendCandidate, load_discovered_friends
+from autody.history import (
+    TaskHistoryStore,
+    TaskRunRecord,
+    effective_daily_target_statuses,
+    target_identity,
+)
 from autody.message_packs import MessagePackError, MessagePackService
 from autody.messages import MessageRotation, format_message_with_suffix, read_messages
 from autody.retry_state import TaskOutcome, TaskOutcomeStore
@@ -101,7 +111,58 @@ def _delivery_result(value) -> DeliveryResult:
     return DeliveryResult(DeliveryStatus.CONFIRMED, send_attempts=1, confirmation_attempts=1)
 
 
-def _send_target(chat, target: Target, message: str) -> DeliveryResult:
+def _verified_conversation_ids(
+    config: AppConfig,
+    targets: list[Target],
+) -> dict[str, str]:
+    """Resolve persistent bindings to current DOM identities without guessing."""
+    data_root = config.state_file.parent
+    discovered = load_discovered_friends(data_root / "discovered_friends.json")
+    if (
+        discovered is None
+        or not discovered.last_result.get("completed_bottom_reached")
+        or bindings_revalidation_required(data_root)
+    ):
+        return {}
+    account_evaluation = evaluate_account_scope(
+        load_account_profile(config.messages_file.parent),
+        binding_scope=discovered.account_scope,
+    )
+    if account_evaluation.compatible is not True:
+        return {}
+
+    current_by_candidate_id: dict[str, list[FriendCandidate]] = {}
+    for candidate in discovered.candidates:
+        if candidate.presence_status != "current":
+            continue
+        current_by_candidate_id.setdefault(candidate.candidate_id, []).append(candidate)
+
+    resolved: dict[str, str] = {}
+    for target in targets:
+        if not target.stable_id or not target.candidate_id:
+            continue
+        matches = current_by_candidate_id.get(target.candidate_id, [])
+        if len(matches) != 1:
+            continue
+        candidate = matches[0]
+        if (
+            candidate.match_status != "configured"
+            or candidate.configured_target_id != target.stable_id
+        ):
+            continue
+        conversation_id = conversation_candidate_id(candidate.identity_key)
+        if conversation_id:
+            resolved[target.stable_id] = conversation_id
+    return resolved
+
+
+def _send_target(
+    chat,
+    target: Target,
+    message: str,
+    *,
+    expected_conversation_id: str | None = None,
+) -> DeliveryResult:
     """Pass stable binding evidence when the sender supports it.
 
     The signature check keeps small test/extension senders compatible without
@@ -121,7 +182,9 @@ def _send_target(chat, target: Target, message: str) -> DeliveryResult:
                 target.name,
                 message,
                 selected_target_id=target.stable_id,
-                expected_conversation_id=target.candidate_id,
+                expected_conversation_id=(
+                    expected_conversation_id or target.candidate_id
+                ),
             )
         )
     return _delivery_result(chat.send(target.name, message))
@@ -137,10 +200,6 @@ def _target_suffix(target: Target, config: AppConfig) -> MessageSuffixConfig:
             style=config.message_suffix.style,
         )
     return config.message_suffix
-
-
-def _target_id(target: Target) -> str:
-    return target.stable_id or target.candidate_id or stable_target_id(target.name)
 
 
 def _stored_target_failures(daily: dict) -> dict[str, FailureDetail]:
@@ -198,7 +257,7 @@ def _detail_for_delivery(
         ),
         send_attempts=send_attempts,
         run_id=run_id,
-        target_stable_id=_target_id(target),
+        target_stable_id=target_identity(target),
         account_scope=account_scope,
         binding_valid=binding_valid,
         account_scope_matches=True,
@@ -212,7 +271,7 @@ def _detail_for_delivery(
 def _selection_rng(day: date, scope: str, target: Target | None = None) -> random.Random:
     target_id = ""
     if target is not None:
-        target_id = target.stable_id or target.candidate_id or stable_target_id(target.name)
+        target_id = target_identity(target)
     seed = hashlib.sha256(f"{day.isoformat()}:{scope}:{target_id}".encode("utf-8")).digest()
     return random.Random(int.from_bytes(seed, "big"))
 
@@ -226,7 +285,7 @@ def _target_base_message(
 ) -> str:
     if not target.message_pack:
         return daily["message"]
-    target_id = target.stable_id or target.candidate_id or stable_target_id(target.name)
+    target_id = target_identity(target)
     key = f"pack:{target_id}"
     cached = daily.setdefault("messages_by_target", {}).get(key)
     if cached:
@@ -247,7 +306,7 @@ def _resolve_target_message(
     if target.message_pack:
         base = _target_base_message(target, config, daily, messages, day)
     elif (target.message_selection or config.message_selection) == "per_friend":
-        target_id = target.stable_id or target.candidate_id or stable_target_id(target.name)
+        target_id = target_identity(target)
         key = f"target:{target_id}"
         per_target = daily.setdefault("messages_by_target", {})
         base = per_target.get(key) or per_target.get(target.name)
@@ -358,17 +417,23 @@ def run_daily(
         random.SystemRandom().shuffle(targets)
     requested_target_ids = set(target_ids) if target_ids is not None else None
     if requested_target_ids is not None:
-        known_target_ids = {_target_id(target) for target in targets}
+        known_target_ids = {target_identity(target) for target in targets}
         unknown_target_ids = requested_target_ids - known_target_ids
         if unknown_target_ids:
             raise ValueError("定向重试目标不存在或未启用")
         selected_targets = [
             target
             for target in targets
-            if _target_id(target) in requested_target_ids
+            if target_identity(target) in requested_target_ids
         ]
     else:
         selected_targets = targets
+    conversation_ids = _verified_conversation_ids(config, selected_targets)
+    effective_before_run = effective_daily_target_statuses(
+        config,
+        state,
+        today,
+    )
 
     targeted_blocking_details: dict[str, FailureDetail] = {}
     if requested_target_ids is not None:
@@ -395,7 +460,7 @@ def run_daily(
             )
         stored_failures = _stored_target_failures(daily)
         for target in selected_targets:
-            target_id = _target_id(target)
+            target_id = target_identity(target)
             if target.name in daily.get("succeeded", []):
                 continue
             previous = stored_failures.get(target_id)
@@ -598,7 +663,7 @@ def run_daily(
     ]
     for target in ambiguous_targets:
         daily["failures"][target.name] = "blocked_ambiguous_target"
-        target_id = _target_id(target)
+        target_id = target_identity(target)
         daily["target_failures"][target_id] = failure_detail(
             "blocked_ambiguous_target",
             stage="target_binding_resolved",
@@ -609,7 +674,7 @@ def run_daily(
         ).model_dump(mode="json")
     pending = [
         target for target in selected_targets
-        if target.name not in daily["succeeded"]
+        if effective_before_run.get(target_identity(target)) != "success"
         and " ".join(target.name.split()).casefold() not in ambiguous_names
     ]
     total = len(targets)
@@ -665,7 +730,7 @@ def run_daily(
             trigger_source,
             result,
             daily.get("message", ""),
-            [_target_id(target) for target in pending],
+            [target_identity(target) for target in pending],
         )
         return result
     if (
@@ -691,7 +756,7 @@ def run_daily(
             trigger_source,
             result,
             daily.get("message", ""),
-            [_target_id(target) for target in pending],
+            [target_identity(target) for target in pending],
         )
         return result
     outcome_store.start(run_id, started)
@@ -714,7 +779,7 @@ def run_daily(
             if target_id in requested_target_ids:
                 continue
             peer = next(
-                (target for target in targets if _target_id(target) == target_id),
+                (target for target in targets if target_identity(target) == target_id),
                 None,
             )
             if peer is None or peer.name in succeeded_names:
@@ -740,7 +805,7 @@ def run_daily(
                 target_message = _resolve_target_message(target, config, today, daily, messages)
             except MessagePackError as exc:
                 daily["failures"][target_name] = "send_failed_before_action"
-                target_id = _target_id(target)
+                target_id = target_identity(target)
                 detail = failure_detail(
                     "message_pack_unavailable",
                     stage="message_prepared",
@@ -764,9 +829,16 @@ def run_daily(
             store.save(state)
         else:
             target_message = _resolve_target_message(target, config, today, daily, messages)
-        target_id = _target_id(target)
+        target_id = target_identity(target)
         try:
-            delivery = _send_target(chat, target, target_message)
+            delivery = _send_target(
+                chat,
+                target,
+                target_message,
+                expected_conversation_id=conversation_ids.get(
+                    target.stable_id or ""
+                ),
+            )
         except FatalChatError as exc:
             delivery = DeliveryResult(DeliveryStatus.BLOCKED, error=str(exc))
         except RuntimeError as exc:
@@ -810,13 +882,20 @@ def run_daily(
         if target_index < len(pending) - 1:
             time.sleep(random.uniform(config.min_delay_seconds, config.max_delay_seconds))
 
-    complete = all(target.name in daily["succeeded"] for target in targets)
+    complete = all(
+        effective_before_run.get(target_identity(target)) == "success"
+        or target.name in daily["succeeded"]
+        for target in targets
+    )
     if complete and not daily.get("consumed"):
         rotation.consume(daily["message"], state.rotation)
         daily["consumed"] = True
         store.save(state)
     failed_targets = [
-        target for target in targets if target.name not in daily["succeeded"]
+        target
+        for target in targets
+        if effective_before_run.get(target_identity(target)) != "success"
+        and target.name not in daily["succeeded"]
     ]
     if complete:
         status = RunStatus.RECOVERED if outcome.retry_attempts else RunStatus.COMPLETED
@@ -857,7 +936,7 @@ def run_daily(
         {
             target_id: detail
             for target_id, detail in _stored_target_failures(daily).items()
-            if target_id in {_target_id(target) for target in failed_targets}
+            if target_id in {target_identity(target) for target in failed_targets}
         },
     )
     _record_history(
@@ -866,6 +945,6 @@ def run_daily(
         trigger_source,
         result,
         daily["message"],
-        [_target_id(target) for target in failed_targets],
+        [target_identity(target) for target in failed_targets],
     )
     return result

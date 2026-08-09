@@ -16,6 +16,68 @@ from autody.runner import RunResult, RunStatus
 runner = CliRunner()
 
 
+def test_repair_scheduler_uses_explicit_program_and_canonical_data_roots(
+    tmp_path: Path,
+    monkeypatch,
+):
+    data_root = tmp_path / "data-root"
+    program_root = tmp_path / "program-root"
+    data_root.mkdir()
+    (data_root / "messages.txt").write_text("早安\n", encoding="utf-8")
+    config_path = data_root / "config.yaml"
+    config_path.write_text(
+        (
+            "targets: []\nmessages_file: messages.txt\n"
+            "daily_send_time: '08:15'\n"
+            "weekly_health_check_enabled: false\n"
+        ),
+        encoding="utf-8",
+    )
+    calls = []
+
+    def fake_repair(service, config):
+        calls.append((
+            service.root,
+            service.data_root,
+            config.daily_send_time,
+            config.weekly_health_check_enabled,
+        ))
+
+    monkeypatch.setattr("autody.scheduler.SchedulerService.repair", fake_repair)
+
+    result = runner.invoke(
+        app,
+        [
+            "repair-scheduler",
+            "--config", str(config_path),
+            "--program-root", str(program_root),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [(
+        program_root.resolve(),
+        data_root.resolve(),
+        "08:15",
+        False,
+    )]
+
+
+def test_repair_scheduler_can_skip_a_first_install_without_config(tmp_path: Path):
+    result = runner.invoke(
+        app,
+        [
+            "repair-scheduler",
+            "--config", str(tmp_path / "missing-config.yaml"),
+            "--program-root", str(tmp_path / "program-root"),
+            "--if-config-exists",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "配置尚未创建" in result.output
+
+
 def test_check_config_reports_success(tmp_path: Path):
     (tmp_path / "messages.txt").write_text("早安\n", encoding="utf-8")
     (tmp_path / "config.yaml").write_text(

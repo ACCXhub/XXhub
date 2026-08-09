@@ -70,6 +70,7 @@ export interface SchedulerTask {
   target_count: number | null;
   duplicate_count: number;
   drift: boolean;
+  drift_reason?: "runtime_root_mismatch" | "schedule_mismatch" | null;
 }
 
 export interface ScheduleSettings {

@@ -179,7 +179,7 @@ export function DashboardPage({
           <div className="panel-heading"><h2>结构化运行记录</h2><span className="inline-actions"><span>{status.history.length} 条记录</span>{groupsByRow.size ? <button className="action-button primary" disabled={!!busy || !safeRetryTargetIds.length || !onRetryTargets} onClick={() => onRetryTargets?.(safeRetryTargetIds)}>重试所有目标</button> : null}</span></div>
           <div className="table-wrap">
             <table aria-label="结构化运行记录">
-              <thead><tr><th>结束时间</th><th>来源</th><th>成功/总数</th><th>重试</th><th>状态</th></tr></thead>
+              <thead><tr><th>结束时间</th><th>来源</th><th>确认成功</th><th>重试</th><th>状态</th></tr></thead>
               <tbody>
                 {historyRows.map((row, rowIndex) => {
                   const groups = groupsByRow.get(rowIndex) || [];
@@ -205,7 +205,10 @@ export function DashboardPage({
                     >
                       <td>{new Date(row.end_time).toLocaleString("zh-CN")}</td>
                       <td>{triggerLabel[row.trigger_source]}</td>
-                      <td>{row.success_count}/{row.total_targets}</td>
+                      <td className="history-progress-cell">
+                        <span>{row.success_count}/{row.total_targets}</span>
+                        {row.skipped_count ? <small>跳过 {row.skipped_count}</small> : null}
+                      </td>
                       <td>{row.retry_count}</td>
                       <td className="history-run-status">
                         <span className={row.final_status === "completed" || row.final_status === "already_done" ? "tag success" : "tag warning"}>{row.final_status === "completed" || row.final_status === "already_done" ? "成功" : "部分失败"}</span>

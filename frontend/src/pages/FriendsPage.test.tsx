@@ -172,6 +172,27 @@ test("keeps the trash action independent from continuation cancellation", async 
 
 });
 
+test("moves a deleted configured target to candidates and re-adds it immediately", async () => {
+  render(<FriendsPage notify={vi.fn()} onDataChanged={vi.fn()} />);
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  apiMocks.friends.mockImplementation(() => new Promise(() => undefined));
+  apiMocks.discoveredFriends.mockImplementation(() => new Promise(() => undefined));
+
+  fireEvent.click(await screen.findByRole("button", { name: "删除目标 小明" }));
+
+  await waitFor(() => {
+    expect(apiMocks.friendBatch).toHaveBeenCalledWith(["friend-xiaoming"], "delete");
+  });
+  const candidate = screen.getByRole("button", { name: "添加 小明" });
+  expect(screen.queryByRole("button", { name: "取消续火 小明" })).not.toBeInTheDocument();
+
+  fireEvent.click(candidate);
+
+  await waitFor(() => {
+    expect(apiMocks.addCandidateToTargets).toHaveBeenCalledWith("friend-xiaoming");
+  });
+});
+
 test("cancels and immediately re-adds one continuation target without a manual refresh", async () => {
   render(<FriendsPage notify={vi.fn()} onDataChanged={vi.fn()} />);
   const cancelRow = await screen.findByRole("button", { name: "取消续火 小明" });

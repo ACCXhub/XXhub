@@ -90,9 +90,6 @@ class SchedulerService:
             finally:
                 raise
 
-    def install(self, config: AppConfig) -> None:
-        self._install(config)
-
     def repair(self, config: AppConfig) -> None:
         self._install(config)
 

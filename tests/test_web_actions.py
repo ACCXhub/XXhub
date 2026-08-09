@@ -57,6 +57,15 @@ def test_targeted_retry_action_uses_stable_target_id_argument(tmp_path: Path):
     ]]
 
 
+def test_scheduler_writes_are_not_exposed_through_generic_actions(tmp_path: Path):
+    manager = ActionManager(tmp_path, tmp_path / "config.yaml")
+
+    with pytest.raises(ValueError, match="unsupported action"):
+        manager._command("install-scheduler")
+    with pytest.raises(ValueError, match="unsupported action"):
+        manager._command("remove-scheduler")
+
+
 def test_failed_action_job_exposes_structured_chinese_failure(tmp_path: Path):
     def execute(_command, **_kwargs):
         return type("Completed", (), {"returncode": 7})()

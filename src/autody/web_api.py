@@ -43,7 +43,7 @@ from autody.account_profile import (
 from autody.account_profiles import AccountProfileStoreError, MultiAccountStore
 from autody.failures import FailureDetail, failure_detail
 from autody.friend_discovery import is_discovery_stale, load_discovered_friends
-from autody.history import TaskHistoryStore, bootstrap_legacy_daily_history, dashboard_statistics, stable_target_id
+from autody.history import TaskHistoryStore, bootstrap_legacy_daily_history, dashboard_statistics, effective_daily_target_statuses, target_identity
 from autody.log_center import archive_historical_logs, archive_logs, automatic_cleanup_once_daily, cleanup_logs, log_storage_summary, log_summary, query_logs, record_cleanup_result
 from autody.message_packs import ImportMode, MessagePackError, MessagePackService
 from autody.modules import (
@@ -242,10 +242,6 @@ def _avatar_path(cache_dir: Path, identifier: str) -> Path:
     return cache_dir / f"{identifier}.png"
 
 
-def _target_id(target: Target) -> str:
-    return target.stable_id or target.candidate_id or stable_target_id(target.name)
-
-
 def _effective_target_settings(target: Target, config: AppConfig, override: dict | None = None) -> dict:
     override = override or {}
     suffix_mode = override.get("suffix_mode", "global")
@@ -359,7 +355,7 @@ def _legacy_failure_detail(
         stage=stage,
         send_attempts=int(reason_code == "confirmation_failed_uncertain"),
         run_id=run_id,
-        target_stable_id=_target_id(target),
+        target_stable_id=target_identity(target),
         binding_valid=None,
         account_scope_matches=None,
         diagnostic_details={
@@ -374,7 +370,7 @@ def _revalidate_failure_detail(
     target: Target,
     detail: FailureDetail,
 ) -> FailureDetail:
-    identity = _target_id(target)
+    identity = target_identity(target)
     discovered = load_discovered_friends(
         config.state_file.parent / "discovered_friends.json"
     )
@@ -487,7 +483,7 @@ def _daily_failure_detail(
     target: Target,
     daily: dict,
 ) -> FailureDetail | None:
-    identity = _target_id(target)
+    identity = target_identity(target)
     stored = daily.get("target_failures", {}).get(identity)
     if stored:
         try:
@@ -609,7 +605,7 @@ def _history_target_failures(
             if target_id in failed_target_ids
         }
     for target in config.targets:
-        identity = _target_id(target)
+        identity = target_identity(target)
         if identity not in failed_target_ids:
             continue
         detail = _daily_failure_detail(config, target, daily)
@@ -627,46 +623,32 @@ def _history_failure_views(
         _history_target_failures(config, record, daily_by_date)
         for record in records
     ]
-    confirmed_by_record = [
-        {
-            target_id
-            for target_id, result in record.confirmation_results.items()
-            if result in {"confirmed", "retry_confirmed"}
-        }
-        for record in records
-    ]
+    confirmed_at_by_day: dict[str, dict[str, str]] = defaultdict(dict)
+    for record in records:
+        for target_id, result in record.confirmation_results.items():
+            if result not in {"confirmed", "retry_confirmed"}:
+                continue
+            previous = confirmed_at_by_day[record.date].get(target_id)
+            confirmed_at_by_day[record.date][target_id] = max(
+                previous or record.end_time,
+                record.end_time,
+            )
     views: list[dict[str, dict]] = []
     for record, failures in zip(records, failures_by_record):
         record_view: dict[str, dict] = {}
         for target_id, detail in failures.items():
-            later_success_at: str | None = None
-            later_failure_at: str | None = None
-            for later_index, later_record in enumerate(records):
-                if later_record.end_time <= record.end_time:
-                    continue
-                if target_id in confirmed_by_record[later_index]:
-                    later_success_at = max(
-                        later_success_at or later_record.end_time,
-                        later_record.end_time,
-                    )
-                if target_id in failures_by_record[later_index]:
-                    later_failure_at = max(
-                        later_failure_at or later_record.end_time,
-                        later_record.end_time,
-                    )
-            resolved = bool(
-                later_success_at
-                and (
-                    later_failure_at is None
-                    or later_success_at > later_failure_at
-                )
-            )
+            confirmed_at = confirmed_at_by_day[record.date].get(target_id)
+            resolved = confirmed_at is not None
             record_view[target_id] = {
                 **detail.model_dump(mode="json"),
                 "resolved": resolved,
-                "resolved_at": later_success_at if resolved else None,
+                "resolved_at": confirmed_at,
                 "resolution_zh": (
-                    "已通过后续成功补发解决" if resolved else None
+                    "已通过后续成功补发解决"
+                    if confirmed_at and confirmed_at > record.end_time
+                    else "当日已有确认成功"
+                    if resolved
+                    else None
                 ),
                 "retry_action_available": (
                     detail.safe_retry_available and not resolved
@@ -676,62 +658,11 @@ def _history_failure_views(
     return views
 
 
-def _effective_daily_target_statuses(
-    config: AppConfig,
-    state,
-    day: date,
-    records: list | None = None,
-) -> dict[str, str]:
-    """Return each executable target's latest effective result for ``day``.
-
-    The daily state remains the compatibility fallback for legacy data. Modern
-    structured history is authoritative whenever it contains a target-level
-    event, so a later confirmed retry resolves an earlier failure without
-    deleting that historical failure record.
-    """
-    daily = state.daily.get(day.isoformat(), {})
-    succeeded_names = set(daily.get("succeeded", []))
-    failed_names = set(daily.get("failures", {}))
-    targets = enabled_execution_targets(config)
-    statuses = {
-        _target_id(target): (
-            "success"
-            if target.name in succeeded_names
-            else "failed"
-            if target.name in failed_names
-            else "pending"
-        )
-        for target in targets
-    }
-    if records is None:
-        records = TaskHistoryStore(
-            config.state_file.parent / "history" / "task-runs.jsonl"
-        ).query(start_date=day, end_date=day, page_size=100).items
-    target_ids = set(statuses)
-    event_statuses: dict[str, str] = {}
-    for record in reversed(records):
-        if record.task_type != "daily_send" or record.date != day.isoformat():
-            continue
-        failed_target_ids = set(record.failed_target_ids) | set(
-            record.target_failures
-        )
-        for target_id in failed_target_ids & target_ids:
-            event_statuses[target_id] = "failed"
-        for target_id, result in record.confirmation_results.items():
-            if target_id in target_ids and result in {
-                "confirmed",
-                "retry_confirmed",
-            }:
-                event_statuses[target_id] = "success"
-    statuses.update(event_statuses)
-    return statuses
-
-
 def _today_plan(config: AppConfig, state, day: date, overrides: dict[str, dict] | None = None) -> dict:
     daily = state.daily.get(day.isoformat(), {})
     failures = daily.get("failures", {})
     executable = enabled_execution_targets(config)
-    effective_statuses = _effective_daily_target_statuses(config, state, day)
+    effective_statuses = effective_daily_target_statuses(config, state, day)
     executable_ids = {id(target) for target in executable}
     normalized: dict[str, int] = defaultdict(int)
     for target in executable:
@@ -740,12 +671,12 @@ def _today_plan(config: AppConfig, state, day: date, overrides: dict[str, dict] 
     enabled = [target for target in config.targets if target.enabled]
     ordered = sorted(
         enumerate(enabled),
-        key=lambda row: ((overrides or {}).get(_target_id(row[1]), {}).get("send_order") is None, (overrides or {}).get(_target_id(row[1]), {}).get("send_order", row[0]), row[0]),
+        key=lambda row: ((overrides or {}).get(target_identity(row[1]), {}).get("send_order") is None, (overrides or {}).get(target_identity(row[1]), {}).get("send_order", row[0]), row[0]),
     )
     rows = []
     blocked = 0
     for fallback_order, target in ordered:
-        identity = _target_id(target)
+        identity = target_identity(target)
         binding_missing = id(target) not in executable_ids
         ambiguous = normalized[" ".join(target.name.split()).casefold()] > 1
         failure = failures.get(target.name)
@@ -794,7 +725,7 @@ def _failed_targets(config: AppConfig, state, day: date) -> dict:
     for target in config.targets:
         if not target.enabled or target.name in succeeded or target.name not in failures:
             continue
-        identity = _target_id(target)
+        identity = target_identity(target)
         detail = _daily_failure_detail(config, target, daily)
         if detail is None:
             continue
@@ -909,12 +840,16 @@ foreach($name in @('AutoDy-Health-Daily','AutoDy-DailySpark','AutoDy-Health-Week
   if($task){
     $info=Get-ScheduledTaskInfo -TaskName $name
     $trigger=$task.Triggers | Select-Object -First 1
+    $action=$task.Actions | Select-Object -First 1
     $startBoundary=''
     if($trigger){$startBoundary=[string]$trigger.StartBoundary}
     $rows += [pscustomobject]@{
       name=$name; state=[string]$task.State; next_run=$info.NextRunTime.ToString('s');
       last_run=$info.LastRunTime.ToString('s'); last_result=$info.LastTaskResult;
-      start_boundary=$startBoundary
+      start_boundary=$startBoundary;
+      execute=if($action){[string]$action.Execute}else{''};
+      arguments=if($action){[string]$action.Arguments}else{''};
+      working_directory=if($action){[string]$action.WorkingDirectory}else{''}
     }
   }
 }
@@ -937,10 +872,28 @@ $rows | ConvertTo-Json -Compress
         return []
 
 
+def _registered_install_roots() -> tuple[Path, Path] | None:
+    """Return the per-user registered roots without exposing them to APIs."""
+    if platform.system() != "Windows":
+        return None
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\AutoDy") as key:
+            program_root = Path(winreg.QueryValueEx(key, "InstallFolder")[0])
+            data_root = Path(winreg.QueryValueEx(key, "DataRoot")[0])
+    except (ImportError, OSError, TypeError, ValueError):
+        return None
+    return program_root.resolve(), data_root.resolve()
+
+
 def _scheduler_status_rows(
     config: AppConfig,
     rows: list[dict],
     executable_target_count: int,
+    *,
+    program_root: Path | None = None,
+    data_root: Path | None = None,
 ) -> list[dict]:
     """Combine configured intent with the small live Windows task snapshot."""
     expected = {
@@ -972,7 +925,7 @@ def _scheduler_status_rows(
         start_boundary = str(live.get("start_boundary") or "")
         time_match = re.search(r"T(\d{2}:\d{2})", start_boundary)
         windows_time = time_match.group(1) if time_match else None
-        drift = (
+        schedule_drift = (
             len(matches) > 1
             or windows_enabled != configured_enabled
             or (
@@ -981,6 +934,54 @@ def _scheduler_status_rows(
                 and windows_time != configured_time
             )
         )
+        runtime_root_mismatch = False
+        action_metadata_available = any(
+            key in live for key in ("execute", "arguments", "working_directory")
+        )
+        if (
+            installed
+            and action_metadata_available
+            and program_root is not None
+            and data_root is not None
+        ):
+            arguments = str(live.get("arguments") or "")
+
+            def argument_path(name: str) -> str | None:
+                match = re.search(
+                    rf"(?:^|\s)-{re.escape(name)}\s+(?:\"([^\"]+)\"|(\S+))",
+                    arguments,
+                    flags=re.IGNORECASE,
+                )
+                return (match.group(1) or match.group(2)) if match else None
+
+            def normalized(path: str | Path | None) -> str:
+                if path is None or not str(path).strip():
+                    return ""
+                return os.path.normcase(os.path.normpath(str(path))).rstrip("\\/")
+
+            script_name = (
+                "run-scheduled.ps1"
+                if name == "AutoDy-DailySpark"
+                else "health-check.ps1"
+            )
+            runtime_root_mismatch = any(
+                (
+                    str(live.get("execute") or "")
+                    .replace("/", "\\")
+                    .rsplit("\\", 1)[-1]
+                    .casefold()
+                    != "powershell.exe",
+                    normalized(argument_path("File"))
+                    != normalized(program_root / "scripts" / script_name),
+                    normalized(argument_path("ProgramRoot"))
+                    != normalized(program_root),
+                    normalized(argument_path("DataRoot"))
+                    != normalized(data_root),
+                    normalized(live.get("working_directory"))
+                    != normalized(program_root),
+                )
+            )
+        drift = schedule_drift or runtime_root_mismatch
         result.append(
             {
                 "name": name,
@@ -995,6 +996,13 @@ def _scheduler_status_rows(
                 "target_count": target_count,
                 "duplicate_count": max(0, len(matches) - 1),
                 "drift": drift,
+                "drift_reason": (
+                    "runtime_root_mismatch"
+                    if runtime_root_mismatch
+                    else "schedule_mismatch"
+                    if schedule_drift
+                    else None
+                ),
             }
         )
     return result
@@ -1313,6 +1321,34 @@ def create_app(
             task_cache["expires"] = time.monotonic() + 10
         return list(task_cache["rows"])  # type: ignore[arg-type]
 
+    def scheduler_runtime_mismatch(config: AppConfig) -> bool:
+        registered = _registered_install_roots()
+        if registered is None:
+            return False
+
+        def normalized(path: Path) -> str:
+            return os.path.normcase(os.path.normpath(str(path.resolve()))).rstrip("\\/")
+
+        if (
+            normalized(registered[0]) != normalized(program_root)
+            or normalized(registered[1]) != normalized(root)
+        ):
+            return False
+        try:
+            rows = _scheduler_status_rows(
+                config,
+                cached_task_rows(),
+                len(enabled_execution_targets(config)),
+                program_root=program_root,
+                data_root=root,
+            )
+        except Exception:
+            return False
+        return any(
+            row.get("drift_reason") == "runtime_root_mismatch"
+            for row in rows
+        )
+
     @app.get("/api/service-identity")
     def service_identity():
         package_path = Path(__file__).resolve().parent
@@ -1349,7 +1385,7 @@ def create_app(
         )
         bootstrap_legacy_daily_history(history_store, state.daily, len(config.targets))
         history_page = history_store.query(page_size=30)
-        effective_statuses = _effective_daily_target_statuses(
+        effective_statuses = effective_daily_target_statuses(
             config,
             state,
             date.fromisoformat(key),
@@ -1371,7 +1407,7 @@ def create_app(
         binding_guarded = bindings_revalidation_required(config.state_file.parent)
         friends = []
         for target in config.targets:
-            target_id = _target_id(target)
+            target_id = target_identity(target)
             effective_status = effective_statuses.get(target_id)
             detail = (
                 None
@@ -1441,7 +1477,13 @@ def create_app(
             tasks = []
             scheduler_available = False
         scheduler_rows = (
-            _scheduler_status_rows(config, tasks, len(executable_targets))
+            _scheduler_status_rows(
+                config,
+                tasks,
+                len(executable_targets),
+                program_root=program_root,
+                data_root=root,
+            )
             if scheduler_available
             else []
         )
@@ -1500,6 +1542,17 @@ def create_app(
                 "id": "scheduler_missing", "status": "warning",
                 "explanation": "每日定时任务尚未安装。",
                 "action": "scheduler", "action_label": "安装任务",
+            })
+        elif any(
+            row.get("drift_reason") == "runtime_root_mismatch"
+            for row in scheduler_rows
+        ):
+            issues.append({
+                "id": "scheduler_runtime_mismatch",
+                "status": "warning",
+                "explanation": "定时任务运行位置与当前 AutoDy 安装不一致，可在定时任务页修复。",
+                "action": "scheduler",
+                "action_label": "修复任务",
             })
         if daily.get("message") and not daily.get("consumed"):
             issues.append({
@@ -1752,7 +1805,7 @@ def create_app(
             (
                 item
                 for item in config.targets
-                if item.enabled and _target_id(item) == target_id
+                if item.enabled and target_identity(item) == target_id
             ),
             None,
         )
@@ -2151,7 +2204,7 @@ def create_app(
         config = load_config(config_path)
         try:
             if operation in {"install", "update", "repair"}:
-                getattr(service, "repair" if operation == "repair" else "install")(config)
+                service.repair(config)
             elif operation == "remove":
                 service.remove()
             else:
@@ -2166,6 +2219,13 @@ def create_app(
         now = current_time()
         key = now.date().isoformat()
         due = config.startup_recovery_enabled and recovery_due(config, StateStore(config.state_file).load(), now)
+        if due and scheduler_runtime_mismatch(config):
+            return {
+                "due": True,
+                "started": False,
+                "already_checked": False,
+                "blocked_reason": "scheduler_runtime_mismatch",
+            }
         if not due or key in recovery_attempted:
             return {"due": due, "started": False, "already_checked": key in recovery_attempted}
         recovery_attempted.add(key)
@@ -2502,7 +2562,7 @@ def create_app(
 
     def update_target_settings(target_id: str, payload: TargetSettingsUpdate):
         config = load_config(config_path)
-        target = next((item for item in config.targets if _target_id(item) == target_id), None)
+        target = next((item for item in config.targets if target_identity(item) == target_id), None)
         if target is None:
             raise HTTPException(404, "续火目标不存在")
         overrides = module_overrides()
@@ -2523,7 +2583,7 @@ def create_app(
                 raise HTTPException(422, "自定义后缀不能为空")
             overrides[target_id] = current
         save_module_overrides(overrides)
-        return {"target_id": _target_id(target), "settings": _effective_target_settings(target, config, overrides.get(target_id))}
+        return {"target_id": target_identity(target), "settings": _effective_target_settings(target, config, overrides.get(target_id))}
 
     @app.put("/api/modules/autody-test-center/targets/{target_id}/settings")
     def test_center_target_settings(target_id: str, payload: TargetSettingsUpdate):
@@ -2965,8 +3025,6 @@ def create_app(
             "repair-playwright",
             "refresh-account-profile",
             "preflight",
-            "install-scheduler",
-            "remove-scheduler",
         }:
             raise HTTPException(404, "未知操作")
         try:

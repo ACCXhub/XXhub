@@ -76,3 +76,13 @@ def test_source_launchers_use_project_local_python_not_console_entrypoint():
     assert ".venv\\Scripts\\python.exe" in installer
     assert "runtime\\python\\python.exe" in installer
     assert '-DataRoot `"$DataRoot`"' in installer
+
+
+def test_scheduled_wrappers_fail_closed_only_for_registered_installed_mode():
+    for path in [Path("scripts/run-scheduled.ps1"), Path("scripts/health-check.ps1")]:
+        text = path.read_text(encoding="utf-8-sig")
+        assert "HKCU:\\Software\\AutoDy" in text
+        assert "Registered installed AutoDy requires explicit ProgramRoot and DataRoot" in text
+        assert "Registered installed AutoDy runtime roots do not match" in text
+        assert "[switch]$DevelopmentMode" in text
+        assert text.index("Registered installed AutoDy requires explicit ProgramRoot and DataRoot") < text.index("$Python =")

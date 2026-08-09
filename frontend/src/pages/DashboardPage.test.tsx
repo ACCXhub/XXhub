@@ -17,7 +17,7 @@ beforeEach(() => {
   apiMocks.failedTargets.mockResolvedValue({ summary: { success: 0, failed: 1, uncertain: 1, needs_attention: 1 }, items: [{ target_id: "t1", display_name: "测试目标", explanation: "发送结果不确定，为避免重复发送，已禁止自动重试。", reason_code: "confirmation_failed_uncertain", uncertain: true, safe_retry_available: false }] });
   apiMocks.serviceIdentity.mockResolvedValue({ application: "AutoDy", version: "1.0.0", git_commit: "abc123", python_executable: "python.exe", package_path: "src/autody", project_path: "project", frontend_build_version: "1.0.0" });
 });
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+afterEach(() => { cleanup(); vi.clearAllMocks(); vi.useRealTimers(); });
 
 test("shows current binding health without treating a historical failure as current abnormal", () => {
   const currentStatus = {
@@ -37,6 +37,47 @@ test("shows current binding health without treating a historical failure as curr
   expect(within(panel as HTMLElement).getByText("绑定有效")).toBeInTheDocument();
   expect(within(panel as HTMLElement).getByText("今日失败")).toBeInTheDocument();
   expect(within(panel as HTMLElement).queryByText("历史会话定位失败")).not.toBeInTheDocument();
+});
+
+test("renders skipped history separately from confirmed success", () => {
+  const historical = {
+    ...status,
+    friends: [{
+      target_id: "target-current", name: "当前目标", status: "pending" as const
+    }],
+    history: [{
+      run_id: "run-historical", date: "2026-08-07", task_type: "daily_send",
+      trigger_source: "retry" as const, success_count: 0, failed_count: 1,
+      skipped_count: 7, total_targets: 8, retry_count: 1,
+      final_status: "final_failed", end_time: "2026-08-07T19:30:39",
+      target_failures: {}
+    }]
+  };
+
+  render(<DashboardPage status={historical} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} />);
+
+  const runTable = screen.getByRole("table", { name: "结构化运行记录" });
+  expect(within(runTable).getByRole("columnheader", { name: "确认成功" })).toBeInTheDocument();
+  expect(within(runTable).getByText("0/8")).toBeInTheDocument();
+  expect(within(runTable).getByText("跳过 7")).toBeInTheDocument();
+  expect(within(runTable).queryByText("7/8")).not.toBeInTheDocument();
+});
+
+test("renders tomorrow and later next-run dates without M/D ambiguity", () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-08-09T12:00:00"));
+  const tomorrow = { ...status, next_run: "2026-08-10T07:30:00" };
+  const { rerender } = render(
+    <DashboardPage status={tomorrow} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} />
+  );
+
+  expect(screen.getByText("明日 07:30")).toBeInTheDocument();
+
+  rerender(
+    <DashboardPage status={{ ...status, next_run: "2026-08-12T07:30:00" }} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} />
+  );
+  expect(screen.getByText("8月12日 07:30")).toBeInTheDocument();
+  expect(screen.queryByText(/8\/12/)).not.toBeInTheDocument();
 });
 
 test("does not render a preflight card or request preflight status on the normal dashboard", async () => {

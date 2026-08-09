@@ -199,14 +199,40 @@ $Shortcut = & (Join-Path $Root "scripts\install-shortcut.ps1") -ProjectRoot $Roo
 if (-not $Shortcut) {
     throw "Shortcut installer returned no shortcut path."
 }
-$requiredTasks = @("AutoDy-DailySpark", "AutoDy-Health-Daily", "AutoDy-Health-Weekly")
-$missingTasks = @($requiredTasks | Where-Object {
-    $null -eq (Get-ScheduledTask -TaskName $_ -ErrorAction SilentlyContinue)
-})
-if ($missingTasks.Count -gt 0) {
-    & (Join-Path $Root "scripts\install-task.ps1")
-} else {
-    Write-Host "[INFO] Existing AutoDy scheduled tasks were retained."
+$TaskProgramRoot = $Root
+$TaskConfig = $Config
+$TaskRepairEnabled = $true
+$Registration = Get-ItemProperty -LiteralPath "HKCU:\Software\AutoDy" -ErrorAction SilentlyContinue
+if ($Registration) {
+    $RegisteredProgramRoot = [string]$Registration.InstallFolder
+    $RegisteredDataRoot = [string]$Registration.DataRoot
+    if (
+        [string]::IsNullOrWhiteSpace($RegisteredProgramRoot) -or
+        [string]::IsNullOrWhiteSpace($RegisteredDataRoot) -or
+        -not (Test-Path -LiteralPath $RegisteredProgramRoot -PathType Container) -or
+        -not (Test-Path -LiteralPath $RegisteredDataRoot -PathType Container)
+    ) {
+        $TaskRepairEnabled = $false
+        Write-Warning "Registered AutoDy roots are incomplete; scheduled tasks were not changed. Repair the installed copy from its Dashboard."
+    } else {
+        $TaskProgramRoot = [IO.Path]::GetFullPath($RegisteredProgramRoot)
+        $TaskConfig = Join-Path ([IO.Path]::GetFullPath($RegisteredDataRoot)) "config.yaml"
+        Write-Host "[INFO] Repairing scheduled tasks for the registered AutoDy installation."
+    }
+}
+if ($TaskRepairEnabled) {
+    $TaskRepairArguments = @(
+        "-m", "autody.cli", "repair-scheduler",
+        "--config", $TaskConfig,
+        "--program-root", $TaskProgramRoot
+    )
+    if ($Registration) {
+        $TaskRepairArguments += "--if-config-exists"
+    }
+    Invoke-NativeChecked `
+        -Stage "Repair scheduled tasks" `
+        -FilePath $Python `
+        -Arguments $TaskRepairArguments
 }
 
 if ($wasRunning) {

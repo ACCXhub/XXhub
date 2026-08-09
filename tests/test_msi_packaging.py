@@ -61,6 +61,34 @@ def test_msi_stops_only_verified_existing_tray_hosts_after_installing_files():
     assert scheduled.attrib["Condition"] == 'NOT REMOVE~="ALL"'
 
 
+def test_msi_upgrade_repairs_scheduler_from_canonical_config_and_roots():
+    namespace = {"w": "http://wixtoolset.org/schemas/v4/wxs"}
+    root = ET.parse("packaging/wix/Product.wxs").getroot()
+
+    action = root.find(
+        ".//w:CustomAction[@Id='RepairInstalledAutoDyTasks']",
+        namespace,
+    )
+    assert action is not None
+    command = action.attrib["ExeCommand"]
+    assert "runtime\\python\\python.exe" in command
+    assert "repair-scheduler" in command
+    assert "[AUTODYDATAROOT]config.yaml" in command
+    assert "--program-root" in command
+    assert "[INSTALLFOLDER]" in command
+    assert "--if-config-exists" in command
+    assert action.attrib["Execute"] == "deferred"
+    assert action.attrib["Impersonate"] == "yes"
+
+    scheduled = root.find(
+        ".//w:InstallExecuteSequence/w:Custom[@Action='RepairInstalledAutoDyTasks']",
+        namespace,
+    )
+    assert scheduled is not None
+    assert scheduled.attrib["After"] == "StopExistingAutoDyTray"
+    assert scheduled.attrib["Condition"] == 'NOT REMOVE~="ALL"'
+
+
 def test_msi_uninstall_shortcut_and_install_folder_resolution_are_msi_native():
     product = Path("packaging/wix/Product.wxs").read_text(encoding="utf-8")
 
