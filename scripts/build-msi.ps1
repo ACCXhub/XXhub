@@ -322,6 +322,9 @@ Reset-OutputDirectory $Work
 $runtimeReady = $ReuseRuntime -and
     (Test-Path -LiteralPath (Join-Path $Stage "runtime\python\python.exe") -PathType Leaf) -and
     (Test-Path -LiteralPath (Join-Path $Stage "runtime\ms-playwright") -PathType Container)
+$pythonRoot = Join-Path $Stage "runtime\python"
+$sitePackages = Join-Path $pythonRoot "Lib\site-packages"
+$packagedPython = Join-Path $pythonRoot "python.exe"
 if (-not $runtimeReady) {
     Reset-OutputDirectory $StageRoot
     New-Item -ItemType Directory -Force -Path $Stage | Out-Null
@@ -334,7 +337,6 @@ if (-not $runtimeReady) {
         throw "Embedded Python archive checksum mismatch."
     }
 
-    $pythonRoot = Join-Path $Stage "runtime\python"
     New-Item -ItemType Directory -Force -Path $pythonRoot | Out-Null
     Expand-Archive -LiteralPath $EmbeddedPython -DestinationPath $pythonRoot -Force
     @(
@@ -344,45 +346,11 @@ if (-not $runtimeReady) {
         "import site"
     ) | Set-Content -LiteralPath (Join-Path $pythonRoot "python311._pth") -Encoding ascii
 
-    $wheelRoot = Join-Path $Work "wheel"
-    New-Item -ItemType Directory -Force -Path $wheelRoot | Out-Null
-    Invoke-NativeChecked "Build AutoDy wheel" $HostPython @(
-        "-m", "pip", "--disable-pip-version-check", "wheel", "--quiet",
-        "--no-deps", "--wheel-dir", $wheelRoot, $Root
-    )
-    $wheels = @(Get-ChildItem -LiteralPath $wheelRoot -Filter "autody-$Version-*.whl" -File)
-    if ($wheels.Count -ne 1) {
-        throw "The AutoDy wheel was not produced."
-    }
-    $wheel = $wheels[0]
-
-    $sitePackages = Join-Path $pythonRoot "Lib\site-packages"
     New-Item -ItemType Directory -Force -Path $sitePackages | Out-Null
     Invoke-NativeChecked "Install pinned runtime dependencies" $HostPython @(
         "-m", "pip", "--disable-pip-version-check", "install", "--quiet",
         "--only-binary=:all:", "--target", $sitePackages,
         "-r", (Join-Path $Root "packaging\runtime-requirements.txt")
-    )
-    Invoke-NativeChecked "Install AutoDy runtime package" $HostPython @(
-        "-m", "pip", "--disable-pip-version-check", "install", "--quiet",
-        "--upgrade", "--no-deps", "--target", $sitePackages, $wheel.FullName
-    )
-
-    Get-ChildItem -LiteralPath $sitePackages -Recurse -Force -Directory |
-        Where-Object { $_.Name -in @("__pycache__", "tests", "test") } |
-        Sort-Object FullName -Descending |
-        Remove-Item -Recurse -Force
-    Get-ChildItem -LiteralPath $sitePackages -Recurse -Force -File |
-        Where-Object { $_.Extension -in @(".pyc", ".obj", ".lib", ".pdb") -or $_.Name -eq "direct_url.json" } |
-        Remove-Item -Force
-    $generatedScripts = Join-Path $sitePackages "bin"
-    if (Test-Path -LiteralPath $generatedScripts) {
-        Remove-Item -LiteralPath $generatedScripts -Recurse -Force
-    }
-
-    $packagedPython = Join-Path $pythonRoot "python.exe"
-    Invoke-NativeChecked "Validate embedded Python runtime" $packagedPython @(
-        "-c", "from importlib.metadata import version; import autody; assert version('autody') == '$Version'"
     )
     $browserRoot = Join-Path $Stage "runtime\ms-playwright"
     Invoke-NativeChecked "Install packaged Chromium" $packagedPython @(
@@ -393,8 +361,61 @@ if (-not $runtimeReady) {
     }
 }
 
-$sitePackages = Join-Path $Stage "runtime\python\Lib\site-packages"
+$wheelRoot = Join-Path $Work "wheel"
+New-Item -ItemType Directory -Force -Path $wheelRoot | Out-Null
+Invoke-NativeChecked "Build AutoDy wheel" $HostPython @(
+    "-m", "pip", "--disable-pip-version-check", "wheel", "--quiet",
+    "--no-deps", "--wheel-dir", $wheelRoot, $Root
+)
+$wheels = @(Get-ChildItem -LiteralPath $wheelRoot -Filter "autody-$Version-*.whl" -File)
+if ($wheels.Count -ne 1) {
+    throw "The AutoDy wheel was not produced."
+}
+$wheel = $wheels[0]
+$installedPackage = Join-Path $sitePackages "autody"
+if (Test-Path -LiteralPath $installedPackage) {
+    Remove-Item -LiteralPath $installedPackage -Recurse -Force
+}
+Get-ChildItem -LiteralPath $sitePackages -Directory -Filter "autody-*.dist-info" |
+    Remove-Item -Recurse -Force
+Invoke-NativeChecked "Install AutoDy runtime package" $HostPython @(
+    "-m", "pip", "--disable-pip-version-check", "install", "--quiet",
+    "--upgrade", "--no-deps", "--target", $sitePackages, $wheel.FullName
+)
+Invoke-NativeChecked "Validate embedded Python runtime" $packagedPython @(
+    "-c", "from importlib.metadata import version; import autody; assert version('autody') == '$Version'"
+)
+$sourceStatic = Join-Path $Root "src\autody\web\static"
+$packagedStatic = Join-Path $sitePackages "autody\web\static"
+$sourceStaticFiles = @(
+    Get-ChildItem -LiteralPath $sourceStatic -Recurse -File |
+        ForEach-Object { $_.FullName.Substring($sourceStatic.Length + 1) }
+)
+$packagedStaticFiles = @(
+    Get-ChildItem -LiteralPath $packagedStatic -Recurse -File |
+        ForEach-Object { $_.FullName.Substring($packagedStatic.Length + 1) }
+)
+$staticMismatch = Compare-Object $sourceStaticFiles $packagedStaticFiles
+if (-not $staticMismatch) {
+    foreach ($relative in $sourceStaticFiles) {
+        if (
+            (Get-ReleaseFileSha256 -Path (Join-Path $sourceStatic $relative)) -ne
+            (Get-ReleaseFileSha256 -Path (Join-Path $packagedStatic $relative))
+        ) {
+            $staticMismatch = $true
+            break
+        }
+    }
+}
+if ($staticMismatch) {
+    throw "MSI staging frontend does not match the current production build."
+}
+
 if (Test-Path -LiteralPath $sitePackages -PathType Container) {
+    Get-ChildItem -LiteralPath $sitePackages -Recurse -Force -Directory |
+        Where-Object { $_.Name -in @("__pycache__", "tests", "test") } |
+        Sort-Object FullName -Descending |
+        Remove-Item -Recurse -Force
     Get-ChildItem -LiteralPath $sitePackages -Recurse -Force -File |
         Where-Object { $_.Extension -in @(".pyc", ".obj", ".lib", ".pdb") -or $_.Name -eq "direct_url.json" } |
         Remove-Item -Force

@@ -152,6 +152,17 @@ def test_msi_builder_uses_explicit_allowlist_and_clean_runtime():
     assert "[Convert]::ToHexString" not in builder
 
 
+def test_reused_msi_runtime_still_refreshes_the_current_autody_package():
+    builder = Path("scripts/build-msi.ps1").read_text(encoding="utf-8-sig")
+    reusable_runtime_setup = builder.index(
+        '$browserRoot = Join-Path $Stage "runtime\\ms-playwright"'
+    )
+
+    assert builder.index('"Build AutoDy wheel"') > reusable_runtime_setup
+    assert builder.index('"Install AutoDy runtime package"') > reusable_runtime_setup
+    assert "MSI staging frontend does not match the current production build" in builder
+
+
 def test_generated_payload_components_use_hkcu_registry_keypaths():
     builder = Path("scripts/build-msi.ps1").read_text(encoding="utf-8-sig")
 
