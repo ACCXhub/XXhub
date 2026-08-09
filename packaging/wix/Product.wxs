@@ -58,7 +58,7 @@
     <CustomAction
       Id="RepairInstalledAutoDyTasks"
       Directory="INSTALLFOLDER"
-      ExeCommand="&quot;[INSTALLFOLDER]runtime\python\python.exe&quot; -m autody.cli repair-scheduler --config &quot;[AUTODYDATAROOT]config.yaml&quot; --program-root &quot;[INSTALLFOLDER]&quot; --if-config-exists"
+      ExeCommand="&quot;[INSTALLFOLDER]runtime\python\python.exe&quot; -m autody.cli repair-scheduler --config &quot;[AUTODYDATAROOT]config.yaml&quot; --program-root &quot;[INSTALLFOLDER].&quot; --if-config-exists"
       Execute="deferred"
       Impersonate="yes"
       Return="check" />

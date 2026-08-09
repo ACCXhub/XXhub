@@ -74,8 +74,8 @@ def test_msi_upgrade_repairs_scheduler_from_canonical_config_and_roots():
     assert "runtime\\python\\python.exe" in command
     assert "repair-scheduler" in command
     assert "[AUTODYDATAROOT]config.yaml" in command
-    assert "--program-root" in command
-    assert "[INSTALLFOLDER]" in command
+    assert '--program-root "[INSTALLFOLDER]."' in command
+    assert '--program-root "[INSTALLFOLDER]"' not in command
     assert "--if-config-exists" in command
     assert action.attrib["Execute"] == "deferred"
     assert action.attrib["Impersonate"] == "yes"
