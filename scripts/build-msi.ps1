@@ -440,6 +440,33 @@ if (Test-Path -LiteralPath $sitePackages -PathType Container) {
     if (Test-Path -LiteralPath $generatedScripts) {
         Remove-Item -LiteralPath $generatedScripts -Recurse -Force
     }
+    $autodyDistInfo = @(
+        Get-ChildItem -LiteralPath $sitePackages -Directory -Filter "autody-$Version.dist-info"
+    )
+    if ($autodyDistInfo.Count -ne 1) {
+        throw 'MSI staging must contain exactly one AutoDy distribution metadata directory.'
+    }
+    $recordPath = Join-Path $autodyDistInfo[0].FullName 'RECORD'
+    $recordLines = [IO.File]::ReadAllLines($recordPath)
+    $generatedLauncherPrefix = '../../bin/autody.exe,'
+    $generatedLauncherRecords = @(
+        $recordLines | Where-Object {
+            $_.StartsWith($generatedLauncherPrefix, [StringComparison]::OrdinalIgnoreCase)
+        }
+    )
+    if ($generatedLauncherRecords.Count -ne 1) {
+        throw 'AutoDy distribution metadata must contain exactly one generated launcher record.'
+    }
+    $normalizedRecord = @(
+        $recordLines | Where-Object {
+            -not $_.StartsWith($generatedLauncherPrefix, [StringComparison]::OrdinalIgnoreCase)
+        }
+    )
+    [IO.File]::WriteAllText(
+        $recordPath,
+        (($normalizedRecord -join "`n") + "`n"),
+        (New-Object Text.UTF8Encoding($false))
+    )
 }
 $playwrightLinks = Join-Path $Stage "runtime\ms-playwright\.links"
 if (Test-Path -LiteralPath $playwrightLinks) {
@@ -536,7 +563,10 @@ try {
             $directory = Split-Path -Parent $directory
         }
     }
-    $directories = @($directorySet | Sort-Object { ($_ -split '\\').Count }, { $_ })
+    $directories = @(
+        $directorySet |
+            Sort-Object { ($_ -split '\\').Count }, { Get-StableId $_ }
+    )
     foreach ($directory in $directories) {
         $parent = Split-Path -Parent $directory
         $parentId = if ($parent) { "Dir_$(Get-StableId $parent)" } else { "INSTALLFOLDER" }
@@ -553,7 +583,9 @@ try {
     $writer.WriteStartElement("Fragment")
     $writer.WriteStartElement("ComponentGroup")
     $writer.WriteAttributeString("Id", "PayloadComponents")
-    foreach ($file in ($stagedFiles | Sort-Object FullName)) {
+    foreach ($file in ($stagedFiles | Sort-Object {
+        Get-StableId $_.FullName.Substring($Stage.Length + 1)
+    })) {
         $relative = $file.FullName.Substring($Stage.Length + 1)
         $directory = Split-Path -Parent $relative
         $directoryId = "INSTALLFOLDER"
@@ -589,7 +621,7 @@ try {
     $writer.WriteEndElement()
     $directoriesForRemoval = $directories | Sort-Object `
         @{ Expression = { ($_ -split '\\').Count }; Descending = $true },
-        @{ Expression = { $_ }; Descending = $false }
+        @{ Expression = { Get-StableId $_ }; Descending = $false }
     foreach ($directory in $directoriesForRemoval) {
         $directoryHash = Get-StableId $directory
         $writer.WriteStartElement("RemoveFolder")
