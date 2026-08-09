@@ -5,7 +5,8 @@ param(
     [string]$DailyHealthCheckTime = "07:20",
     [ValidatePattern('^([01]\d|2[0-3]):[0-5]\d$')]
     [string]$DailySendTime = "07:30",
-    [bool]$WeeklyHealthCheckEnabled = $true,
+    [ValidateSet(0, 1)]
+    [int]$WeeklyHealthCheckEnabled = 1,
     [ValidateSet('Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday')]
     [string]$WeeklyHealthCheckWeekday = "Sunday",
     [ValidatePattern('^([01]\d|2[0-3]):[0-5]\d$')]

@@ -114,7 +114,7 @@ class SchedulerService:
             "-DataRoot", str(self.data_root),
             "-DailyHealthCheckTime", config.daily_health_check_time,
             "-DailySendTime", config.daily_send_time,
-            "-WeeklyHealthCheckEnabled", "$true" if config.weekly_health_check_enabled else "$false",
+            "-WeeklyHealthCheckEnabled", "1" if config.weekly_health_check_enabled else "0",
             "-WeeklyHealthCheckWeekday", config.weekly_health_check_weekday,
             "-WeeklyHealthCheckTime", config.weekly_health_check_time,
         ]

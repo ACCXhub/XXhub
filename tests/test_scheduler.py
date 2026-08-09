@@ -78,3 +78,30 @@ def test_packaged_scheduler_repair_passes_program_and_data_roots(
 
     assert captured[captured.index("-ProgramRoot") + 1] == str(program_root.resolve())
     assert captured[captured.index("-DataRoot") + 1] == str(data_root.resolve())
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_packaged_scheduler_repair_crosses_powershell_native_boolean_boundary(
+    tmp_path: Path, enabled: bool
+):
+    program_root = tmp_path / "program"
+    data_root = tmp_path / "user-data"
+    scripts = program_root / "scripts"
+    scripts.mkdir(parents=True)
+    data_root.mkdir()
+    (scripts / "install-task.ps1").write_text(
+        Path("scripts/install-task.ps1").read_text(encoding="utf-8-sig"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        SchedulerService(program_root, data_root=data_root).repair(
+            AppConfig(
+                targets=[Target(name="fixture")],
+                weekly_health_check_enabled=enabled,
+            )
+        )
+    error = str(exc_info.value)
+    assert "Missing " in error
+    assert "python.exe" in error
+    assert "argument transformation" not in error
