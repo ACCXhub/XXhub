@@ -224,7 +224,14 @@ function Test-ExtractedTree {
     $files = @(Get-ChildItem -LiteralPath $Path -Recurse -Force -File)
     foreach ($file in $files) {
         $relative = $file.FullName.Substring($Path.Length).TrimStart('\')
-        if (Test-ForbiddenEntryPath $relative) {
+        $normalizedRelative = $relative.Replace('\', '/')
+        $allowedInitialConfig = (
+            $ArtifactLabel -eq 'msi-admin' -and
+            $normalizedRelative -ieq 'LocalApp/AutoDy/config.yaml' -and
+            (Get-ReleaseFileSha256 -Path $file.FullName) -eq
+                (Get-ReleaseFileSha256 -Path (Join-Path $Root 'config.example.yaml'))
+        )
+        if ((Test-ForbiddenEntryPath $relative) -and -not $allowedInitialConfig) {
             [void]$findings.Add([ordered]@{
                 category = "forbidden_entry"
                 file = "$ArtifactLabel/$($relative.Replace('\', '/'))"
@@ -329,10 +336,14 @@ try {
                 }
             }
             $expectedCustomActions = @(
+                [pscustomobject]@{ Action = 'CaptureInteractiveUserSid'; Type = '307'; Source = 'AUTODY_INTERACTIVE_USER_SID'; Target = '[UserSID]' },
+                [pscustomobject]@{ Action = 'CaptureInteractiveLocalAppData'; Type = '307'; Source = 'AUTODY_INTERACTIVE_LOCALAPPDATA'; Target = '[LocalAppDataFolder]' },
+                [pscustomobject]@{ Action = 'SetAutoDyDataRoot'; Type = '51'; Source = 'AUTODYDATAROOT'; Target = '[AUTODY_INTERACTIVE_LOCALAPPDATA]AutoDy\' },
                 [pscustomobject]@{ Action = 'SetExistingInstallFolder'; Type = '51'; Source = 'INSTALLFOLDER'; Target = '[AUTODY_EXISTING_INSTALLFOLDER]' },
                 [pscustomobject]@{ Action = 'SetDDriveInstallFolder'; Type = '51'; Source = 'INSTALLFOLDER'; Target = 'D:\AutoDy' },
                 [pscustomobject]@{ Action = 'StopExistingAutoDyTray'; Type = '1058'; Source = 'INSTALLFOLDER'; Target = '"[SystemFolder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "[INSTALLFOLDER]scripts\autody-tray.ps1" -StopExisting' },
-                [pscustomobject]@{ Action = 'RepairInstalledAutoDyTasks'; Type = '1058'; Source = 'INSTALLFOLDER'; Target = '"[INSTALLFOLDER]runtime\python\python.exe" -m autody.cli repair-scheduler --config "[AUTODYDATAROOT]config.yaml" --program-root "[INSTALLFOLDER]." --if-config-exists' },
+                [pscustomobject]@{ Action = 'SetRepairInstalledAutoDyTasksData'; Type = '51'; Source = 'RepairInstalledAutoDyTasks'; Target = '"[INSTALLFOLDER]runtime\python\python.exe" -m autody.cli repair-scheduler --config "[AUTODYDATAROOT]config.yaml" --program-root "[INSTALLFOLDER]." --data-root "[AUTODYDATAROOT]." --task-user-id "[AUTODY_INTERACTIVE_USER_SID]"' },
+                [pscustomobject]@{ Action = 'RepairInstalledAutoDyTasks'; Type = '3106'; Source = 'INSTALLFOLDER'; Target = '[CustomActionData]' },
                 [pscustomobject]@{ Action = 'Wix4RemoveFoldersEx_X64'; Type = '65'; Source = 'Wix4UtilCA_X64'; Target = 'WixRemoveFoldersEx' }
             )
             $unexpectedCustomAction = $customActionRows.Count -ne $expectedCustomActions.Count
@@ -380,6 +391,17 @@ try {
             })
         } else {
             $counts.administrative_files = Test-ExtractedTree $AdminExtract "msi-admin"
+            $seedConfigs = @(Get-ChildItem -LiteralPath $AdminExtract -Recurse -File -Filter 'config.yaml')
+            if (
+                $seedConfigs.Count -ne 1 -or
+                (Get-ReleaseFileSha256 -Path $seedConfigs[0].FullName) -ne
+                    (Get-ReleaseFileSha256 -Path (Join-Path $Root 'config.example.yaml'))
+            ) {
+                [void]$findings.Add([ordered]@{
+                    category = "invalid_initial_config_seed"
+                    file = "MSI administrative image"
+                })
+            }
             if ($counts.administrative_files -ne ($counts.msi_files + 1)) {
                 [void]$findings.Add([ordered]@{
                     category = "administrative_payload_count_mismatch"
