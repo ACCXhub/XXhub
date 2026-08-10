@@ -6,9 +6,6 @@ import os
 from pathlib import Path
 import shutil
 from typing import Callable
-from urllib.parse import urljoin
-
-import httpx
 
 
 class ImportMode(str, Enum):
@@ -24,8 +21,6 @@ class MessagePack:
     description: str
     version: str
     file: str
-    relative_url: str
-    raw_url: str | None
     count: int
     category: str
 
@@ -33,8 +28,6 @@ class MessagePack:
 @dataclass(frozen=True)
 class PackCatalog:
     packs: list[MessagePack]
-    source: str
-    warning: str | None = None
 
 
 @dataclass(frozen=True)
@@ -42,8 +35,6 @@ class PackPreview:
     pack: MessagePack
     messages: list[str]
     duplicate_count: int
-    source: str
-    warning: str | None = None
 
 
 @dataclass(frozen=True)
@@ -53,32 +44,20 @@ class ImportResult:
     total_count: int
     backup_path: Path | None
     mode: ImportMode
-    source: str
-    warning: str | None = None
 
 
 class MessagePackError(RuntimeError):
     pass
 
 
-def _default_fetch_text(url: str) -> str:
-    response = httpx.get(url, timeout=12, follow_redirects=True)
-    response.raise_for_status()
-    return response.text
-
-
 class MessagePackService:
     def __init__(
         self,
         root: Path,
-        remote_index_url: str | None = None,
-        fetch_text: Callable[[str], str] | None = None,
         now: Callable[[], datetime] | None = None,
     ):
         self.root = root.resolve()
         self.pack_dir = self.root / "message-packs"
-        self.remote_index_url = remote_index_url.strip() if remote_index_url else None
-        self.fetch_text = fetch_text or _default_fetch_text
         self.now = now or datetime.now
 
     def _parse_index(self, text: str) -> list[MessagePack]:
@@ -99,24 +78,10 @@ class MessagePackService:
         return self._parse_index(index.read_text(encoding="utf-8"))
 
     def list_packs(self) -> PackCatalog:
-        if self.remote_index_url:
-            try:
-                packs = self._parse_index(self.fetch_text(self.remote_index_url))
-                return PackCatalog(packs=packs, source="remote")
-            except (OSError, httpx.HTTPError, MessagePackError) as exc:
-                return PackCatalog(
-                    packs=self._local_packs(),
-                    source="local",
-                    warning=f"远程文案库不可用，已使用内置文案包：{exc}",
-                )
-        return PackCatalog(
-            packs=self._local_packs(),
-            source="local",
-            warning="未配置 GitHub 远程索引，当前使用内置文案包。",
-        )
+        return PackCatalog(packs=self._local_packs())
 
     def _local_pack_text(self, pack: MessagePack) -> str:
-        candidate = (self.pack_dir / (pack.relative_url or pack.file)).resolve()
+        candidate = (self.pack_dir / pack.file).resolve()
         if self.pack_dir not in candidate.parents or not candidate.is_file():
             raise MessagePackError(f"内置文案包文件不存在：{pack.file}")
         return candidate.read_text(encoding="utf-8")
@@ -126,26 +91,7 @@ class MessagePackService:
         pack = next((item for item in catalog.packs if item.id == pack_id), None)
         if pack is None:
             raise MessagePackError(f"未知文案包：{pack_id}")
-        source = catalog.source
-        warning = catalog.warning
-        if source == "remote":
-            remote_url = pack.raw_url or urljoin(
-                self.remote_index_url or "", pack.relative_url
-            )
-            try:
-                text = self.fetch_text(remote_url)
-            except (OSError, httpx.HTTPError) as exc:
-                local_pack = next(
-                    (item for item in self._local_packs() if item.id == pack_id), None
-                )
-                if local_pack is None:
-                    raise MessagePackError(f"远程文案包下载失败：{exc}") from exc
-                pack = local_pack
-                text = self._local_pack_text(pack)
-                source = "local"
-                warning = f"远程文案包下载失败，已使用内置版本：{exc}"
-        else:
-            text = self._local_pack_text(pack)
+        text = self._local_pack_text(pack)
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         messages = list(dict.fromkeys(lines))
         if not messages:
@@ -154,8 +100,6 @@ class MessagePackService:
             pack=pack,
             messages=messages,
             duplicate_count=len(lines) - len(messages),
-            source=source,
-            warning=warning,
         )
 
     def _backup(self, messages_file: Path) -> Path | None:
@@ -200,8 +144,6 @@ class MessagePackService:
                 total_count=len(existing),
                 backup_path=None,
                 mode=mode,
-                source=preview.source,
-                warning=preview.warning,
             )
         backup = self._backup(messages_file)
         if mode is ImportMode.MERGE:
@@ -223,6 +165,4 @@ class MessagePackService:
             total_count=len(final),
             backup_path=backup,
             mode=mode,
-            source=preview.source,
-            warning=preview.warning,
         )

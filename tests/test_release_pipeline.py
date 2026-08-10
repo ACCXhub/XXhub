@@ -27,13 +27,13 @@ def run_powershell(command: str, *, env: dict[str, str]) -> subprocess.Completed
 def test_release_path_guard_accepts_only_the_canonical_version_directory(
     tmp_path: Path, monkeypatch
 ):
-    canonical = tmp_path / "output" / "release" / "v1.4.2"
+    canonical = tmp_path / "output" / "release" / "v1.4.3"
     canonical.mkdir(parents=True)
-    artifact = canonical / "AutoDy-1.4.2-x64.msi"
+    artifact = canonical / "AutoDy-1.4.3-x64.msi"
     artifact.write_bytes(b"fixture-msi")
     intermediate = tmp_path / "packaging" / "wix" / "obj" / "x64" / "Debug"
     intermediate.mkdir(parents=True)
-    debug_artifact = intermediate / "AutoDy-1.4.2-x64.msi"
+    debug_artifact = intermediate / "AutoDy-1.4.3-x64.msi"
     debug_artifact.write_bytes(b"fixture-msi")
 
     monkeypatch.setenv("AUTODY_TEST_ROOT", str(tmp_path))
@@ -44,13 +44,13 @@ def test_release_path_guard_accepts_only_the_canonical_version_directory(
         r"""
         $ErrorActionPreference = "Stop"
         . $env:AUTODY_RELEASE_COMMON
-        $release = Get-CanonicalReleaseDirectory -Root $env:AUTODY_TEST_ROOT -Version "1.4.2"
+        $release = Get-CanonicalReleaseDirectory -Root $env:AUTODY_TEST_ROOT -Version "1.4.3"
         $accepted = Assert-CanonicalReleaseArtifact `
-            -Root $env:AUTODY_TEST_ROOT -Version "1.4.2" -Path $env:AUTODY_TEST_ARTIFACT
+            -Root $env:AUTODY_TEST_ROOT -Version "1.4.3" -Path $env:AUTODY_TEST_ARTIFACT
         $rejected = $false
         try {
           Assert-CanonicalReleaseArtifact `
-              -Root $env:AUTODY_TEST_ROOT -Version "1.4.2" -Path $env:AUTODY_TEST_DEBUG_ARTIFACT
+              -Root $env:AUTODY_TEST_ROOT -Version "1.4.3" -Path $env:AUTODY_TEST_DEBUG_ARTIFACT
         } catch {
           $rejected = $true
         }
@@ -71,9 +71,9 @@ def test_release_path_guard_accepts_only_the_canonical_version_directory(
 
 
 def test_release_manifest_hashes_real_canonical_artifacts(tmp_path: Path, monkeypatch):
-    canonical = tmp_path / "output" / "release" / "v1.4.2"
+    canonical = tmp_path / "output" / "release" / "v1.4.3"
     canonical.mkdir(parents=True)
-    artifact = canonical / "AutoDy-Windows-Portable-1.4.2.zip"
+    artifact = canonical / "AutoDy-Windows-Portable-1.4.3.zip"
     payload = b"portable-fixture\n"
     artifact.write_bytes(payload)
 
@@ -86,7 +86,7 @@ def test_release_manifest_hashes_real_canonical_artifacts(tmp_path: Path, monkey
         . $env:AUTODY_RELEASE_COMMON
         $manifest = New-ReleaseManifestData `
             -Root $env:AUTODY_TEST_ROOT `
-            -Version "1.4.2" `
+            -Version "1.4.3" `
             -Commit "0123456789abcdef0123456789abcdef01234567" `
             -Configuration "Release" `
             -ArtifactPaths @($env:AUTODY_TEST_ARTIFACT) `
@@ -101,7 +101,7 @@ def test_release_manifest_hashes_real_canonical_artifacts(tmp_path: Path, monkey
 
     assert completed.returncode == 0, completed.stderr
     manifest = json.loads(completed.stdout)
-    assert manifest["version"] == "1.4.2"
+    assert manifest["version"] == "1.4.3"
     assert manifest["commit"] == "0123456789abcdef0123456789abcdef01234567"
     assert manifest["configuration"] == "Release"
     assert manifest["privacy_scan"] == "passed"
@@ -110,7 +110,7 @@ def test_release_manifest_hashes_real_canonical_artifacts(tmp_path: Path, monkey
     assert manifest["upgrade_code"] == "{22222222-2222-2222-2222-222222222222}"
     assert manifest["artifacts"] == [
         {
-            "file": "AutoDy-Windows-Portable-1.4.2.zip",
+            "file": "AutoDy-Windows-Portable-1.4.3.zip",
             "size": len(payload),
             "sha256": hashlib.sha256(payload).hexdigest(),
         }
@@ -171,8 +171,8 @@ def test_public_build_plans_use_release_configuration_and_canonical_outputs(
     completed = run_powershell(
         r"""
         $ErrorActionPreference = "Stop"
-        $msi = & $env:AUTODY_BUILD_MSI -Version "1.4.2" -PlanOnly | ConvertFrom-Json
-        $portable = & $env:AUTODY_BUILD_PORTABLE -Version "1.4.2" -PlanOnly | ConvertFrom-Json
+        $msi = & $env:AUTODY_BUILD_MSI -Version "1.4.3" -PlanOnly | ConvertFrom-Json
+        $portable = & $env:AUTODY_BUILD_PORTABLE -Version "1.4.3" -PlanOnly | ConvertFrom-Json
         [pscustomobject]@{ msi = $msi; portable = $portable } |
           ConvertTo-Json -Depth 6 -Compress
         """,
@@ -191,10 +191,10 @@ def test_public_build_plans_use_release_configuration_and_canonical_outputs(
     ).stdout.strip()
     assert plans["msi"]["source_revision"] == source_revision
     assert plans["msi"]["artifact"].endswith(
-        r"output\release\v1.4.2\AutoDy-1.4.2-x64.msi"
+        r"output\release\v1.4.3\AutoDy-1.4.3-x64.msi"
     )
     assert plans["portable"]["artifact"].endswith(
-        r"output\release\v1.4.2\AutoDy-Windows-Portable-1.4.2.zip"
+        r"output\release\v1.4.3\AutoDy-Windows-Portable-1.4.3.zip"
     )
     assert plans["msi"]["release_directory"] == plans["portable"][
         "release_directory"
@@ -215,15 +215,15 @@ def test_msi_package_identity_changes_with_revision_without_changing_product_ide
         . $env:AUTODY_RELEASE_COMMON
         [pscustomobject]@{
           product_a = Get-ReproducibleMsiGuid `
-            -Purpose product -Version "1.4.2" -IdentitySeed ('a' * 40)
+            -Purpose product -Version "1.4.3" -IdentitySeed ('a' * 40)
           product_b = Get-ReproducibleMsiGuid `
-            -Purpose product -Version "1.4.2" -IdentitySeed ('b' * 40)
+            -Purpose product -Version "1.4.3" -IdentitySeed ('b' * 40)
           package_a = Get-ReproducibleMsiGuid `
-            -Purpose package -Version "1.4.2" -IdentitySeed ('a' * 40)
+            -Purpose package -Version "1.4.3" -IdentitySeed ('a' * 40)
           package_a_repeat = Get-ReproducibleMsiGuid `
-            -Purpose package -Version "1.4.2" -IdentitySeed ('a' * 40)
+            -Purpose package -Version "1.4.3" -IdentitySeed ('a' * 40)
           package_b = Get-ReproducibleMsiGuid `
-            -Purpose package -Version "1.4.2" -IdentitySeed ('b' * 40)
+            -Purpose package -Version "1.4.3" -IdentitySeed ('b' * 40)
         } | ConvertTo-Json -Compress
         """,
         env=dict(__import__("os").environ),
@@ -247,12 +247,12 @@ def test_portable_release_archive_is_byte_reproducible(monkeypatch):
         "-File",
         str(BUILD_PORTABLE),
         "-Version",
-        "1.4.2",
+        "1.4.3",
     ]
 
     first = subprocess.run(command, capture_output=True, env=env, check=False)
     assert first.returncode == 0, first.stderr.decode("utf-8", errors="replace")
-    archive = Path("output/release/v1.4.2/AutoDy-Windows-Portable-1.4.2.zip")
+    archive = Path("output/release/v1.4.3/AutoDy-Windows-Portable-1.4.3.zip")
     first_bytes = archive.read_bytes()
     second = subprocess.run(command, capture_output=True, env=env, check=False)
     assert second.returncode == 0, second.stderr.decode("utf-8", errors="replace")
@@ -283,10 +283,10 @@ def test_msi_release_is_byte_reproducible_with_stable_identity(monkeypatch):
         "-File",
         str(BUILD_MSI),
         "-Version",
-        "1.4.2",
+        "1.4.3",
         "-ReuseRuntime",
     ]
-    archive = Path("output/release/v1.4.2/AutoDy-1.4.2-x64.msi")
+    archive = Path("output/release/v1.4.3/AutoDy-1.4.3-x64.msi")
 
     def build_and_inspect() -> dict[str, str]:
         completed = subprocess.run(command, capture_output=True, env=env, check=False)

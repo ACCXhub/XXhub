@@ -7,8 +7,6 @@
       "description": "自然简短的每日问候，适合多数朋友。",
       "version": "1.0.0",
       "file": "daily-greeting.txt",
-      "relative_url": "daily-greeting.txt",
-      "raw_url": null,
       "count": 50,
       "category": "daily"
     },
@@ -18,8 +16,6 @@
       "description": "带一点俏皮感的轻量问候。",
       "version": "1.0.0",
       "file": "cute-style.txt",
-      "relative_url": "cute-style.txt",
-      "raw_url": null,
       "count": 50,
       "category": "cute"
     },
@@ -29,8 +25,6 @@
       "description": "不冒犯、不夸张的日常趣味文案。",
       "version": "1.0.0",
       "file": "funny-style.txt",
-      "relative_url": "funny-style.txt",
-      "raw_url": null,
       "count": 50,
       "category": "funny"
     },
@@ -40,8 +34,6 @@
       "description": "克制自然的生活关心和小提醒。",
       "version": "1.0.0",
       "file": "light-care.txt",
-      "relative_url": "light-care.txt",
-      "raw_url": null,
       "count": 50,
       "category": "care"
     },
@@ -51,8 +43,6 @@
       "description": "适合常见节日与四季时令的通用祝福。",
       "version": "1.0.0",
       "file": "festival.txt",
-      "relative_url": "festival.txt",
-      "raw_url": null,
       "count": 50,
       "category": "festival"
     }

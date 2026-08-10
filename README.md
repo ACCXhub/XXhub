@@ -4,23 +4,24 @@ AutoDy 是 Windows 本机运行的 Douyin 私信工作流管理台。它管理�
 
 ## 当前状态
 
-AutoDy 1.4.2 是发布候选，等待最终 Release CI 通过；尚未创建 v1.4.2 标签或 Release。v1.4.0 与 v1.4.1 已存在，不会被移动。官方 Test Center 为 1.2.0，模块 API 为 1，兼容范围为 >=1.3.0,<2.0.0。
+AutoDy 1.4.3 是已验证稳定源码基线，尚未创建 v1.4.3 标签或 GitHub Release；本地 MSI 仅用于冻结验证，不是公开发布资产。v1.4.0 与 v1.4.1 已存在，不会被移动。官方 Test Center 为 1.2.0，模块 API 为 1，兼容范围为 >=1.3.0,<2.0.0。
 
 ## 主要能力
 
 - 本地 Dashboard、账号/目标、文案、计划、状态、历史和诊断。
 - 受管浏览器资料隔离，身份不一致、草稿、附件或不确定结果时停止。
-- 安全重试、恢复状态、最终失败通知去重和已解决历史标记。
+- 仅对明确可安全重试的当日失败目标提供补发；不确定结果保持停止。
+- 历史日级成功率和连续成功天数使用当天事实，后续目标配置不会改写过去。
 - Windows 托盘单实例、服务身份验证、已验证服务复用和计划任务独立运行。
 - 首选端口 8765；无关监听者占用时安全回退到 8766–8799，不终止对方。
-- MSI 安装、Repair、升级和卸载；程序目录与 %LocalAppData%\AutoDy 数据目录分离。
+- MSI 安装、Repair、升级和卸载；提升安装仍显式绑定原交互用户的任务 Principal 与 %LocalAppData%\AutoDy 数据目录。
 
 ## 安装摘要
 
 普通用户请在正式 Release 下载 MSI 与同名 SHA-256 文件。新安装优先 D:\AutoDy，D: 不可用时回退至 %LocalAppData%\Programs\AutoDy；用户可写数据始终位于 %LocalAppData%\AutoDy，卸载默认保留。portable 包适合技术用户，仍需要 Python 3.11 与网络；源码包只用于开发。
 
 ~~~powershell
-Get-FileHash -Algorithm SHA256 '.\AutoDy-1.4.2-x64.msi'
+Get-FileHash -Algorithm SHA256 '.\AutoDy-1.4.3-x64.msi'
 ~~~
 
 结果必须和同名 .sha256 文件一致。安装、端口、修复、升级和卸载的完整步骤见[安装部署与用户手册](docs/软件工程/03-安装部署与用户手册.md)。
@@ -39,7 +40,7 @@ Get-FileHash -Algorithm SHA256 '.\AutoDy-1.4.2-x64.msi'
 - [运维维护与故障排查](docs/软件工程/05-运维维护与故障排查.md)
 - [隐私与安全设计](docs/软件工程/06-隐私与安全设计.md)
 - [项目交接说明](docs/软件工程/07-项目交接说明.md)
-- [v1.4.2 发布说明](docs/软件工程/08-v1.4.2发布说明.md)
+- [v1.4.3 发布说明](docs/软件工程/08-v1.4.3发布说明.md)
 - [变更记录](CHANGELOG.md)
 
 ## 许可证

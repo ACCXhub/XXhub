@@ -119,6 +119,69 @@ def test_partial_send_result_is_resolved_after_later_clean_retry(tmp_path: Path)
     assert partial_failure.status == "resolved"
 
 
+def test_friend_scan_error_is_resolved_after_later_complete_scan(tmp_path: Path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "autody-2026-07-14.log").write_text(
+        "2026-07-14 08:00:00,000 ERROR 好友识别发生未捕获异常。\n"
+        "2026-07-14 08:10:00,000 INFO 好友识别完成：发现 78 个候选\n",
+        encoding="utf-8",
+    )
+
+    page = query_logs(
+        log_dir,
+        AppConfig(),
+        start_date=date(2026, 7, 14),
+        end_date=date(2026, 7, 14),
+    )
+    failure = next(item for item in page.items if item.level == "ERROR")
+
+    assert failure.task_type == "friend_scan"
+    assert failure.status == "resolved"
+
+
+def test_avatar_error_is_resolved_after_later_clean_avatar_refresh(tmp_path: Path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "autody-2026-07-14.log").write_text(
+        "2026-07-14 08:00:00,000 ERROR 头像更新发生未捕获异常。\n"
+        "2026-07-14 08:10:00,000 INFO 头像校正完成：更新 2 个，失败 0 个。\n",
+        encoding="utf-8",
+    )
+
+    page = query_logs(
+        log_dir,
+        AppConfig(),
+        start_date=date(2026, 7, 14),
+        end_date=date(2026, 7, 14),
+    )
+    failure = next(item for item in page.items if item.level == "ERROR")
+
+    assert failure.task_type == "friend_scan"
+    assert failure.status == "resolved"
+
+
+def test_exhausted_safe_retry_is_resolved_after_later_clean_send(tmp_path: Path):
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "autody-2026-07-14.log").write_text(
+        "2026-07-14 08:00:00,000 ERROR 安全重试已耗尽：无法定位目标。\n"
+        "2026-07-14 08:10:00,000 INFO 本次发送完成：成功 1 个，失败 0 个。\n",
+        encoding="utf-8",
+    )
+
+    page = query_logs(
+        log_dir,
+        AppConfig(),
+        start_date=date(2026, 7, 14),
+        end_date=date(2026, 7, 14),
+    )
+    failure = next(item for item in page.items if item.level == "ERROR")
+
+    assert failure.task_type == "daily_send"
+    assert failure.status == "resolved"
+
+
 def test_send_log_masks_friend_removed_from_current_configuration(tmp_path: Path):
     log_dir = tmp_path / "logs"
     log_dir.mkdir()

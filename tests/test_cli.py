@@ -39,6 +39,7 @@ def test_repair_scheduler_uses_explicit_program_and_canonical_data_roots(
         calls.append((
             service.root,
             service.data_root,
+            service.task_user_id,
             config.daily_send_time,
             config.weekly_health_check_enabled,
         ))
@@ -51,6 +52,8 @@ def test_repair_scheduler_uses_explicit_program_and_canonical_data_roots(
             "repair-scheduler",
             "--config", str(config_path),
             "--program-root", str(program_root),
+            "--data-root", str(data_root),
+            "--task-user-id", "S-1-5-21-1000",
         ],
     )
 
@@ -58,24 +61,25 @@ def test_repair_scheduler_uses_explicit_program_and_canonical_data_roots(
     assert calls == [(
         program_root.resolve(),
         data_root.resolve(),
+        "S-1-5-21-1000",
         "08:15",
         False,
     )]
 
 
-def test_repair_scheduler_can_skip_a_first_install_without_config(tmp_path: Path):
+def test_repair_scheduler_fails_when_config_is_missing(tmp_path: Path):
     result = runner.invoke(
         app,
         [
             "repair-scheduler",
             "--config", str(tmp_path / "missing-config.yaml"),
             "--program-root", str(tmp_path / "program-root"),
-            "--if-config-exists",
+            "--data-root", str(tmp_path),
         ],
     )
 
-    assert result.exit_code == 0, result.output
-    assert "配置尚未创建" in result.output
+    assert result.exit_code != 0
+    assert "配置不存在" in result.output
 
 
 def test_check_config_reports_success(tmp_path: Path):
@@ -118,11 +122,16 @@ def test_health_check_reports_success(tmp_path: Path, monkeypatch):
             return False
 
     monkeypatch.setattr("autody.cli.open_chat", lambda *args, **kwargs: Context())
-    monkeypatch.setattr("autody.cli.recovery_due", lambda *args, **kwargs: False)
     monkeypatch.setattr(
         "autody.cli.discover_friends",
         lambda *_args, **_kwargs: FriendDiscoveryResult(
             "2026-07-05T08:00:00", [], tmp_path / "data" / "discovered_friends.json"
+        ),
+    )
+    monkeypatch.setattr(
+        "autody.cli.DouyinChat",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("health check must not send")
         ),
     )
     result = runner.invoke(
@@ -132,10 +141,23 @@ def test_health_check_reports_success(tmp_path: Path, monkeypatch):
     assert "登录状态正常" in result.stdout
 
 
-def test_health_check_refreshes_stale_candidate_cache_without_sending(tmp_path: Path, monkeypatch):
+def test_health_check_refreshes_fresh_candidate_snapshot_without_sending(
+    tmp_path: Path,
+    monkeypatch,
+):
     (tmp_path / "messages.txt").write_text("早安\n", encoding="utf-8")
     config = tmp_path / "config.yaml"
     config.write_text("targets: []\nmessages_file: messages.txt\n", encoding="utf-8")
+    discovery_path = tmp_path / "data" / "discovered_friends.json"
+    discovery_path.parent.mkdir(parents=True)
+    discovery_path.write_text(
+        (
+            '{"scanned_at":"'
+            + datetime.now().isoformat(timespec="seconds")
+            + '","candidates":[]}'
+        ),
+        encoding="utf-8",
+    )
     calls = []
 
     class Context:
@@ -150,7 +172,6 @@ def test_health_check_refreshes_stale_candidate_cache_without_sending(tmp_path: 
         return FriendDiscoveryResult("2026-07-05T08:00:00", [], tmp_path / "data" / "discovered_friends.json")
 
     monkeypatch.setattr("autody.cli.open_chat", lambda *_args, **_kwargs: Context())
-    monkeypatch.setattr("autody.cli.recovery_due", lambda *_args, **_kwargs: False)
     monkeypatch.setattr("autody.cli.discover_friends", discover)
     monkeypatch.setattr("autody.cli.DouyinChat", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("health refresh must not send")))
 
@@ -277,6 +298,46 @@ def test_daily_run_is_blocked_before_browser_until_account_bindings_are_revalida
 
     assert result.exit_code == 4
     assert "账号绑定待重新验证" in result.output
+
+
+def test_scheduled_recovery_gate_stops_before_opening_browser(
+    tmp_path: Path,
+    monkeypatch,
+):
+    (tmp_path / "messages.txt").write_text("早安\n", encoding="utf-8")
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "targets:\n"
+        "  - name: 小明\n"
+        "    stable_id: target-current\n"
+        "    candidate_id: candidate-current\n"
+        "messages_file: messages.txt\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "autody.cli.automatic_daily_run_gate",
+        lambda *_args, **_kwargs: RunResult(
+            status=RunStatus.ALREADY_DONE,
+            total_targets=1,
+            sent_count=0,
+            skipped_count=1,
+            failed_count=0,
+        ),
+    )
+    monkeypatch.setattr(
+        "autody.cli.open_chat",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("completed automatic recovery must not open browser")
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        ["run", "--config", str(config), "--source", "retry"],
+    )
+
+    assert result.exit_code == 0
+    assert "当天所有目标此前已完成" in result.output
 
 
 def test_refresh_friend_avatars_uses_identity_safe_discovery_correction(

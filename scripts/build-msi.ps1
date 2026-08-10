@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = "1.4.2",
+    [string]$Version = "1.4.3",
     [ValidatePattern('^$|^[0-9a-fA-F]{40}$')]
     [string]$Commit = '',
     [switch]$ReuseRuntime,
@@ -480,6 +480,7 @@ $releaseFiles = [ordered]@{
     "scripts\install-task.ps1" = "scripts\install-task.ps1"
     "scripts\remove-task.ps1" = "scripts\remove-task.ps1"
     "scripts\repair-playwright.ps1" = "scripts\repair-playwright.ps1"
+    "scripts\resolve-runtime-roots.ps1" = "scripts\resolve-runtime-roots.ps1"
     "scripts\run-scheduled.ps1" = "scripts\run-scheduled.ps1"
     "scripts\start-dashboard.cmd" = "scripts\start-dashboard.cmd"
     "scripts\start-dashboard.ps1" = "scripts\start-dashboard.ps1"
@@ -600,13 +601,6 @@ try {
         $writer.WriteStartElement("File")
         $writer.WriteAttributeString("Id", "Fil_$fileHash")
         $writer.WriteAttributeString("Source", $file.FullName)
-        $writer.WriteEndElement()
-        $writer.WriteStartElement("RegistryValue")
-        $writer.WriteAttributeString("Root", "HKCU")
-        $writer.WriteAttributeString("Key", "Software\AutoDy\Installer\Components")
-        $writer.WriteAttributeString("Name", $fileHash)
-        $writer.WriteAttributeString("Value", "1")
-        $writer.WriteAttributeString("Type", "integer")
         $writer.WriteAttributeString("KeyPath", "yes")
         $writer.WriteEndElement()
         $writer.WriteEndElement()
@@ -641,7 +635,7 @@ try {
     $writer.WriteAttributeString("On", "uninstall")
     $writer.WriteEndElement()
     $writer.WriteStartElement("RegistryValue")
-    $writer.WriteAttributeString("Root", "HKCU")
+    $writer.WriteAttributeString("Root", "HKLM")
     $writer.WriteAttributeString("Key", "Software\AutoDy\Installer")
     $writer.WriteAttributeString("Name", "PayloadDirectories")
     $writer.WriteAttributeString("Value", "1")

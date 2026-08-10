@@ -14,9 +14,7 @@ BROWSER_ACTIONS = {
     "login",
     "health-check",
     "scan-friends",
-    "background-discovery",
     "refresh-friend-avatars",
-    "startup-recovery",
     "repair-playwright",
     "refresh-account-profile",
     "preflight",
@@ -104,27 +102,6 @@ class ActionManager:
                 str(self.config_path),
                 "--module-data",
                 str(self.module_data_root or self.root / "data" / "modules" / "autody-test-center" / "data"),
-            ]
-        if action == "startup-recovery":
-            return [
-                sys.executable,
-                "-m",
-                "autody.cli",
-                "run",
-                "--config",
-                str(self.config_path),
-                "--source",
-                "startup_recovery",
-            ]
-        if action == "background-discovery":
-            return [
-                sys.executable,
-                "-m",
-                "autody.cli",
-                "scan-friends",
-                "--config",
-                str(self.config_path),
-                "--background",
             ]
         if action in {
             "run",

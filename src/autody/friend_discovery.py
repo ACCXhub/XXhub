@@ -30,6 +30,9 @@ from autody.failures import failure_detail
 _SAFE_LOCAL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 DISCOVERY_CACHE_TTL = timedelta(hours=24)
 AVATAR_CACHE_TTL = timedelta(days=7)
+_VIRTUAL_LIST_GROWTH_WINDOW_MS = 2_000
+_VIRTUAL_LIST_STABLE_MS = 500
+_VIRTUAL_LIST_POLL_MS = 250
 logger = logging.getLogger(__name__)
 
 
@@ -223,6 +226,50 @@ def _candidate_id(identity_key: str | None) -> str:
     return conversation_candidate_id(identity_key) or _new_local_id("candidate")
 
 
+def _scroll_metrics(scrollable) -> dict[str, int | float]:
+    return scrollable.first.evaluate(
+        """el => ({
+            before: el.scrollTop,
+            maximum: Math.max(0, el.scrollHeight - el.clientHeight),
+            step: Math.max(200, Math.floor(el.clientHeight * 0.7))
+        })"""
+    )
+
+
+def _wait_for_initial_virtual_list_expansion(
+    page,
+    scrollable,
+    *,
+    timeout_ms: int,
+) -> None:
+    """Let Douyin finish replacing its temporary short virtual-list model."""
+    maximum = _scroll_metrics(scrollable)["maximum"]
+    elapsed_ms = 0
+    last_growth_ms: int | None = None
+    hard_limit_ms = min(
+        timeout_ms,
+        _VIRTUAL_LIST_GROWTH_WINDOW_MS + _VIRTUAL_LIST_STABLE_MS,
+    )
+
+    while elapsed_ms < hard_limit_ms:
+        if last_growth_ms is None and elapsed_ms >= _VIRTUAL_LIST_GROWTH_WINDOW_MS:
+            break
+        if (
+            last_growth_ms is not None
+            and elapsed_ms - last_growth_ms >= _VIRTUAL_LIST_STABLE_MS
+        ):
+            break
+
+        wait_ms = min(_VIRTUAL_LIST_POLL_MS, hard_limit_ms - elapsed_ms)
+        page.wait_for_timeout(wait_ms)
+        elapsed_ms += wait_ms
+
+        current_maximum = _scroll_metrics(scrollable)["maximum"]
+        if current_maximum > maximum:
+            maximum = current_maximum
+            last_growth_ms = elapsed_ms
+
+
 def _scan_items(
     page,
     selectors: ChatSelectors,
@@ -233,6 +280,9 @@ def _scan_items(
     deadline: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     progress: Callable[[str, int, int | None], None] | None = None,
+    initial_virtual_list_timeout_ms: int = (
+        _VIRTUAL_LIST_GROWTH_WINDOW_MS + _VIRTUAL_LIST_STABLE_MS
+    ),
 ) -> tuple[list[_ScannedItem], bool, bool]:
     """Read visible conversation rows while keeping avatar failures non-fatal."""
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -248,6 +298,15 @@ def _scan_items(
         scrollable.first.wait_for(state="visible", timeout=avatar_timeout_ms)
     except AttributeError:  # test doubles do not implement wait_for
         pass
+    if scrollable.count():
+        scrollable.first.evaluate(
+            "(el) => { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')); }"
+        )
+        _wait_for_initial_virtual_list_expansion(
+            page,
+            scrollable,
+            timeout_ms=initial_virtual_list_timeout_ms,
+        )
     if progress:
         progress("locating_chat_list", 0, None)
     for _ in range(max_scrolls + 1):
@@ -371,13 +430,7 @@ def _scan_items(
         if not scrollable.count():
             completed_bottom_reached = True
             break
-        metrics = scrollable.first.evaluate(
-            """el => ({
-                before: el.scrollTop,
-                maximum: Math.max(0, el.scrollHeight - el.clientHeight),
-                step: Math.max(200, Math.floor(el.clientHeight * 0.7))
-            })"""
-        )
+        metrics = _scroll_metrics(scrollable)
         if metrics["before"] >= metrics["maximum"]:
             completed_bottom_reached = True
             break
@@ -526,6 +579,7 @@ def discover_friends(
         deadline=started + overall_timeout_ms / 1000,
         monotonic=monotonic,
         progress=progress,
+        initial_virtual_list_timeout_ms=overall_timeout_ms,
     )
     scanned_at = scanned_now.isoformat(timespec="seconds")
     scan_id = _new_local_id("scan")

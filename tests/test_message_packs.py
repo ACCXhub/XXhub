@@ -2,7 +2,9 @@ from datetime import datetime
 import json
 from pathlib import Path
 
-from autody.message_packs import ImportMode, MessagePackService
+import pytest
+
+from autody.message_packs import ImportMode, MessagePackError, MessagePackService
 
 
 def make_pack_root(tmp_path: Path) -> Path:
@@ -19,8 +21,6 @@ def make_pack_root(tmp_path: Path) -> Path:
                         "description": "测试",
                         "version": "1.0.0",
                         "file": "sample.txt",
-                        "relative_url": "sample.txt",
-                        "raw_url": None,
                         "count": 3,
                         "category": "daily",
                     }
@@ -38,7 +38,6 @@ def test_repository_index_contains_five_fifty_message_packs():
 
     catalog = service.list_packs()
 
-    assert catalog.source == "local"
     assert len(catalog.packs) == 5
     assert {pack.count for pack in catalog.packs} == {50}
     for pack in catalog.packs:
@@ -54,7 +53,6 @@ def test_preview_deduplicates_pack_lines(tmp_path: Path):
 
     assert preview.messages == ["早安呀", "今天顺利"]
     assert preview.duplicate_count == 1
-    assert preview.source == "local"
 
 
 def test_merge_import_deduplicates_and_creates_backup(tmp_path: Path):
@@ -93,22 +91,18 @@ def test_replace_import_backs_up_and_replaces(tmp_path: Path):
     assert messages.read_text(encoding="utf-8") == "早安呀\n今天顺利\n"
 
 
-def test_remote_network_failure_falls_back_to_local_with_clear_warning(tmp_path: Path):
-    def unavailable(_url: str) -> str:
-        raise OSError("network offline")
+def test_preview_rejects_pack_paths_outside_builtin_directory(tmp_path: Path):
+    root = make_pack_root(tmp_path)
+    (root / "outside.txt").write_text("不应读取\n", encoding="utf-8")
+    index = root / "message-packs" / "index.json"
+    payload = json.loads(index.read_text(encoding="utf-8"))
+    payload["packs"][0]["file"] = "../outside.txt"
+    index.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
-    service = MessagePackService(
-        make_pack_root(tmp_path),
-        remote_index_url="https://example.invalid/index.json",
-        fetch_text=unavailable,
-    )
+    service = MessagePackService(root)
 
-    catalog = service.list_packs()
-
-    assert catalog.source == "local"
-    assert catalog.warning is not None
-    assert "远程文案库不可用" in catalog.warning
-    assert catalog.packs[0].id == "sample"
+    with pytest.raises(MessagePackError, match="内置文案包文件不存在"):
+        service.preview("sample")
 
 
 def test_preview_only_never_writes_or_backs_up(tmp_path: Path):

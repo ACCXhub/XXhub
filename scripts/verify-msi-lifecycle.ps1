@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = "1.4.2",
+    [string]$Version = "1.4.3",
     [ValidatePattern('^\d+\.\d+\.\d+$')]
     [string]$PreviousVersion = "1.4.1",
     [string]$ArtifactDirectory,
@@ -155,6 +155,8 @@ function Assert-MsiUi {
         ProductVersion = Get-MsiProperty $MsiPath "ProductVersion"
         UpgradeCode = Get-MsiProperty $MsiPath "UpgradeCode"
         WIXUI_INSTALLDIR = Get-MsiProperty $MsiPath "WIXUI_INSTALLDIR"
+        ALLUSERS = Get-MsiProperty $MsiPath "ALLUSERS"
+        SecureCustomProperties = Get-MsiProperty $MsiPath "SecureCustomProperties"
     }
     if ($properties.ProductVersion -ne $Version) {
         throw "MSI ProductVersion does not match the requested release version."
@@ -165,6 +167,14 @@ function Assert-MsiUi {
     if ($properties.WIXUI_INSTALLDIR -ne "INSTALLFOLDER") {
         throw "MSI install-directory UI is not bound to INSTALLFOLDER."
     }
+    if ($properties.ALLUSERS -ne "1") {
+        throw "MSI package is not configured for per-machine installation."
+    }
+    foreach ($required in @("AUTODY_INTERACTIVE_USER_SID", "AUTODY_INTERACTIVE_LOCALAPPDATA")) {
+        if ($required -notin ($properties.SecureCustomProperties -split ';')) {
+            throw "MSI secure interactive-user property is missing: $required"
+        }
+    }
 
     $directories = @(Get-MsiRows $MsiPath `
         'SELECT `Directory`,`Directory_Parent`,`DefaultDir` FROM `Directory`' 3)
@@ -174,6 +184,51 @@ function Assert-MsiUi {
         "MSI default install folder is incorrect."
     Assert-MsiRow $directories @("AUTODYDATAROOT", "LocalAppDataFolder", "AutoDy") `
         "MSI runtime data folder is not separate from INSTALLFOLDER."
+
+    $components = @(Get-MsiRows $MsiPath `
+        'SELECT `Component`,`Directory_`,`Attributes` FROM `Component`' 3)
+    $dataComponent = @($components | Where-Object { $_.Values[0] -eq "DataRootComponent" })
+    if ($dataComponent.Count -ne 1 -or $dataComponent[0].Values[1] -ne "AUTODYDATAROOT") {
+        throw "MSI initial config component is not bound to AUTODYDATAROOT."
+    }
+    $files = @(Get-MsiRows $MsiPath `
+        'SELECT `File`,`Component_`,`FileName`,`Attributes` FROM `File`' 4)
+    $configFiles = @($files | Where-Object {
+        $_.Values[0] -eq "InitialConfigFile" -and
+        $_.Values[1] -eq "DataRootComponent" -and
+        $_.Values[2] -eq "config.yaml"
+    })
+    if ($configFiles.Count -ne 1) {
+        throw "MSI does not seed config.yaml in the dedicated data-root component."
+    }
+
+    $customActions = @(Get-MsiRows $MsiPath `
+        'SELECT `Action`,`Type`,`Source`,`Target` FROM `CustomAction`' 4)
+    $repairData = @($customActions | Where-Object {
+        $_.Values[0] -eq "SetRepairInstalledAutoDyTasksData" -and
+        $_.Values[3] -like '*--data-root*' -and
+        $_.Values[3] -like '*--task-user-id*' -and
+        $_.Values[3] -notlike '*--if-config-exists*'
+    })
+    $repair = @($customActions | Where-Object {
+        $_.Values[0] -eq "RepairInstalledAutoDyTasks" -and
+        $_.Values[3] -eq "[CustomActionData]"
+    })
+    if ($repairData.Count -ne 1 -or $repair.Count -ne 1) {
+        throw "MSI Scheduler repair CustomActionData contract is invalid."
+    }
+
+    $registry = @(Get-MsiRows $MsiPath `
+        'SELECT `Root`,`Key`,`Name`,`Value` FROM `Registry`' 4)
+    foreach ($name in @("InstallFolder", "DataRoot", "InstalledVersion")) {
+        if (-not ($registry | Where-Object {
+            $_.Values[0] -eq "3" -and
+            $_.Values[1] -eq "[AUTODY_INTERACTIVE_USER_SID]\Software\AutoDy" -and
+            $_.Values[2] -eq $name
+        })) {
+            throw "MSI original-user registry contract is missing: $name"
+        }
+    }
 
     $dialogs = @(Get-MsiRows $MsiPath `
         'SELECT `Dialog`,`Control_First`,`Control_Default`,`Control_Cancel` FROM `Dialog`' 4)

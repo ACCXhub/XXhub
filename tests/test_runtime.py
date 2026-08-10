@@ -47,3 +47,18 @@ def test_configure_runtime_honors_packaged_browser_path(
     assert runtime.home == (tmp_path / "user-data").resolve()
     assert runtime.browsers_path == browsers.resolve()
     assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(browsers.resolve())
+
+
+def test_configure_runtime_falls_back_to_existing_program_browser_directory(
+    tmp_path: Path, monkeypatch
+):
+    program_root = tmp_path / "program"
+    browsers = program_root / "runtime" / "ms-playwright"
+    browsers.mkdir(parents=True)
+    monkeypatch.delenv("AUTODY_BROWSERS_PATH", raising=False)
+    monkeypatch.setenv("AUTODY_PROGRAM_ROOT", str(program_root))
+
+    runtime = configure_runtime(tmp_path / "user-data")
+
+    assert runtime.browsers_path == browsers.resolve()
+    assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(browsers.resolve())

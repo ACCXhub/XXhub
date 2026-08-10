@@ -122,8 +122,6 @@ export const api = {
   schedulerPreview: (settings: ScheduleSettings) => request<SchedulePreview>("/api/scheduler/preview", { method: "POST", body: JSON.stringify(settings) }),
   schedulerApply: (settings: ScheduleSettings) => request<{ config: AppConfig }>("/api/scheduler/apply", { method: "POST", body: JSON.stringify(settings) }),
   schedulerOperation: (operation: "install" | "update" | "repair" | "remove") => request<{ message: string }>(`/api/scheduler/${operation}`, { method: "POST" }),
-  checkRecovery: () =>
-    request<{ due: boolean; started: boolean; job?: ActionJob }>("/api/recovery/check", { method: "POST" }),
   action: (name: string) =>
     request<ActionJob>(`/api/actions/${name}`, {
       method: "POST"

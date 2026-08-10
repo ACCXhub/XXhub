@@ -7,7 +7,7 @@
     Version="$(var.ProductVersion)"
     ProductCode="$(var.ProductCode)"
     UpgradeCode="C8B3A04F-ABAB-4F4C-8A2C-7A1AE24F1400"
-    Scope="perUser"
+    Scope="perMachine"
     Codepage="65001"
     InstallerVersion="500"
     Compressed="yes">
@@ -15,6 +15,8 @@
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
     <Icon Id="AutoDyIcon" SourceFile="$(var.StageDir)\assets\icons\autody.ico" />
     <Property Id="ARPPRODUCTICON" Value="AutoDyIcon" />
+    <Property Id="AUTODY_INTERACTIVE_USER_SID" Secure="yes" />
+    <Property Id="AUTODY_INTERACTIVE_LOCALAPPDATA" Secure="yes" />
     <Property Id="AUTODY_REGISTERED_INSTALLFOLDER" Value="Z:\__AutoDyNoExistingInstall__">
       <RegistrySearch
         Id="InstalledFolderSearch"
@@ -32,6 +34,27 @@
     <Property Id="AUTODY_D_DRIVE">
       <DirectorySearch Id="AutoDyDDriveSearch" Path="D:\" Depth="0" />
     </Property>
+    <SetProperty
+      Action="CaptureInteractiveUserSid"
+      Id="AUTODY_INTERACTIVE_USER_SID"
+      Value="[UserSID]"
+      After="AppSearch"
+      Sequence="first"
+      Condition="NOT AUTODY_INTERACTIVE_USER_SID" />
+    <SetProperty
+      Action="CaptureInteractiveLocalAppData"
+      Id="AUTODY_INTERACTIVE_LOCALAPPDATA"
+      Value="[LocalAppDataFolder]"
+      After="CaptureInteractiveUserSid"
+      Sequence="first"
+      Condition="NOT AUTODY_INTERACTIVE_LOCALAPPDATA" />
+    <SetProperty
+      Action="SetAutoDyDataRoot"
+      Id="AUTODYDATAROOT"
+      Value="[AUTODY_INTERACTIVE_LOCALAPPDATA]AutoDy\"
+      After="CaptureInteractiveLocalAppData"
+      Sequence="both"
+      Condition="AUTODY_INTERACTIVE_LOCALAPPDATA" />
     <SetProperty
       Action="SetExistingInstallFolder"
       Id="INSTALLFOLDER"
@@ -56,11 +79,16 @@
       Impersonate="yes"
       Return="check" />
     <CustomAction
+      Id="SetRepairInstalledAutoDyTasksData"
+      Property="RepairInstalledAutoDyTasks"
+      Value="&quot;[INSTALLFOLDER]runtime\python\python.exe&quot; -m autody.cli repair-scheduler --config &quot;[AUTODYDATAROOT]config.yaml&quot; --program-root &quot;[INSTALLFOLDER].&quot; --data-root &quot;[AUTODYDATAROOT].&quot; --task-user-id &quot;[AUTODY_INTERACTIVE_USER_SID]&quot;"
+      Execute="immediate" />
+    <CustomAction
       Id="RepairInstalledAutoDyTasks"
       Directory="INSTALLFOLDER"
-      ExeCommand="&quot;[INSTALLFOLDER]runtime\python\python.exe&quot; -m autody.cli repair-scheduler --config &quot;[AUTODYDATAROOT]config.yaml&quot; --program-root &quot;[INSTALLFOLDER].&quot; --if-config-exists"
+      ExeCommand="[CustomActionData]"
       Execute="deferred"
-      Impersonate="yes"
+      Impersonate="no"
       Return="check" />
     <InstallExecuteSequence>
       <Custom
@@ -68,8 +96,12 @@
         After="InstallFiles"
         Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom
-        Action="RepairInstalledAutoDyTasks"
+        Action="SetRepairInstalledAutoDyTasksData"
         After="StopExistingAutoDyTray"
+        Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom
+        Action="RepairInstalledAutoDyTasks"
+        After="SetRepairInstalledAutoDyTasksData"
         Condition="NOT REMOVE~=&quot;ALL&quot;" />
     </InstallExecuteSequence>
     <Feature Id="MainFeature" Title="AutoDy" Level="1">
@@ -101,13 +133,17 @@
       NeverOverwrite="yes">
       <CreateFolder />
       <RemoveFolder Id="PreserveDataRoot" Directory="AUTODYDATAROOT" On="uninstall" />
+      <File
+        Id="InitialConfigFile"
+        Source="$(var.StageDir)\config.example.yaml"
+        Name="config.yaml"
+        KeyPath="yes" />
       <RegistryValue
-        Root="HKCU"
-        Key="Software\AutoDy"
+        Root="HKU"
+        Key="[AUTODY_INTERACTIVE_USER_SID]\Software\AutoDy"
         Name="DataRoot"
         Value="[AUTODYDATAROOT]"
-        Type="string"
-        KeyPath="yes" />
+        Type="string" />
     </Component>
     <Component
       Id="ShortcutComponent"
@@ -141,14 +177,14 @@
         Icon="AutoDyIcon" />
       <RemoveFolder Id="RemoveAutoDyProgramMenuFolder" Directory="AutoDyProgramMenuFolder" On="uninstall" />
       <RegistryValue
-        Root="HKCU"
-        Key="Software\AutoDy"
+        Root="HKU"
+        Key="[AUTODY_INTERACTIVE_USER_SID]\Software\AutoDy"
         Name="InstallFolder"
         Value="[INSTALLFOLDER]"
         Type="string" />
       <RegistryValue
-        Root="HKCU"
-        Key="Software\AutoDy"
+        Root="HKU"
+        Key="[AUTODY_INTERACTIVE_USER_SID]\Software\AutoDy"
         Name="InstalledVersion"
         Value="$(var.ProductVersion)"
         Type="string"

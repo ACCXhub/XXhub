@@ -9,7 +9,7 @@ const apiMocks = vi.hoisted(() => ({
 }));
 vi.mock("../api", () => ({ api: apiMocks }));
 
-const status = { today: { date: "2026-07-16", message: "", succeeded: 0, failed: 1, total: 1, complete: false }, friends: [], history: [], scheduler: [], next_run: null, login: { status: "success" }, message_count: 2, issues: [], statistics: { last_completed_run: null, successful_today: 0, failed_today: 1, consecutive_successful_days: 0, success_rate_7d: 0, success_rate_30d: 0, retries_7d: 0, enabled_friend_count: 1, local_message_count: 2, active_message_pack_count: 1, configured_friend_count: 1, next_health_check: null, next_daily_send: null, most_recent_issue: null, log_summary: { active_errors: 0, warnings_24h: 0, successful_tasks_7d: 0, last_health_check: null, last_send: null, last_error_time: null } } };
+const status = { today: { date: "2026-07-16", message: "", succeeded: 0, failed: 1, total: 1, complete: false }, friends: [], history: [], scheduler: [], next_run: null, login: { status: "success" }, message_count: 2, issues: [], statistics: { last_completed_run: null, successful_today: 0, failed_today: 1, consecutive_successful_days: 0, success_rate_7d: 0, success_rate_30d: 0, enabled_friend_count: 1, local_message_count: 2, active_message_pack_count: 1, configured_friend_count: 1, next_health_check: null, next_daily_send: null, most_recent_issue: null, log_summary: { active_errors: 0, warnings_24h: 0, successful_tasks_7d: 0, last_health_check: null, last_send: null, last_error_time: null } } };
 
 beforeEach(() => {
   apiMocks.preflightStatus.mockResolvedValue({ running: false, progress: null, result: null });
@@ -39,28 +39,12 @@ test("shows current binding health without treating a historical failure as curr
   expect(within(panel as HTMLElement).queryByText("历史会话定位失败")).not.toBeInTheDocument();
 });
 
-test("renders skipped history separately from confirmed success", () => {
-  const historical = {
-    ...status,
-    friends: [{
-      target_id: "target-current", name: "当前目标", status: "pending" as const
-    }],
-    history: [{
-      run_id: "run-historical", date: "2026-08-07", task_type: "daily_send",
-      trigger_source: "retry" as const, success_count: 0, failed_count: 1,
-      skipped_count: 7, total_targets: 8, retry_count: 1,
-      final_status: "final_failed", end_time: "2026-08-07T19:30:39",
-      target_failures: {}
-    }]
-  };
+test("removes run-by-run history and retry-count noise from the dashboard", () => {
+  render(<DashboardPage status={status} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} />);
 
-  render(<DashboardPage status={historical} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} />);
-
-  const runTable = screen.getByRole("table", { name: "结构化运行记录" });
-  expect(within(runTable).getByRole("columnheader", { name: "确认成功" })).toBeInTheDocument();
-  expect(within(runTable).getByText("0/8")).toBeInTheDocument();
-  expect(within(runTable).getByText("跳过 7")).toBeInTheDocument();
-  expect(within(runTable).queryByText("7/8")).not.toBeInTheDocument();
+  expect(screen.queryByRole("table", { name: "结构化运行记录" })).not.toBeInTheDocument();
+  expect(screen.queryByText(/7 天重试/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "重试所有目标" })).not.toBeInTheDocument();
 });
 
 test("renders tomorrow and later next-run dates without M/D ambiguity", () => {
@@ -120,53 +104,15 @@ function failure(
   };
 }
 
-test("groups eight same-event failures into one collapsed anomaly summary", () => {
-  const retryAll = vi.fn();
-  const targetIds = Array.from({ length: 8 }, (_, index) => `target-${index + 1}`);
-  const partial = {
-    ...status,
-    friends: targetIds.map((targetId, index) => ({
-      target_id: targetId, name: `目标${index + 1}`, status: "failed" as const,
-      failure: failure(targetId)
-    })),
-    history: [{
-      run_id: "run-partial", date: "2026-07-16", task_type: "daily_send",
-      trigger_source: "scheduled" as const, success_count: 0, failed_count: 8,
-      skipped_count: 0, total_targets: 8, retry_count: 0,
-      final_status: "retry_pending", end_time: "2026-07-16T07:31:00",
-      target_failures: Object.fromEntries(
-        targetIds.map((targetId) => [targetId, failure(targetId)])
-      )
-    }]
-  };
+test("hides the resend action when no current target is safely retryable", () => {
+  render(<DashboardPage status={status} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} onRetryTargets={vi.fn()} />);
 
-  render(<DashboardPage status={partial} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} onRetryTargets={retryAll} />);
-
-  const runRow = screen.getByRole("button", { name: "运行记录异常详情，8 个目标" });
-  const runTable = screen.getByRole("table", { name: "结构化运行记录" });
-  expect(runTable.querySelectorAll("tbody > tr")).toHaveLength(1);
-  expect(within(runRow).getByText("8 项异常")).toBeInTheDocument();
-  expect(screen.queryByText("会话定位异常 · 8 个目标")).not.toBeInTheDocument();
-  expect(screen.queryByText("8 个目标在本次执行中未完成会话定位。")).not.toBeInTheDocument();
-  expect(screen.getAllByRole("button", { name: "重试所有目标" })).toHaveLength(1);
-  expect(screen.queryByRole("button", { name: "仅重试此目标" })).not.toBeInTheDocument();
-
-  fireEvent.click(runRow);
-  expect(runTable.querySelectorAll("tbody > tr")).toHaveLength(2);
-  expect(screen.getByText("会话定位异常 · 8 个目标")).toBeInTheDocument();
-  expect(screen.getByText("8 个目标在本次执行中未完成会话定位。")).toBeInTheDocument();
-  expect(screen.getByText(/受影响目标：8 个/)).toBeInTheDocument();
-
-  fireEvent.click(runRow);
-  expect(runTable.querySelectorAll("tbody > tr")).toHaveLength(1);
-  expect(screen.queryByText("8 个目标在本次执行中未完成会话定位。")).not.toBeInTheDocument();
-
-  fireEvent.click(screen.getByRole("button", { name: "重试所有目标" }));
-  expect(retryAll).toHaveBeenCalledWith(targetIds);
+  expect(screen.queryByRole("button", { name: "补发" })).not.toBeInTheDocument();
+  expect(screen.queryByText("仅补发今日尚未成功且可安全重试的目标")).not.toBeInTheDocument();
 });
 
-test("retry-all excludes manual-action and later-resolved failure groups", () => {
-  const retryAll = vi.fn();
+test("safe resend includes only unresolved current failures allowed by safety gates", () => {
+  const retryTargets = vi.fn();
   const mixed = {
     ...status,
     friends: [
@@ -214,12 +160,9 @@ test("retry-all excludes manual-action and later-resolved failure groups", () =>
     }]
   };
 
-  render(<DashboardPage status={mixed} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} onRetryTargets={retryAll} />);
-  fireEvent.click(screen.getByRole("button", { name: "重试所有目标" }));
+  render(<DashboardPage status={mixed} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} onRetryTargets={retryTargets} />);
 
-  expect(retryAll).toHaveBeenCalledWith(["target-safe"]);
-  fireEvent.click(screen.getByRole("button", { name: "运行记录异常详情，3 个目标" }));
-  expect(screen.getAllByText("已解决").length).toBeGreaterThan(0);
-  expect(screen.getByText(/需要人工处理/)).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "仅重试此目标" })).not.toBeInTheDocument();
+  expect(screen.getByText("仅补发今日尚未成功且可安全重试的目标")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "补发" }));
+  expect(retryTargets).toHaveBeenCalledWith(["target-safe"]);
 });

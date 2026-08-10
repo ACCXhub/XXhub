@@ -10,8 +10,7 @@ import shutil
 
 from pydantic import BaseModel
 
-from autody.config import AppConfig
-from autody.history import stable_target_id
+from autody.config import AppConfig, stable_target_id
 
 
 LOG_LINE = re.compile(
@@ -50,8 +49,10 @@ class LogPage(BaseModel):
 
 def _task_type(message: str) -> str:
     lowered = message.lower()
-    if "好友识别" in message or "scan" in lowered:
+    if "好友识别" in message or "头像" in message or "scan" in lowered:
         return "friend_scan"
+    if "安全重试" in message:
+        return "daily_send"
     if "扫码" in message or "login" in lowered:
         return "login"
     if "登录" in message or "health" in lowered:
@@ -123,6 +124,15 @@ def _fingerprint(entry: LogEntry) -> str:
 def _classify(entries: list[LogEntry]) -> list[LogEntry]:
     health_success = max((item.timestamp for item in entries if "登录状态和抖音聊天页正常" in item.summary), default="")
     send_success = max((item.timestamp for item in entries if "本次发送完成" in item.summary and "失败 0 个" in item.summary), default="")
+    friend_scan_success = max(
+        (
+            item.timestamp
+            for item in entries
+            if "好友识别完成" in item.summary
+            or "头像校正完成" in item.summary and "失败 0 个" in item.summary
+        ),
+        default="",
+    )
     for item in entries:
         text = f"{item.summary}\n{item.detail}"
         item.fingerprint = _fingerprint(item)
@@ -133,6 +143,8 @@ def _classify(entries: list[LogEntry]) -> list[LogEntry]:
         elif "autody.diagnostics" in text and health_success > item.timestamp:
             item.status = "resolved"
         elif item.task_type == "health_check" and health_success > item.timestamp:
+            item.status = "resolved"
+        elif item.task_type == "friend_scan" and friend_scan_success > item.timestamp:
             item.status = "resolved"
         elif (
             item.task_type == "daily_send"

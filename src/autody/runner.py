@@ -5,6 +5,8 @@ import copy
 import hashlib
 import inspect
 import logging
+import os
+from pathlib import Path
 import random
 import time
 
@@ -19,7 +21,9 @@ from autody.config import (
     MessageSuffixConfig,
     Target,
     enabled_execution_targets,
+    target_identity,
 )
+from autody.daily_status import effective_daily_target_statuses
 from autody.account_profile import (
     bindings_revalidation_required,
     evaluate_account_scope,
@@ -30,8 +34,6 @@ from autody.friend_discovery import FriendCandidate, load_discovered_friends
 from autody.history import (
     TaskHistoryStore,
     TaskRunRecord,
-    effective_daily_target_statuses,
-    target_identity,
 )
 from autody.message_packs import MessagePackError, MessagePackService
 from autody.messages import MessageRotation, format_message_with_suffix, read_messages
@@ -40,6 +42,7 @@ from autody.state import StateStore
 
 
 logger = logging.getLogger(__name__)
+RUN_TRIGGER_SOURCES = frozenset({"scheduled", "manual", "retry"})
 
 
 class RunStatus(str, Enum):
@@ -145,11 +148,6 @@ def _verified_conversation_ids(
         if len(matches) != 1:
             continue
         candidate = matches[0]
-        if (
-            candidate.match_status != "configured"
-            or candidate.configured_target_id != target.stable_id
-        ):
-            continue
         conversation_id = conversation_candidate_id(candidate.identity_key)
         if conversation_id:
             resolved[target.stable_id] = conversation_id
@@ -210,6 +208,118 @@ def _stored_target_failures(daily: dict) -> dict[str, FailureDetail]:
         except (TypeError, ValueError):
             continue
     return records
+
+
+def automatic_daily_run_gate(
+    config: AppConfig,
+    *,
+    now: datetime | None = None,
+) -> RunResult | None:
+    """Return a no-browser result when an automatic daily run is not due."""
+    started = now or datetime.now()
+    day = started.date()
+    state = StateStore(config.state_file).load()
+    daily = state.daily.get(day.isoformat(), {})
+    targets = enabled_execution_targets(config)
+    statuses = effective_daily_target_statuses(config, state, day)
+    pending = [
+        target
+        for target in targets
+        if statuses.get(target_identity(target)) != "success"
+    ]
+    run_id = str(daily.get("task_run_id") or _daily_run_id(day))
+    details = _stored_target_failures(daily)
+    if not pending:
+        return RunResult(
+            RunStatus.ALREADY_DONE,
+            len(targets),
+            0,
+            len(targets),
+            0,
+            run_id=run_id,
+        )
+
+    outcomes = TaskOutcomeStore(_outcome_path(config))
+    outcome = outcomes.get(run_id)
+    deadline = datetime.combine(
+        day,
+        datetime.strptime(config.recovery_deadline, "%H:%M").time(),
+    )
+    if (
+        outcome is not None
+        and outcome.outcome is TaskOutcome.FINAL_FAILED
+        and started < deadline
+    ):
+        resolved = _verified_conversation_ids(config, pending)
+        safely_resolvable = all(
+            target.stable_id
+            and target.stable_id in resolved
+            and (detail := details.get(target_identity(target))) is not None
+            and detail.safe_retry_available
+            for target in pending
+        )
+        if safely_resolvable:
+            outcome = outcomes.resume_safe_recovery(
+                run_id,
+                started,
+                "scheduler_safe_recovery",
+            )
+    terminal_statuses = {
+        TaskOutcome.FINAL_FAILED: RunStatus.FINAL_FAILED,
+        TaskOutcome.UNCERTAIN: RunStatus.UNCERTAIN,
+        TaskOutcome.CANCELLED: RunStatus.CANCELLED,
+    }
+    if outcome is not None and outcome.outcome in terminal_statuses:
+        return RunResult(
+            terminal_statuses[outcome.outcome],
+            len(targets),
+            0,
+            len(targets) - len(pending),
+            len(pending),
+            outcome.reason,
+            run_id=run_id,
+            retry_count=outcome.retry_attempts,
+            target_failures=details,
+        )
+
+    if started >= deadline:
+        if outcome is None:
+            outcomes.schedule(run_id, day.isoformat(), deadline)
+        persisted = outcomes.safe_failure(
+            run_id,
+            started,
+            "recovery_deadline_reached",
+            max_retries=0,
+        )
+        return RunResult(
+            RunStatus.FINAL_FAILED,
+            len(targets),
+            0,
+            len(targets) - len(pending),
+            len(pending),
+            "recovery_deadline_reached",
+            run_id=run_id,
+            retry_count=persisted.retry_attempts,
+            target_failures=details,
+        )
+    if (
+        outcome is not None
+        and outcome.outcome is TaskOutcome.RETRY_PENDING
+        and outcome.next_attempt_at is not None
+        and started < outcome.next_attempt_at
+    ):
+        return RunResult(
+            RunStatus.RETRY_PENDING,
+            len(targets),
+            0,
+            len(targets) - len(pending),
+            len(pending),
+            outcome.reason,
+            run_id=run_id,
+            retry_count=outcome.retry_attempts,
+            target_failures=details,
+        )
+    return None
 
 
 def _legacy_reason_code(delivery: DeliveryResult) -> str:
@@ -290,7 +400,10 @@ def _target_base_message(
     cached = daily.setdefault("messages_by_target", {}).get(key)
     if cached:
         return cached
-    pack_messages = MessagePackService(config.messages_file.parent, config.message_pack_index_url).preview(target.message_pack).messages
+    pack_root = Path(
+        os.environ.get("AUTODY_PROGRAM_ROOT", config.messages_file.parent)
+    ).resolve()
+    pack_messages = MessagePackService(pack_root).preview(target.message_pack).messages
     selected = _selection_rng(day, "message-pack", target).choice(pack_messages) if (target.message_selection or config.message_selection) == "per_friend" else pack_messages[0]
     daily["messages_by_target"][key] = selected
     return selected
@@ -386,9 +499,11 @@ def run_daily(
     now: datetime | None = None,
     target_ids: set[str] | None = None,
 ) -> RunResult:
+    if trigger_source not in RUN_TRIGGER_SOURCES:
+        raise ValueError(f"unsupported daily-send trigger source: {trigger_source}")
     started = now or datetime.now()
     today = today or started.date()
-    # Tests and controlled recovery callers may supply a historical ``today``
+    # Tests and explicit callers may supply a historical ``today``
     # without a wall-clock value. Keep the retry window on that requested day.
     if now is None and today != started.date():
         started = datetime.combine(today, datetime.strptime(config.daily_send_time, "%H:%M").time())
@@ -461,7 +576,7 @@ def run_daily(
         stored_failures = _stored_target_failures(daily)
         for target in selected_targets:
             target_id = target_identity(target)
-            if target.name in daily.get("succeeded", []):
+            if effective_before_run.get(target_id) == "success":
                 continue
             previous = stored_failures.get(target_id)
             if previous is not None and (
@@ -774,7 +889,6 @@ def run_daily(
     unsafe_failure_reason: str | None = "blocked_ambiguous_target" if ambiguous_targets else None
     blocking_failure_reason: str | None = None
     if requested_target_ids is not None:
-        succeeded_names = set(daily.get("succeeded", []))
         for target_id, detail in _stored_target_failures(daily).items():
             if target_id in requested_target_ids:
                 continue
@@ -782,7 +896,10 @@ def run_daily(
                 (target for target in targets if target_identity(target) == target_id),
                 None,
             )
-            if peer is None or peer.name in succeeded_names:
+            if (
+                peer is None
+                or effective_before_run.get(target_identity(peer)) == "success"
+            ):
                 continue
             if detail.uncertain_send or detail.send_attempts > 0:
                 unsafe_failure_reason = (
@@ -882,9 +999,13 @@ def run_daily(
         if target_index < len(pending) - 1:
             time.sleep(random.uniform(config.min_delay_seconds, config.max_delay_seconds))
 
+    effective_after_run = effective_daily_target_statuses(
+        config,
+        state,
+        today,
+    )
     complete = all(
-        effective_before_run.get(target_identity(target)) == "success"
-        or target.name in daily["succeeded"]
+        effective_after_run.get(target_identity(target)) == "success"
         for target in targets
     )
     if complete and not daily.get("consumed"):
@@ -894,8 +1015,7 @@ def run_daily(
     failed_targets = [
         target
         for target in targets
-        if effective_before_run.get(target_identity(target)) != "success"
-        and target.name not in daily["succeeded"]
+        if effective_after_run.get(target_identity(target)) != "success"
     ]
     if complete:
         status = RunStatus.RECOVERED if outcome.retry_attempts else RunStatus.COMPLETED

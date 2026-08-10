@@ -5,7 +5,69 @@ import pytest
 
 from autody.config import AppConfig, Target
 from autody import scheduler
-from autody.scheduler import ScheduleSettings, SchedulerService, validate_schedule_settings
+from autody.scheduler import (
+    ScheduleSettings,
+    SchedulerService,
+    scheduler_status_rows,
+    validate_schedule_settings,
+)
+
+
+def expected_task_rows(
+    program_root: Path,
+    data_root: Path,
+    config: AppConfig,
+    task_user_id: str | None = None,
+) -> list[dict]:
+    health_arguments = (
+        f'-File "{program_root / "scripts" / "health-check.ps1"}" '
+        f'-ProgramRoot "{program_root}" -DataRoot "{data_root}"'
+    )
+    send_arguments = (
+        f'-File "{program_root / "scripts" / "run-scheduled.ps1"}" '
+        f'-ProgramRoot "{program_root}" -DataRoot "{data_root}"'
+    )
+    recovery_minutes = (
+        int(config.recovery_deadline[:2]) * 60
+        + int(config.recovery_deadline[3:])
+        - int(config.daily_send_time[:2]) * 60
+        - int(config.daily_send_time[3:])
+    )
+    rows = [
+        {
+            "name": "AutoDy-Health-Daily",
+            "state": "Ready",
+            "start_boundary": f"2026-08-10T{config.daily_health_check_time}:00",
+            "execute": "powershell.exe",
+            "arguments": health_arguments,
+            "working_directory": str(program_root),
+            "principal_user_id": task_user_id or "",
+        },
+        {
+            "name": "AutoDy-DailySpark",
+            "state": "Ready",
+            "start_boundary": f"2026-08-10T{config.daily_send_time}:00",
+            "repetition_interval": f"PT{min(30, recovery_minutes)}M" if recovery_minutes else "",
+            "repetition_duration": f"PT{recovery_minutes}M" if recovery_minutes else "",
+            "execute": "powershell.exe",
+            "arguments": send_arguments,
+            "working_directory": str(program_root),
+            "principal_user_id": task_user_id or "",
+        },
+    ]
+    if config.weekly_health_check_enabled:
+        rows.append(
+            {
+                "name": "AutoDy-Health-Weekly",
+                "state": "Ready",
+                "start_boundary": f"2026-08-10T{config.weekly_health_check_time}:00",
+                "execute": "powershell.exe",
+                "arguments": health_arguments,
+                "working_directory": str(program_root),
+                "principal_user_id": task_user_id or "",
+            }
+        )
+    return rows
 
 
 def test_schedule_settings_validate_times_and_recovery_window():
@@ -15,13 +77,78 @@ def test_schedule_settings_validate_times_and_recovery_window():
         weekly_health_check_enabled=True,
         weekly_health_check_weekday="Sunday",
         weekly_health_check_time="20:00",
-        startup_recovery_enabled=True,
         recovery_deadline="23:59",
     )
 
     assert validate_schedule_settings(settings) == settings
     with pytest.raises(ValueError, match="不得早于"):
         validate_schedule_settings(settings.model_copy(update={"recovery_deadline": "07:00"}))
+
+
+def test_scheduler_status_marks_missing_same_day_recovery_repetition_as_drift():
+    config = AppConfig(targets=[Target(name="fixture")])
+    rows = scheduler_status_rows(
+        config,
+        [
+            {
+                "name": "AutoDy-DailySpark",
+                "state": "Ready",
+                "start_boundary": "2026-08-10T07:30:00",
+                "repetition_interval": "",
+                "repetition_duration": "",
+            }
+        ],
+        1,
+    )
+
+    send = next(row for row in rows if row["name"] == "AutoDy-DailySpark")
+    assert send["drift"] is True
+    assert send["drift_reason"] == "schedule_mismatch"
+
+
+def test_scheduler_status_accepts_expected_same_day_recovery_repetition():
+    config = AppConfig(targets=[Target(name="fixture")])
+    rows = scheduler_status_rows(
+        config,
+        [
+            {
+                "name": "AutoDy-DailySpark",
+                "state": "Ready",
+                "start_boundary": "2026-08-10T07:30:00",
+                "repetition_interval": "PT30M",
+                "repetition_duration": "PT16H29M",
+            }
+        ],
+        1,
+    )
+
+    send = next(row for row in rows if row["name"] == "AutoDy-DailySpark")
+    assert send["drift"] is False
+    assert send["drift_reason"] is None
+
+
+def test_scheduler_status_accepts_no_repetition_for_zero_recovery_window():
+    config = AppConfig(
+        targets=[Target(name="fixture")],
+        recovery_deadline="07:30",
+    )
+    rows = scheduler_status_rows(
+        config,
+        [
+            {
+                "name": "AutoDy-DailySpark",
+                "state": "Ready",
+                "start_boundary": "2026-08-10T07:30:00",
+                "repetition_interval": "",
+                "repetition_duration": "",
+            }
+        ],
+        1,
+    )
+
+    send = next(row for row in rows if row["name"] == "AutoDy-DailySpark")
+    assert send["drift"] is False
+    assert send["drift_reason"] is None
 
 
 def test_scheduler_apply_rolls_windows_tasks_back_when_update_fails(tmp_path: Path):
@@ -72,12 +199,116 @@ def test_packaged_scheduler_repair_passes_program_and_data_roots(
 
     monkeypatch.setattr(scheduler.subprocess, "run", fake_run)
 
-    SchedulerService(program_root, data_root=data_root).repair(
-        AppConfig(targets=[Target(name="fixture")])
-    )
+    config = AppConfig(targets=[Target(name="fixture")])
+    SchedulerService(
+        program_root,
+        data_root=data_root,
+        task_rows=lambda: expected_task_rows(
+            program_root.resolve(), data_root.resolve(), config
+        ),
+    ).repair(config)
 
     assert captured[captured.index("-ProgramRoot") + 1] == str(program_root.resolve())
     assert captured[captured.index("-DataRoot") + 1] == str(data_root.resolve())
+    assert captured[captured.index("-RecoveryDeadline") + 1] == "23:59"
+
+
+def test_scheduler_repair_passes_explicit_task_user_sid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    program_root = (tmp_path / "program").resolve()
+    data_root = (tmp_path / "user-data").resolve()
+    task_user_id = "S-1-5-21-1000"
+    config = AppConfig(targets=[Target(name="fixture")])
+    captured: list[str] = []
+
+    def fake_run(command, **_kwargs):
+        captured.extend(command)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(scheduler.subprocess, "run", fake_run)
+    SchedulerService(
+        program_root,
+        data_root=data_root,
+        task_user_id=task_user_id,
+        task_rows=lambda: expected_task_rows(
+            program_root, data_root, config, task_user_id
+        ),
+    ).repair(config)
+
+    assert captured[captured.index("-TaskUserId") + 1] == task_user_id
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("state", "Disabled", "schedule_mismatch"),
+        ("execute", "cmd.exe", "runtime_root_mismatch"),
+        ("arguments", '-File "wrong.ps1"', "runtime_root_mismatch"),
+        ("working_directory", "C:/wrong", "runtime_root_mismatch"),
+        ("principal_user_id", "S-1-5-21-9999", "principal_mismatch"),
+    ],
+)
+def test_scheduler_repair_fails_when_registered_task_drifts(
+    tmp_path: Path, field: str, value: str, reason: str
+):
+    program_root = (tmp_path / "program").resolve()
+    data_root = (tmp_path / "data").resolve()
+    task_user_id = "S-1-5-21-1000"
+    config = AppConfig(targets=[Target(name="fixture")])
+    rows = expected_task_rows(program_root, data_root, config, task_user_id)
+    rows[1][field] = value
+    statuses = scheduler_status_rows(
+        config,
+        rows,
+        1,
+        program_root=program_root,
+        data_root=data_root,
+        task_user_id=task_user_id,
+    )
+    assert next(row for row in statuses if row["name"] == "AutoDy-DailySpark")[
+        "drift_reason"
+    ] == reason
+
+    service = SchedulerService(
+        program_root,
+        install=lambda _config: None,
+        data_root=data_root,
+        task_user_id=task_user_id,
+        task_rows=lambda: rows,
+    )
+    with pytest.raises(RuntimeError, match="定时任务修复后验证失败"):
+        service.repair(config)
+
+
+def test_scheduler_repair_fails_when_required_task_is_missing(tmp_path: Path):
+    config = AppConfig(targets=[Target(name="fixture")])
+    service = SchedulerService(
+        tmp_path / "program",
+        install=lambda _config: None,
+        data_root=tmp_path / "data",
+        task_rows=lambda: [],
+    )
+
+    with pytest.raises(RuntimeError, match="定时任务修复后验证失败"):
+        service.repair(config)
+
+
+def test_scheduler_repair_requires_complete_runtime_metadata(tmp_path: Path):
+    program_root = (tmp_path / "program").resolve()
+    data_root = (tmp_path / "data").resolve()
+    config = AppConfig(targets=[Target(name="fixture")])
+    rows = expected_task_rows(program_root, data_root, config)
+    rows[0].pop("arguments")
+    service = SchedulerService(
+        program_root,
+        install=lambda _config: None,
+        data_root=data_root,
+        task_rows=lambda: rows,
+    )
+
+    with pytest.raises(RuntimeError, match="定时任务修复后验证失败"):
+        service.repair(config)
 
 
 @pytest.mark.parametrize("enabled", [True, False])

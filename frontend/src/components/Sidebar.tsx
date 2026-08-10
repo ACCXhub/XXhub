@@ -32,7 +32,7 @@ const navigation = [
   ["dashboard", "总览", LayoutDashboard],
   ["friends", "好友管理", Users],
   ["messages", "文案库", FileText],
-  ["packs", "在线文案库", CloudDownload],
+  ["packs", "文案包", CloudDownload],
   ["scheduler", "定时任务", Clock3],
   ["logs", "运行日志", ScrollText],
   ["backup", "备份迁移", ArchiveRestore],

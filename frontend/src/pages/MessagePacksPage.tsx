@@ -47,10 +47,9 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
   return (
     <section className="editor-page">
       <header className="page-header">
-        <div><h1>在线文案库</h1><p>从公共示例包导入本机，您的私人文案不会上传。</p></div>
+        <div><h1>文案包</h1><p>从 AutoDy 内置示例包导入本机，您的私人文案不会上传。</p></div>
         <button className="action-button" onClick={load}><RefreshCw size={17} />刷新列表</button>
       </header>
-      {catalog?.warning ? <div className="notice warning">{catalog.warning}</div> : null}
       <div className="pack-grid">
         {catalog?.packs.map((pack) => (
           <article className="panel pack-card" key={pack.id}>

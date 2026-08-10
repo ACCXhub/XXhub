@@ -6,15 +6,12 @@ import { MessagePacksPage } from "./MessagePacksPage";
 vi.mock("../api", () => ({
   api: {
     messagePacks: vi.fn().mockResolvedValue({
-      packs: [{ id: "daily", name: "日常问候", description: "自然短问候", version: "1.0.0", count: 50, category: "daily" }],
-      source: "local",
-      warning: "当前使用内置文案包"
+      packs: [{ id: "daily", name: "日常问候", description: "自然短问候", version: "1.0.0", count: 50, category: "daily" }]
     }),
     previewMessagePack: vi.fn().mockResolvedValue({
       pack: { id: "daily", name: "日常问候", description: "自然短问候", version: "1.0.0", count: 50, category: "daily" },
       messages: ["早安呀", "今天顺利"],
-      duplicate_count: 0,
-      source: "local"
+      duplicate_count: 0
     }),
     importMessagePack: vi.fn().mockResolvedValue({
       added_count: 2,

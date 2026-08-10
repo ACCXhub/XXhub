@@ -65,7 +65,6 @@ export function SettingsPage({ notify, onOpenTestCenter = () => undefined, onTes
         <label><span>后缀文字<small>默认：gpt小助手</small></span><input aria-label="后缀文字" value={config.message_suffix.text} onChange={(event) => setConfig({ ...config, message_suffix: { ...config.message_suffix, text: event.target.value } })} /></label>
         <label><span>后缀样式<small>选择与正文的分隔方式</small></span><select aria-label="后缀样式" value={config.message_suffix.style} onChange={(event) => setConfig({ ...config, message_suffix: { ...config.message_suffix, style: event.target.value as AppConfig["message_suffix"]["style"] } })}><option value="dash">破折号</option><option value="bracket">方括号</option><option value="newline">换行</option><option value="none">空格</option></select></label>
         <label className="preview-setting"><span>发送预览<small>状态文件仍只记录“你好”基础文案</small></span><code>{suffixPreview(config)}</code></label>
-        <label><span>GitHub 文案索引 URL<small>留空时使用内置文案包</small></span><input aria-label="GitHub 文案索引 URL" placeholder="https://raw.githubusercontent.com/.../index.json" value={config.message_pack_index_url || ""} onChange={(event) => setConfig({ ...config, message_pack_index_url: event.target.value || null })} /></label>
       </div>
       <section className="module-entry">
         <h2>可选模块</h2>

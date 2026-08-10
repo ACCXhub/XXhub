@@ -58,7 +58,7 @@ CATEGORY_FILES = {
 SCHEDULE_FIELDS = (
     "daily_health_check_time", "daily_send_time", "weekly_health_check_enabled",
     "weekly_health_check_weekday", "weekly_health_check_time",
-    "startup_recovery_enabled", "recovery_deadline",
+    "recovery_deadline",
 )
 SENDING_FIELDS = (
     "retry_count", "timeout_ms", "headless", "min_delay_seconds", "max_delay_seconds",
@@ -112,7 +112,7 @@ def create_backup(config: AppConfig, categories: set[ExportCategory] | None = No
         elif category is ExportCategory.SENDING:
             files[name] = _json(_config_fields(config, SENDING_FIELDS))
         elif category is ExportCategory.MESSAGE_PACKS:
-            files[name] = _json({"message_pack_index_url": config.message_pack_index_url})
+            files[name] = _json({})
         elif category is ExportCategory.SETTINGS:
             files[name] = _json(_config_fields(config, SETTINGS_FIELDS))
         elif category is ExportCategory.ROTATION_STATE:
@@ -312,7 +312,7 @@ def apply_backup(raw: bytes, config_path: Path, config: AppConfig, *, mode: Impo
             result["messages"]["duplicated"] = len(incoming) - len(additions)
     if "suffix.json" in files:
         candidate.message_suffix = MessageSuffixConfig.model_validate(_read_json(files["suffix.json"], "后缀设置"))
-    for file_name, fields in (("schedule.json", SCHEDULE_FIELDS), ("sending.json", SENDING_FIELDS), ("settings.json", SETTINGS_FIELDS), ("message-packs.json", ("message_pack_index_url",))):
+    for file_name, fields in (("schedule.json", SCHEDULE_FIELDS), ("sending.json", SENDING_FIELDS), ("settings.json", SETTINGS_FIELDS)):
         if file_name in files:
             value = _read_json(files[file_name], file_name)
             if not isinstance(value, dict):

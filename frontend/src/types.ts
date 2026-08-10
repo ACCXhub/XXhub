@@ -79,7 +79,6 @@ export interface ScheduleSettings {
   weekly_health_check_enabled: boolean;
   weekly_health_check_weekday: string;
   weekly_health_check_time: string;
-  startup_recovery_enabled: boolean;
   recovery_deadline: string;
 }
 
@@ -110,7 +109,6 @@ export interface DashboardStatus {
     consecutive_successful_days: number;
     success_rate_7d: number;
     success_rate_30d: number;
-    retries_7d: number;
     successful_today: number;
     failed_today: number;
     configured_friend_count: number;
@@ -178,13 +176,11 @@ export interface AppConfig {
     text: string;
     style: MessageSuffixStyle;
   };
-  message_pack_index_url: string | null;
   daily_send_time: string;
   daily_health_check_time: string;
   weekly_health_check_enabled: boolean;
   weekly_health_check_weekday: string;
   weekly_health_check_time: string;
-  startup_recovery_enabled: boolean;
   recovery_deadline: string;
   min_delay_seconds: number;
   max_delay_seconds: number;
@@ -247,8 +243,6 @@ export interface MessagePack {
 
 export interface PackCatalog {
   packs: MessagePack[];
-  source: "remote" | "local";
-  warning?: string | null;
 }
 
 export interface OptionalModuleStatus {
@@ -273,8 +267,6 @@ export interface PackPreview {
   pack: MessagePack;
   messages: string[];
   duplicate_count: number;
-  source: "remote" | "local";
-  warning?: string | null;
 }
 
 export interface PackImportResult {
@@ -283,8 +275,6 @@ export interface PackImportResult {
   total_count: number;
   backup_path?: string | null;
   mode: "merge" | "replace" | "preview_only";
-  source?: "remote" | "local";
-  warning?: string | null;
 }
 
 export interface FriendCandidate {

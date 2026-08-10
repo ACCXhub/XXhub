@@ -28,7 +28,6 @@ _ACCOUNT_CONFIG_FIELDS = (
     "weekly_health_check_enabled",
     "weekly_health_check_weekday",
     "weekly_health_check_time",
-    "startup_recovery_enabled",
     "recovery_deadline",
 )
 _RUNTIME_FILES = (

@@ -6,7 +6,8 @@ import zipfile
 
 from fastapi.testclient import TestClient
 
-from autody.web_api import _scheduler_status_rows, create_app
+from autody.web_api import create_app
+from autody.scheduler import scheduler_status_rows
 from autody.history import TaskHistoryStore, TaskRunRecord
 from autody.config import Target, load_config, save_config
 from autody.preflight import PreflightStore
@@ -63,8 +64,6 @@ headless: true
                         "description": "日常测试包",
                         "version": "1.0.0",
                         "file": "daily.txt",
-                        "relative_url": "daily.txt",
-                        "raw_url": None,
                         "count": 2,
                         "category": "daily",
                     }
@@ -116,6 +115,40 @@ def test_status_returns_dashboard_summary(tmp_path: Path):
     assert data["login"]["status"] == "unknown"
 
 
+def test_historical_day_statistics_ignore_later_target_configuration_changes(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    state_path = tmp_path / "data" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["daily"]["2026-06-24"]["consumed"] = True
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    history = TaskHistoryStore(
+        tmp_path / "data" / "history" / "task-runs.jsonl"
+    )
+    history.append(
+        TaskRunRecord(
+            date="2026-06-24",
+            task_type="health_check",
+            trigger_source="scheduled",
+            start_time="2026-06-24T07:20:00",
+            end_time="2026-06-24T07:20:01",
+            final_status="completed",
+        )
+    )
+    client = TestClient(create_app(config_path))
+
+    before = client.get("/api/status?today=2026-06-24").json()["statistics"]
+    config = load_config(config_path)
+    config.targets = [Target(name="later-target", enabled=False)]
+    save_config(config_path, config)
+    after = client.get("/api/status?today=2026-06-24").json()["statistics"]
+
+    assert before["success_rate_7d"] == 100.0
+    assert after["success_rate_7d"] == before["success_rate_7d"]
+    assert after["success_rate_30d"] == before["success_rate_30d"]
+
+
 def test_friend_scan_status_handles_missing_optional_progress_file(tmp_path: Path):
     response = TestClient(create_app(make_project(tmp_path))).get(
         "/api/friends/scan-status"
@@ -159,7 +192,7 @@ def test_status_degrades_when_an_optional_scheduler_section_fails(
     monkeypatch,
 ):
     monkeypatch.setattr(
-        "autody.web_api._task_rows",
+        "autody.scheduler.windows_task_rows",
         lambda: (_ for _ in ()).throw(RuntimeError("fixture scheduler failure")),
     )
 
@@ -181,7 +214,7 @@ def test_scheduler_status_marks_duplicate_or_drifted_windows_tasks(tmp_path: Pat
         "start_boundary": "2026-06-24T08:00:00",
     }
 
-    rows = _scheduler_status_rows(config, [live, dict(live)], 8)
+    rows = scheduler_status_rows(config, [live, dict(live)], 8)
 
     send = next(row for row in rows if row["name"] == "AutoDy-DailySpark")
     assert send["target_count"] == 8
@@ -202,7 +235,7 @@ def test_scheduler_status_marks_missing_windows_trigger_as_drift(tmp_path: Path)
         "start_boundary": "",
     }
 
-    rows = _scheduler_status_rows(config, [live], 8)
+    rows = scheduler_status_rows(config, [live], 8)
 
     send = next(row for row in rows if row["name"] == "AutoDy-DailySpark")
     assert send["installed"] is True
@@ -233,7 +266,7 @@ def test_scheduler_status_rejects_task_action_from_another_runtime_root(
         "working_directory": str(wrong_root),
     }
 
-    rows = _scheduler_status_rows(
+    rows = scheduler_status_rows(
         config,
         [live],
         8,
@@ -271,7 +304,7 @@ def test_scheduler_status_rejects_non_powershell_action_with_correct_roots(
         "working_directory": str(program_root),
     }
 
-    rows = _scheduler_status_rows(
+    rows = scheduler_status_rows(
         config,
         [live],
         8,
@@ -295,11 +328,11 @@ def test_dashboard_exposes_runtime_root_drift_as_path_free_repair_issue(
     config_path = make_project(data_root)
     monkeypatch.setenv("AUTODY_PROGRAM_ROOT", str(program_root))
     monkeypatch.setattr(
-        "autody.web_api._registered_install_roots",
+        "autody.scheduler.registered_install_roots",
         lambda: (program_root.resolve(), data_root.resolve()),
     )
     monkeypatch.setattr(
-        "autody.web_api._task_rows",
+        "autody.scheduler.windows_task_rows",
         lambda: [{
             "name": "AutoDy-DailySpark",
             "state": "Ready",
@@ -325,57 +358,6 @@ def test_dashboard_exposes_runtime_root_drift_as_path_free_repair_issue(
     assert issue["action"] == "scheduler"
     assert issue["action_label"] == "修复任务"
     assert str(wrong_root) not in issue["explanation"]
-
-
-def test_startup_recovery_fails_closed_while_scheduler_roots_are_drifted(
-    tmp_path: Path,
-    monkeypatch,
-):
-    data_root = tmp_path / "data-root"
-    program_root = tmp_path / "installed-program"
-    wrong_root = tmp_path / "source-checkout"
-    data_root.mkdir()
-    config_path = make_project(data_root)
-    monkeypatch.setenv("AUTODY_PROGRAM_ROOT", str(program_root))
-    monkeypatch.setattr(
-        "autody.web_api._registered_install_roots",
-        lambda: (program_root.resolve(), data_root.resolve()),
-    )
-    monkeypatch.setattr(
-        "autody.web_api._task_rows",
-        lambda: [{
-            "name": "AutoDy-DailySpark",
-            "state": "Ready",
-            "next_run": "2026-08-10T07:30:00",
-            "last_run": "2026-08-09T07:30:00",
-            "last_result": 0,
-            "start_boundary": "2026-08-09T07:30:00",
-            "execute": "powershell.exe",
-            "arguments": (
-                '-NoProfile -ExecutionPolicy Bypass '
-                f'-File "{wrong_root / "scripts" / "run-scheduled.ps1"}" '
-                f'-ProgramRoot "{wrong_root}" -DataRoot "{wrong_root}"'
-            ),
-            "working_directory": str(wrong_root),
-        }],
-    )
-    actions = []
-    client = TestClient(create_app(
-        config_path,
-        action_runner=lambda action: actions.append(action),
-        now_provider=lambda: datetime(2026, 8, 9, 14, 0),
-    ))
-
-    response = client.post("/api/recovery/check")
-
-    assert response.status_code == 200
-    assert response.json() == {
-        "due": True,
-        "started": False,
-        "already_checked": False,
-        "blocked_reason": "scheduler_runtime_mismatch",
-    }
-    assert actions == []
 
 
 def test_service_identity_reports_local_runtime_without_private_browser_data(tmp_path: Path):
@@ -439,7 +421,6 @@ def test_config_and_messages_can_be_updated(tmp_path: Path):
                 "text": "每日问候",
                 "style": "bracket",
             },
-            "message_pack_index_url": "https://example.com/index.json",
         },
     )
     assert response.status_code == 200
@@ -485,7 +466,7 @@ def test_official_module_status_and_generated_install_share_the_version_policy(t
     manifest = __import__("json").loads((tmp_path / "data" / "modules" / MODULE_ID / "manifest.json").read_text(encoding="utf-8"))
 
     assert status["bundled_version"] == OFFICIAL_TEST_CENTER_VERSION
-    assert status["core_version"] == "1.4.2"
+    assert status["core_version"] == "1.4.3"
     assert installed["version"] == OFFICIAL_TEST_CENTER_VERSION
     assert manifest["module_version"] == OFFICIAL_TEST_CENTER_VERSION
     assert manifest["required_autody_version"] == OFFICIAL_TEST_CENTER_CORE_RANGE
@@ -728,18 +709,20 @@ def test_dashboard_and_plan_count_only_enabled_targets_with_executable_bindings(
     )
     _install_test_center(config_path)
     monkeypatch.setattr(
-        "autody.web_api._task_rows",
+        "autody.scheduler.windows_task_rows",
         lambda: [
             {
                 "name": "AutoDy-DailySpark",
                 "state": "Ready",
                 "next_run": "2026-06-25T07:30:00",
-                "last_run": "2026-06-24T07:30:00",
-                "last_result": 0,
-                "start_boundary": "2026-06-24T07:30:00",
-            }
-        ],
-    )
+                    "last_run": "2026-06-24T07:30:00",
+                    "last_result": 0,
+                    "start_boundary": "2026-06-24T07:30:00",
+                    "repetition_interval": "PT30M",
+                    "repetition_duration": "PT16H29M",
+                }
+            ],
+        )
     client = TestClient(
         create_app(config_path, now_provider=lambda: datetime(2026, 6, 24, 8, 0))
     )
@@ -1038,9 +1021,12 @@ def test_daily_summary_keeps_confirmed_success_after_later_recovery_failure(
         )
     )
 
-    status = TestClient(create_app(config_path)).get(
-        "/api/status?today=2026-06-24"
+    client = TestClient(create_app(config_path))
+    status = client.get("/api/status?today=2026-06-24").json()
+    failed_targets = client.get(
+        "/api/failed-targets?today=2026-06-24"
     ).json()
+    friends = client.get("/api/friends?today=2026-06-24").json()["friends"]
 
     assert status["statistics"]["successful_today"] == 1
     assert status["statistics"]["failed_today"] == 0
@@ -1048,6 +1034,13 @@ def test_daily_summary_keeps_confirmed_success_after_later_recovery_failure(
         friend for friend in status["friends"]
         if friend["target_id"] == "target-one"
     )["status"] == "success"
+    assert all(
+        item["target_id"] != "target-one" for item in failed_targets["items"]
+    )
+    assert failed_targets["summary"]["success"] == 1
+    assert next(
+        friend for friend in friends if friend["target_id"] == "target-one"
+    )["today_status"] == "success"
 
 
 def test_daily_summary_keeps_failure_when_day_has_no_confirmed_success(
@@ -1148,7 +1141,7 @@ def test_daily_summary_ignores_unmatched_deleted_target_confirmation(
         "succeeded": 8,
         "failed": 0,
         "total": 8,
-        "complete": False,
+        "complete": True,
     }
     assert payload["statistics"]["successful_today"] == 8
     assert payload["statistics"]["failed_today"] == 0
@@ -1298,6 +1291,58 @@ def test_status_current_health_rejects_ambiguous_candidate_and_account_mismatch(
         "status": "abnormal",
         "reason_code": "account_scope_mismatch",
         "summary_zh": "当前登录账号与目标所属账号不一致",
+    }
+
+
+def test_status_current_health_does_not_trust_cache_after_latest_scan_failed(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets = [
+        Target(
+            name="当前绑定",
+            stable_id="target-one",
+            candidate_id="candidate-one",
+        )
+    ]
+    save_config(config_path, config)
+    account_id = write_verified_account(tmp_path)
+    (tmp_path / "data" / "discovered_friends.json").write_text(
+        json.dumps(
+            {
+                "scanned_at": "2026-06-24T07:20:00",
+                "account_scope": account_id,
+                "last_result": {
+                    "status": "failed",
+                    "finished_at": "2026-06-24T07:21:00",
+                },
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-one",
+                        "display_name": "当前绑定",
+                        "avatar_status": "missing",
+                        "discovered_at": "2026-06-24T07:20:00",
+                        "match_status": "configured",
+                        "presence_status": "current",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    health = TestClient(
+        create_app(config_path, now_provider=lambda: datetime(2026, 6, 24, 8, 0))
+    ).get("/api/status?today=2026-06-24").json()["friends"][0][
+        "current_health"
+    ]
+
+    assert health == {
+        "status": "unknown",
+        "reason_code": "scan_failed",
+        "summary_zh": "最近一次实时扫描失败",
     }
 
 
@@ -1701,6 +1746,58 @@ def test_failed_target_rechecks_binding_before_offering_retry(
     assert item["suggested_action"] == "reassociate"
 
 
+def test_status_routes_a_non_retryable_stale_binding_to_friend_management(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets = [
+        Target(
+            name="绑定已过期目标",
+            stable_id="target-one",
+            candidate_id="candidate-old",
+        )
+    ]
+    save_config(config_path, config)
+    account_id = write_verified_account(tmp_path)
+    (tmp_path / "data" / "discovered_friends.json").write_text(
+        json.dumps(
+            {
+                "scanned_at": "2026-06-24T07:20:00",
+                "account_scope": account_id,
+                "candidates": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    state_path = tmp_path / "data" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    daily = state["daily"]["2026-06-24"]
+    daily["succeeded"] = []
+    daily["failures"] = {"绑定已过期目标": "target not found"}
+    daily["target_failures"] = {
+        "target-one": failure_detail(
+            "conversation_not_found",
+            stage="conversation_located",
+            run_id="run-one",
+            target_stable_id="target-one",
+            binding_valid=True,
+            account_scope_matches=True,
+        ).model_dump(mode="json")
+    }
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    status = TestClient(create_app(config_path)).get(
+        "/api/status?today=2026-06-24"
+    ).json()
+
+    issue = next(item for item in status["issues"] if item["id"] == "last_run_partial")
+    assert issue["action"] == "friends"
+    assert issue["action_label"] == "管理好友"
+    assert "重新关联" in issue["explanation"]
+
+
 def test_current_digest_scope_restores_retry_from_legacy_mismatch_and_key(
     tmp_path: Path,
 ):
@@ -1977,47 +2074,6 @@ def test_diagnostic_export_explicitly_excludes_avatar_cache(tmp_path: Path):
     assert not any("avatar" in name for name in archive.namelist())
 
 
-def test_startup_recovery_runs_once_after_send_time(tmp_path: Path):
-    config = make_project(tmp_path)
-    calls = []
-
-    def runner(action):
-        calls.append(action)
-        return {"id": "recovery", "action": action, "status": "running"}
-
-    client = TestClient(
-        create_app(
-            config,
-            action_runner=runner,
-            now_provider=lambda: datetime(2026, 7, 13, 8, 0),
-        )
-    )
-
-    first = client.post("/api/recovery/check").json()
-    second = client.post("/api/recovery/check").json()
-
-    assert first["started"] is True
-    assert second["started"] is False
-    assert calls == ["startup-recovery"]
-
-
-def test_startup_recovery_does_not_run_before_send_time(tmp_path: Path):
-    config = make_project(tmp_path)
-    calls = []
-    client = TestClient(
-        create_app(
-            config,
-            action_runner=lambda action: calls.append(action),
-            now_provider=lambda: datetime(2026, 7, 13, 7, 29),
-        )
-    )
-
-    response = client.post("/api/recovery/check").json()
-
-    assert response["due"] is False
-    assert calls == []
-
-
 def test_history_endpoint_filters_structured_runs(tmp_path: Path):
     config = make_project(tmp_path)
     store = TaskHistoryStore(tmp_path / "data" / "history" / "task-runs.jsonl")
@@ -2080,7 +2136,7 @@ def test_message_pack_list_preview_and_merge_import(tmp_path: Path):
     catalog = client.get("/api/message-packs")
     assert catalog.status_code == 200
     assert catalog.json()["packs"][0]["id"] == "daily"
-    assert catalog.json()["source"] == "local"
+    assert set(catalog.json()) == {"packs"}
 
     preview = client.get("/api/message-packs/daily")
     assert preview.status_code == 200
@@ -2094,6 +2150,25 @@ def test_message_pack_list_preview_and_merge_import(tmp_path: Path):
     assert imported.json()["total_count"] == 4
     assert imported.json()["backup_path"].endswith(".txt")
     assert "早安呀" in (tmp_path / "messages.txt").read_text(encoding="utf-8")
+
+
+def test_installed_message_packs_come_from_program_root(
+    tmp_path: Path, monkeypatch
+):
+    data_root = tmp_path / "data-root"
+    program_root = tmp_path / "program-root"
+    data_root.mkdir()
+    config_path = make_project(data_root)
+    source_packs = data_root / "message-packs"
+    program_packs = program_root / "message-packs"
+    program_packs.parent.mkdir(parents=True, exist_ok=True)
+    source_packs.rename(program_packs)
+    monkeypatch.setenv("AUTODY_PROGRAM_ROOT", str(program_root))
+
+    response = TestClient(create_app(config_path)).get("/api/message-packs")
+
+    assert response.status_code == 200
+    assert response.json()["packs"][0]["id"] == "daily"
 
 
 def test_scan_friends_endpoint_starts_action_and_lists_candidates(tmp_path: Path):
@@ -2145,7 +2220,7 @@ def test_scan_friends_endpoint_starts_action_and_lists_candidates(tmp_path: Path
     assert candidates.json()["candidates"][1]["avatar_url"] == "/api/avatars/candidate-new"
 
 
-def test_stale_discovery_returns_cached_rows_and_starts_one_background_refresh(tmp_path: Path, monkeypatch):
+def test_stale_discovery_returns_cached_rows_without_starting_browser_work(tmp_path: Path):
     calls = []
     config = make_project(tmp_path)
     (tmp_path / "data" / "health.json").write_text('{"status":"success"}', encoding="utf-8")
@@ -2161,7 +2236,6 @@ def test_stale_discovery_returns_cached_rows_and_starts_one_background_refresh(t
         }, ensure_ascii=False),
         encoding="utf-8",
     )
-    monkeypatch.setattr("autody.web_api.time.monotonic", lambda: 0.0)
     client = TestClient(create_app(
         config,
         action_runner=lambda action: calls.append(action) or {"id": "scan-1", "action": action, "status": "running"},
@@ -2174,9 +2248,9 @@ def test_stale_discovery_returns_cached_rows_and_starts_one_background_refresh(t
     assert first.status_code == 200
     assert first.json()["candidates"][0]["display_name"] == "缓存候选"
     assert first.json()["stale"] is True
-    assert first.json()["refresh_running"] is True
-    assert second.json()["refresh_running"] is True
-    assert calls == ["background-discovery"]
+    assert first.json()["refresh_running"] is False
+    assert second.json()["refresh_running"] is False
+    assert calls == []
 
 
 def test_fresh_discovery_does_not_start_an_unnecessary_background_refresh(tmp_path: Path):
@@ -2201,7 +2275,7 @@ def test_fresh_discovery_does_not_start_an_unnecessary_background_refresh(tmp_pa
     assert calls == []
 
 
-def test_dashboard_startup_uses_the_same_single_background_discovery_refresh(tmp_path: Path):
+def test_dashboard_status_reads_do_not_start_background_discovery(tmp_path: Path):
     calls = []
     config = make_project(tmp_path)
     (tmp_path / "data" / "health.json").write_text('{"status":"success"}', encoding="utf-8")
@@ -2218,7 +2292,7 @@ def test_dashboard_startup_uses_the_same_single_background_discovery_refresh(tmp
     assert client.get("/api/status").status_code == 200
     assert client.get("/api/status").status_code == 200
 
-    assert calls == ["background-discovery"]
+    assert calls == []
 
 
 def test_discovered_candidate_batch_add_keeps_its_cached_avatar_and_friend_state(
@@ -2661,7 +2735,7 @@ def test_status_returns_actionable_issues_without_friends_or_messages(
         encoding="utf-8",
     )
     (tmp_path / "messages.txt").write_text("\n", encoding="utf-8")
-    monkeypatch.setattr("autody.web_api._task_rows", lambda: [])
+    monkeypatch.setattr("autody.scheduler.windows_task_rows", lambda: [])
     client = TestClient(create_app(config))
 
     response = client.get("/api/status?today=2026-07-04")
@@ -2669,4 +2743,4 @@ def test_status_returns_actionable_issues_without_friends_or_messages(
     assert response.status_code == 200
     issue_ids = {issue["id"] for issue in response.json()["issues"]}
     assert {"no_friends", "no_messages", "scheduler_missing", "runtime_missing"} <= issue_ids
-    assert "remote_library" in issue_ids
+    assert "remote_library" not in issue_ids

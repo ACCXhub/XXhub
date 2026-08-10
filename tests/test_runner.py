@@ -9,9 +9,16 @@ import pytest
 from autody.config import AppConfig, Target
 from autody.chat import DeliveryResult, DeliveryStatus, FatalChatError
 from autody import runner as runner_module
+from autody.failures import failure_detail
 from autody.logging_setup import DailyAppendFileHandler
-from autody.runner import RunStatus, record_safe_pre_send_failure, run_daily
+from autody.runner import (
+    RunStatus,
+    automatic_daily_run_gate,
+    record_safe_pre_send_failure,
+    run_daily,
+)
 from autody.retry_state import TaskOutcome, TaskOutcomeStore
+from autody.state import StateStore
 
 
 class FakeChat:
@@ -103,6 +110,104 @@ def test_second_run_same_day_sends_nothing(tmp_path: Path):
     assert len(chat.sent) == 2
     assert len({message for _, message in chat.sent}) == 1
     assert chat.sent[0][1].endswith(" —— gpt小助手")
+
+
+def test_automatic_gate_stops_before_browser_when_all_targets_succeeded(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.targets = [
+        Target(
+            name="当前有效目标",
+            stable_id="target-current",
+            candidate_id="candidate-current",
+        )
+    ]
+    store = StateStore(config.state_file)
+    state = store.load()
+    state.daily["2026-08-10"] = {
+        "message": "",
+        "succeeded": ["当前有效目标"],
+        "failures": {},
+        "confirmation_results": {},
+        "consumed": True,
+    }
+    store.save(state)
+
+    result = automatic_daily_run_gate(
+        config,
+        now=datetime(2026, 8, 10, 8, 0),
+    )
+
+    assert result is not None
+    assert result.status is RunStatus.ALREADY_DONE
+    assert result.skipped_count == 1
+
+
+def test_automatic_gate_reopens_only_proven_safe_legacy_final_failure(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.targets = [
+        Target(
+            name="当前有效目标",
+            stable_id="target-current",
+            candidate_id="candidate-current",
+        )
+    ]
+    write_verified_retry_scope(tmp_path, ["candidate-current"])
+    discovered_path = tmp_path / "discovered_friends.json"
+    discovered = json.loads(discovered_path.read_text(encoding="utf-8"))
+    discovered["last_result"] = {"completed_bottom_reached": True}
+    discovered["candidates"][0]["identity_key"] = "avatar:" + "1" * 64
+    discovered_path.write_text(json.dumps(discovered), encoding="utf-8")
+
+    run_id = "legacy-safe-final"
+    detail = failure_detail(
+        "conversation_not_found",
+        stage="conversation_located",
+        send_attempts=0,
+        run_id=run_id,
+        target_stable_id="target-current",
+        binding_valid=True,
+        account_scope_matches=True,
+    )
+    store = StateStore(config.state_file)
+    state = store.load()
+    state.daily["2026-08-10"] = {
+        "message": "",
+        "succeeded": [],
+        "failures": {"当前有效目标": "conversation_not_found"},
+        "confirmation_results": {},
+        "target_failures": {
+            "target-current": detail.model_dump(mode="json")
+        },
+        "task_run_id": run_id,
+        "consumed": False,
+    }
+    store.save(state)
+    outcomes = TaskOutcomeStore(tmp_path / "history" / "task-outcomes.json")
+    outcomes.schedule(
+        run_id,
+        "2026-08-10",
+        datetime(2026, 8, 10, 23, 59),
+    )
+    outcomes.safe_failure(
+        run_id,
+        datetime(2026, 8, 10, 7, 40),
+        "conversation_not_found",
+        max_retries=0,
+    )
+
+    result = automatic_daily_run_gate(
+        config,
+        now=datetime(2026, 8, 10, 8, 0),
+    )
+
+    assert result is None
+    resumed = outcomes.get(run_id)
+    assert resumed and resumed.outcome is TaskOutcome.RETRY_PENDING
+    assert resumed.next_attempt_at == datetime(2026, 8, 10, 8, 0)
 
 
 def test_modern_run_excludes_enabled_records_without_an_executable_binding(
@@ -255,7 +360,19 @@ def test_runner_passes_current_stable_binding_to_navigation(tmp_path: Path):
     ]
 
 
-@pytest.mark.parametrize("trigger_source", ["scheduled", "startup_recovery", "manual"])
+def test_runner_rejects_retired_startup_recovery_trigger(tmp_path: Path):
+    config = make_config(tmp_path)
+
+    with pytest.raises(ValueError, match="unsupported daily-send trigger source"):
+        run_daily(
+            config,
+            FakeChat(),
+            date(2026, 7, 30),
+            trigger_source="startup_recovery",
+        )
+
+
+@pytest.mark.parametrize("trigger_source", ["scheduled", "retry", "manual"])
 def test_runner_resolves_account_scoped_bindings_to_current_conversation_identity(
     tmp_path: Path,
     trigger_source: str,
@@ -299,7 +416,8 @@ def test_runner_resolves_account_scoped_bindings_to_current_conversation_identit
     ):
         candidate["identity_key"] = identity
         candidate["identity_source"] = "avatar_source"
-        candidate["configured_target_id"] = f"target-{index}"
+        candidate["match_status"] = "unconfigured"
+        candidate["configured_target_id"] = None
     discovered_path.write_text(
         json.dumps(discovered, ensure_ascii=False),
         encoding="utf-8",
@@ -484,16 +602,20 @@ def test_safe_failure_persists_retry_pending_then_recovers_without_a_final_failu
     assert TaskOutcomeStore(tmp_path / "history" / "task-outcomes.json").get(first.run_id).outcome is TaskOutcome.RECOVERED
 
 
-def test_exhausted_safe_retries_become_final_failed(tmp_path: Path):
+def test_exhausted_short_retries_remain_pending_for_scheduler_recovery(tmp_path: Path):
     config = make_config(tmp_path)
     config.targets = [Target(name="小明")]
     config.retry_count = 1
     first = run_daily(config, FakeChat({"小明"}), date(2026, 7, 28), now=datetime(2026, 7, 28, 7, 30))
     pending = TaskOutcomeStore(tmp_path / "history" / "task-outcomes.json").get(first.run_id)
 
-    final = run_daily(config, FakeChat({"小明"}), date(2026, 7, 28), now=pending.next_attempt_at, trigger_source="retry")
+    later = run_daily(config, FakeChat({"小明"}), date(2026, 7, 28), now=pending.next_attempt_at, trigger_source="retry")
 
-    assert final.status is RunStatus.FINAL_FAILED
+    assert later.status is RunStatus.RETRY_PENDING
+    persisted = TaskOutcomeStore(
+        tmp_path / "history" / "task-outcomes.json"
+    ).get(first.run_id)
+    assert persisted and persisted.next_attempt_at > pending.next_attempt_at
 
 
 def test_possible_send_is_uncertain_and_never_retried(tmp_path: Path):
@@ -575,7 +697,7 @@ def test_target_overrides_apply_pack_and_explicit_suffix_without_changing_global
     pack_dir.mkdir()
     (pack_dir / "special.txt").write_text("专属问候\n", encoding="utf-8")
     (pack_dir / "index.json").write_text(
-        '{"packs":[{"id":"special","name":"测试包","description":"","version":"1","file":"special.txt","relative_url":"special.txt","raw_url":null,"count":1,"category":"test"}]}',
+        '{"packs":[{"id":"special","name":"测试包","description":"","version":"1","file":"special.txt","count":1,"category":"test"}]}',
         encoding="utf-8",
     )
     config.targets[0].message_pack = "special"
@@ -589,6 +711,27 @@ def test_target_overrides_apply_pack_and_explicit_suffix_without_changing_global
     assert chat.sent[0] == ("小明", "专属问候 —— 专属后缀")
     assert chat.sent[1][1] in {"早安", "晚安"}
     assert config.message_suffix.text == "gpt小助手"
+
+
+def test_target_pack_uses_installed_program_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    config, chat = make_config(tmp_path), FakeChat()
+    program_root = tmp_path / "program"
+    pack_dir = program_root / "message-packs"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "special.txt").write_text("安装内置问候\n", encoding="utf-8")
+    (pack_dir / "index.json").write_text(
+        '{"packs":[{"id":"special","name":"测试包","description":"","version":"1","file":"special.txt","count":1,"category":"test"}]}',
+        encoding="utf-8",
+    )
+    config.targets[0].message_pack = "special"
+    monkeypatch.setenv("AUTODY_PROGRAM_ROOT", str(program_root))
+
+    result = run_daily(config, chat, date(2026, 7, 15))
+
+    assert result.status is RunStatus.COMPLETED
+    assert chat.sent[0][1].startswith("安装内置问候")
 
 
 def test_today_message_preview_matches_production_resolution_without_mutating_state_or_history(tmp_path: Path):
@@ -618,7 +761,7 @@ def test_today_message_preview_uses_target_pack_and_custom_suffix_without_persis
     pack_dir.mkdir()
     (pack_dir / "special.txt").write_text("专属问候\n", encoding="utf-8")
     (pack_dir / "index.json").write_text(
-        '{"packs":[{"id":"special","name":"测试包","description":"","version":"1","file":"special.txt","relative_url":"special.txt","raw_url":null,"count":1,"category":"test"}]}',
+        '{"packs":[{"id":"special","name":"测试包","description":"","version":"1","file":"special.txt","count":1,"category":"test"}]}',
         encoding="utf-8",
     )
     config.targets = [

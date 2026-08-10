@@ -102,7 +102,7 @@ def test_tray_requires_current_identity_process_and_user_scope_before_reusing_a_
     $owner = [Security.Principal.WindowsIdentity]::GetCurrent().Name
     $identity = [pscustomobject]@{
       application = "AutoDy"
-      version = "1.4.2"
+      version = "1.4.3"
       project_path = $DataRoot
       package_path = $PackagePath
       python_executable = $Python
@@ -113,7 +113,7 @@ def test_tray_requires_current_identity_process_and_user_scope_before_reusing_a_
       Owner = $owner
       Identity = $identity
     }
-    if (-not (Test-OwnedAutoDy $valid "1.4.2")) { throw "valid AutoDy identity was rejected" }
+    if (-not (Test-OwnedAutoDy $valid "1.4.3")) { throw "valid AutoDy identity was rejected" }
     $wrongVersion = [pscustomobject]@{
       Pid = 4242
       ProcessPath = $Python
@@ -138,9 +138,9 @@ def test_tray_requires_current_identity_process_and_user_scope_before_reusing_a_
       Owner = $owner
       Identity = [pscustomobject]@{ application = "AutoDy"; version = $null }
     }
-    if (Test-OwnedAutoDy $wrongVersion "1.4.2") { throw "stale identity was reused" }
-    if (Test-OwnedAutoDy $wrongOwner "1.4.2") { throw "another user identity was reused" }
-    if (Test-OwnedAutoDy $malformed "1.4.2") { throw "malformed identity was reused" }
+    if (Test-OwnedAutoDy $wrongVersion "1.4.3") { throw "stale identity was reused" }
+    if (Test-OwnedAutoDy $wrongOwner "1.4.3") { throw "another user identity was reused" }
+    if (Test-OwnedAutoDy $malformed "1.4.3") { throw "malformed identity was reused" }
     """
     test_env = os.environ.copy()
     test_env["AUTODY_TEST_TRAY_SCRIPT"] = str(script_path)

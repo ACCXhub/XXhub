@@ -21,11 +21,20 @@ class DoctorResult:
 def configure_runtime(home: Path) -> RuntimePaths:
     resolved_home = home.resolve()
     configured_browsers = os.environ.get("AUTODY_BROWSERS_PATH", "").strip()
-    browsers_path = (
-        Path(configured_browsers).expanduser().resolve()
-        if configured_browsers
-        else resolved_home / "data" / "ms-playwright"
+    configured_program_root = os.environ.get("AUTODY_PROGRAM_ROOT", "").strip()
+    packaged_browsers = (
+        Path(configured_program_root).expanduser().resolve()
+        / "runtime"
+        / "ms-playwright"
+        if configured_program_root
+        else None
     )
+    if configured_browsers:
+        browsers_path = Path(configured_browsers).expanduser().resolve()
+    elif packaged_browsers is not None and packaged_browsers.is_dir():
+        browsers_path = packaged_browsers
+    else:
+        browsers_path = resolved_home / "data" / "ms-playwright"
     browsers_path.mkdir(parents=True, exist_ok=True)
     os.environ["AUTODY_HOME"] = str(resolved_home)
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_path)

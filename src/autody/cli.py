@@ -28,34 +28,37 @@ from autody.account_profile import (
     mark_bindings_for_revalidation,
     resolve_account_profile,
 )
-from autody.config import AppConfig, load_config, save_config
+from autody.config import AppConfig, load_config, save_config, target_identity
 from autody.friend_discovery import (
+    FriendDiscoveryResult,
     ScanProgress,
     discover_friends,
-    is_discovery_stale,
-    load_discovered_friends,
     record_discovery_failure,
 )
 from autody.locking import SingleInstanceLock, TaskAlreadyRunning
 from autody.logging_setup import setup_logging
 from autody.messages import read_messages
 from autody.preflight import PlaywrightPreflightInspector, PreflightStore, global_failure, run_preflight
-from autody.recovery import recovery_due
 from autody.retry_state import TaskOutcomeStore
-from autody.runner import RunResult, RunStatus, record_safe_pre_send_failure, run_daily
+from autody.runner import (
+    RUN_TRIGGER_SOURCES,
+    RunResult,
+    RunStatus,
+    automatic_daily_run_gate,
+    record_safe_pre_send_failure,
+    run_daily,
+)
 from autody.runtime import configure_runtime, doctor_playwright, repair_playwright
 from autody.scheduler import SchedulerService
-from autody.state import StateStore
 from autody.web_api import create_app
 
 
 app = typer.Typer(no_args_is_help=True, help="抖音每日续火花工具")
 BUSY_MESSAGE = "已有 AutoDy 任务正在运行，本次跳过。"
-TRIGGER_SOURCES = {"scheduled", "manual", "startup_recovery", "retry"}
 SEND_ACTIVITY_MAX_AGE_SECONDS = 6 * 60 * 60
 
 
-def _project_root(config_path: Path) -> Path:
+def _data_root(config_path: Path) -> Path:
     return config_path.resolve().parent
 
 
@@ -169,6 +172,30 @@ def _merge_discovered_target_bindings(
     return latest
 
 
+def _complete_friend_discovery(
+    config_path: Path,
+    loaded: AppConfig,
+    result: FriendDiscoveryResult,
+) -> AppConfig:
+    """Persist scan-owned bindings and clear the account guard from one result."""
+    persisted = (
+        _merge_discovered_target_bindings(config_path, loaded)
+        if result.config_changed
+        else loaded
+    )
+    complete_binding_revalidation(
+        persisted.state_file.parent,
+        account_scope=result.account_scope,
+        target_candidate_ids=[target.candidate_id for target in persisted.targets],
+        current_candidate_ids={
+            candidate.candidate_id
+            for candidate in result.candidates
+            if candidate.presence_status == "current"
+        },
+    )
+    return persisted
+
+
 def _run_friend_scan(
     loaded: AppConfig,
     config_path: Path,
@@ -196,7 +223,7 @@ def _run_friend_scan(
                     min(loaded.page_load_timeout_ms, remaining_ms),
                     True,
                     loaded.artifact_dir,
-                    home=_project_root(config_path),
+                    home=_data_root(config_path),
                     on_stage=progress.update,
                 ) as page:
                     remaining_ms = max(1, int((overall_deadline - time.monotonic()) * 1000))
@@ -211,24 +238,7 @@ def _run_friend_scan(
                         avatar_timeout_ms=loaded.avatar_capture_timeout_ms,
                         progress=progress.update,
                     )
-                    if result.config_changed:
-                        persisted = _merge_discovered_target_bindings(
-                            config_path, loaded
-                        )
-                    else:
-                        persisted = loaded
-                    complete_binding_revalidation(
-                        persisted.state_file.parent,
-                        account_scope=result.account_scope,
-                        target_candidate_ids=[
-                            target.candidate_id for target in persisted.targets
-                        ],
-                        current_candidate_ids={
-                            candidate.candidate_id
-                            for candidate in result.candidates
-                            if candidate.presence_status == "current"
-                        },
-                    )
+                    _complete_friend_discovery(config_path, loaded, result)
             finally:
                 progress.update("releasing_browser_lock")
         progress.finish(
@@ -295,7 +305,7 @@ def _run_preflight_with_page(
     store = _preflight_store(loaded, data_root)
     inspector = PlaywrightPreflightInspector(page, friend_timeout_ms=loaded.friend_search_timeout_ms)
     enabled_count = sum(
-        target.enabled and (not target_ids or (target.stable_id or target.candidate_id) in target_ids)
+        target.enabled and (not target_ids or target_identity(target) in target_ids)
         for target in loaded.targets
     )
     store.save_progress({
@@ -353,7 +363,7 @@ def login(config: Path = typer.Option(Path("config.yaml"), "--config")):
     loaded = load_config(config)
     try:
         with SingleInstanceLock(loaded.lock_file):
-            configure_runtime(_project_root(config))
+            configure_runtime(_data_root(config))
             setup_logging(loaded)
             typer.echo("浏览器将打开，请扫码登录；检测到聊天列表后会自动保存并关闭。")
             scan_message = "候选好友扫描未启动。"
@@ -361,7 +371,7 @@ def login(config: Path = typer.Option(Path("config.yaml"), "--config")):
             def scan_after_login(page) -> None:
                 nonlocal scan_message
                 try:
-                    profile = resolve_account_profile(page, _project_root(config))
+                    profile = resolve_account_profile(page, _data_root(config))
                     if profile.switched:
                         mark_bindings_for_revalidation(loaded.state_file.parent)
                     logging.info("当前账号资料已验证并刷新，账号切换=%s", profile.switched)
@@ -376,22 +386,7 @@ def login(config: Path = typer.Option(Path("config.yaml"), "--config")):
                         DOUYIN_SELECTORS,
                         loaded.state_file.parent / "discovered_friends.json",
                     )
-                    if result.config_changed:
-                        persisted = _merge_discovered_target_bindings(config, loaded)
-                    else:
-                        persisted = loaded
-                    complete_binding_revalidation(
-                        persisted.state_file.parent,
-                        account_scope=result.account_scope,
-                        target_candidate_ids=[
-                            target.candidate_id for target in persisted.targets
-                        ],
-                        current_candidate_ids={
-                            candidate.candidate_id
-                            for candidate in result.candidates
-                            if candidate.presence_status == "current"
-                        },
-                    )
+                    _complete_friend_discovery(config, loaded, result)
                     scan_message = f"候选好友已刷新：发现 {len(result.candidates)} 个记录。"
                     logging.info(scan_message)
                 except Exception as exc:
@@ -408,7 +403,7 @@ def login(config: Path = typer.Option(Path("config.yaml"), "--config")):
 
             browser_login(
                 loaded.profile_dir,
-                home=_project_root(config),
+                home=_data_root(config),
                 on_ready=scan_after_login,
             )
             _write_health(loaded, "success")
@@ -424,15 +419,15 @@ def refresh_account_profile(config: Path = typer.Option(Path("config.yaml"), "--
     loaded = load_config(config)
     try:
         with SingleInstanceLock(loaded.lock_file):
-            configure_runtime(_project_root(config))
+            configure_runtime(_data_root(config))
             setup_logging(loaded)
             with open_chat(
                 loaded.profile_dir,
                 timeout_ms=loaded.page_load_timeout_ms,
                 headless=loaded.headless,
-                home=_project_root(config),
+                home=_data_root(config),
             ) as page:
-                profile = resolve_account_profile(page, _project_root(config))
+                profile = resolve_account_profile(page, _data_root(config))
             if profile.switched:
                 mark_bindings_for_revalidation(loaded.state_file.parent)
             typer.echo("检测到登录账号已切换，账号资料已更新。" if profile.switched else "当前账号资料已刷新。")
@@ -447,68 +442,30 @@ def health_check(config: Path = typer.Option(Path("config.yaml"), "--config")):
     loaded = load_config(config)
     try:
         with SingleInstanceLock(loaded.lock_file):
-            configure_runtime(_project_root(config))
+            configure_runtime(_data_root(config))
             setup_logging(loaded)
             with open_chat(
                 loaded.profile_dir,
                 loaded.page_load_timeout_ms,
                 True,
                 loaded.artifact_dir,
-                home=_project_root(config),
+                home=_data_root(config),
             ) as page:
                 logging.info("登录状态和抖音聊天页正常。")
                 _write_health(loaded, "success")
-                should_recover = loaded.startup_recovery_enabled and recovery_due(
-                    loaded, StateStore(loaded.state_file).load(), datetime.now()
-                )
-                if should_recover and bindings_revalidation_required(
-                    loaded.state_file.parent
-                ):
-                    should_recover = False
-                    logging.warning("账号绑定待重新验证，同日恢复发送已暂停。")
-                if should_recover:
-                    logging.info("检测到今日任务错过，启动同日恢复运行。")
-                    chat = DouyinChat(
-                        page,
-                        DOUYIN_SELECTORS,
-                        loaded.artifact_dir,
-                        DOUYIN_CONFIRMATION_SELECTORS,
-                        confirmation_delay_ms=max(250, loaded.confirmation_timeout_ms // 3),
-                        friend_search_timeout_ms=loaded.friend_search_timeout_ms,
+                discovery_path = loaded.state_file.parent / "discovered_friends.json"
+                try:
+                    result = discover_friends(
+                        loaded, page, DOUYIN_SELECTORS, discovery_path
                     )
-                    with _sending_activity(loaded):
-                        run_daily(loaded, chat, trigger_source="startup_recovery")
-                else:
-                    discovery_path = loaded.state_file.parent / "discovered_friends.json"
-                    cached = load_discovered_friends(discovery_path)
-                    if is_discovery_stale(cached.scanned_at if cached else None):
-                        try:
-                            result = discover_friends(
-                                loaded, page, DOUYIN_SELECTORS, discovery_path
-                            )
-                            if result.config_changed:
-                                persisted = _merge_discovered_target_bindings(
-                                    config, loaded
-                                )
-                            else:
-                                persisted = loaded
-                            complete_binding_revalidation(
-                                persisted.state_file.parent,
-                                account_scope=result.account_scope,
-                                target_candidate_ids=[
-                                    target.candidate_id
-                                    for target in persisted.targets
-                                ],
-                                current_candidate_ids={
-                                    candidate.candidate_id
-                                    for candidate in result.candidates
-                                    if candidate.presence_status == "current"
-                                },
-                            )
-                            logging.info("登录健康检查已刷新候选好友：发现 %s 个记录。", len(result.candidates))
-                        except Exception as exc:
-                            record_discovery_failure(discovery_path, str(exc))
-                            logging.warning("登录健康检查后的候选好友扫描失败：%s", exc)
+                    _complete_friend_discovery(config, loaded, result)
+                    logging.info(
+                        "登录健康检查已刷新候选好友：发现 %s 个记录。",
+                        len(result.candidates),
+                    )
+                except Exception as exc:
+                    record_discovery_failure(discovery_path, str(exc))
+                    logging.warning("登录健康检查后的候选好友扫描失败：%s", exc)
                 if loaded.preflight_after_health_enabled and _automatic_preflight_due(loaded):
                     try:
                         result = _run_preflight_with_page(
@@ -554,12 +511,12 @@ def preflight(
         return
     try:
         with SingleInstanceLock(loaded.lock_file):
-            configure_runtime(_project_root(config))
+            configure_runtime(_data_root(config))
             setup_logging(loaded)
             logging.info("发送前自检开始：目标 %s 个", len(requested or [target for target in loaded.targets if target.enabled]))
             with open_chat(
                 loaded.profile_dir, loaded.page_load_timeout_ms, loaded.headless,
-                home=_project_root(config),
+                home=_data_root(config),
             ) as page:
                 result = _run_preflight_with_page(
                     loaded, page, target_ids=requested,
@@ -586,7 +543,6 @@ def preflight(
 @app.command("scan-friends")
 def scan_friends(
     config: Path = typer.Option(Path("config.yaml"), "--config"),
-    background: bool = typer.Option(False, "--background", help="后台缓存刷新，不重复截取未过期头像"),
 ):
     loaded = load_config(config)
     discovery_path = loaded.state_file.parent / "discovered_friends.json"
@@ -594,10 +550,10 @@ def scan_friends(
         typer.echo("每日发送任务正在运行，候选扫描已延后。")
         return
     try:
-        configure_runtime(_project_root(config))
+        configure_runtime(_data_root(config))
         setup_logging(loaded)
         result = _run_friend_scan(
-            loaded, config, discovery_path, force_avatar_refresh=not background
+            loaded, config, discovery_path, force_avatar_refresh=True
         )
         logging.info("好友识别完成：发现 %s 个候选", len(result.candidates))
         typer.echo(f"好友识别完成：发现 {len(result.candidates)} 个候选。")
@@ -623,7 +579,7 @@ def refresh_friend_avatars(
     loaded = load_config(config)
     discovery_path = loaded.state_file.parent / "discovered_friends.json"
     try:
-        configure_runtime(_project_root(config))
+        configure_runtime(_data_root(config))
         setup_logging(loaded)
         result = _run_friend_scan(loaded, config, discovery_path, force_avatar_refresh=True)
         message = (
@@ -651,12 +607,12 @@ def doctor(config: Path = typer.Option(Path("config.yaml"), "--config")):
     loaded = load_config(config)
     try:
         with SingleInstanceLock(loaded.lock_file):
-            result = doctor_playwright(_project_root(config))
+            result = doctor_playwright(_data_root(config))
     except TaskAlreadyRunning:
         _busy()
         return
     except RuntimeError as exc:
-        runtime = configure_runtime(_project_root(config))
+        runtime = configure_runtime(_data_root(config))
         typer.echo(f"Playwright 浏览器目录：{runtime.browsers_path}")
         typer.echo(f"Chromium 启动检查失败：{exc}", err=True)
         raise typer.Exit(1) from exc
@@ -671,7 +627,7 @@ def repair_playwright_command(config: Path = typer.Option(Path("config.yaml"), "
     loaded = load_config(config)
     try:
         with SingleInstanceLock(loaded.lock_file):
-            runtime = repair_playwright(_project_root(config))
+            runtime = repair_playwright(_data_root(config))
     except TaskAlreadyRunning:
         _busy()
         return
@@ -704,19 +660,21 @@ def ui(
 def repair_scheduler(
     config: Path = typer.Option(Path("config.yaml"), "--config"),
     program_root: Path = typer.Option(..., "--program-root"),
-    if_config_exists: bool = typer.Option(False, "--if-config-exists"),
+    data_root: Path = typer.Option(..., "--data-root"),
+    task_user_id: str | None = typer.Option(None, "--task-user-id"),
 ):
     """Rewrite AutoDy tasks from the canonical config and runtime roots."""
     config = config.resolve()
     if not config.is_file():
-        if if_config_exists:
-            typer.echo("AutoDy 配置尚未创建，跳过定时任务修复。")
-            return
         raise typer.BadParameter("AutoDy 配置不存在")
+    data_root = data_root.resolve()
+    if config.parent != data_root:
+        raise typer.BadParameter("配置文件必须位于指定的数据根目录")
     loaded = load_config(config)
     SchedulerService(
         program_root.resolve(),
-        data_root=config.parent,
+        data_root=data_root,
+        task_user_id=task_user_id,
     ).repair(loaded)
     typer.echo("AutoDy 定时任务已按当前安装位置修复。")
 
@@ -732,7 +690,7 @@ def run(
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="只检查任务可启动性，不打开浏览器或发送消息"),
 ):
-    if source not in TRIGGER_SOURCES:
+    if source not in RUN_TRIGGER_SOURCES:
         raise typer.BadParameter(f"未知任务来源：{source}")
     loaded = load_config(config)
     if target_id is not None and not any(
@@ -748,6 +706,11 @@ def run(
         )
         typer.echo(f"模拟运行已通过：将处理 {enabled} 个启用目标；未打开浏览器，未发送消息。")
         return
+    if source in {"scheduled", "retry"} and target_id is None:
+        gated = automatic_daily_run_gate(loaded)
+        if gated is not None:
+            _report_daily_result(loaded, gated)
+            return
     if bindings_revalidation_required(loaded.state_file.parent):
         typer.echo(
             "账号绑定待重新验证，定时发送已暂停。请登录并重新扫描好友。",
@@ -758,14 +721,14 @@ def run(
     try:
         with SingleInstanceLock(loaded.lock_file):
             with _sending_activity(loaded):
-                configure_runtime(_project_root(config))
+                configure_runtime(_data_root(config))
                 setup_logging(loaded)
                 with open_chat(
                     loaded.profile_dir,
                     loaded.page_load_timeout_ms,
                     loaded.headless,
                     loaded.artifact_dir,
-                    home=_project_root(config),
+                    home=_data_root(config),
                 ) as page:
                     chat = DouyinChat(
                         page,

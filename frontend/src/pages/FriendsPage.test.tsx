@@ -25,10 +25,9 @@ vi.mock("../api", () => ({ api: apiMocks }));
 const config = {
   targets: ["小明"], retry_count: 3, timeout_ms: 30000, headless: true,
   message_suffix: { enabled: true, text: "gpt小助手", style: "dash" as const },
-  message_pack_index_url: null,
   daily_send_time: "07:30", daily_health_check_time: "07:20", weekly_health_check_enabled: true,
   weekly_health_check_weekday: "Sunday", weekly_health_check_time: "20:00",
-  startup_recovery_enabled: true, recovery_deadline: "23:59", min_delay_seconds: 1,
+  recovery_deadline: "23:59", min_delay_seconds: 1,
   max_delay_seconds: 3, page_load_timeout_ms: 30000, friend_search_timeout_ms: 30000,
   confirmation_timeout_ms: 12000, friend_order: "configured" as const,
   message_selection: "one_for_all" as const, completion_notifications_enabled: true,
@@ -158,39 +157,12 @@ test("starts the avatar-correction scan without a send action", async () => {
   expect(apiMocks.scanFriends).not.toHaveBeenCalled();
 });
 
-test("keeps the trash action independent from continuation cancellation", async () => {
+test("removes single-target delete controls while keeping whole-set delete", async () => {
   render(<FriendsPage notify={vi.fn()} />);
 
   await screen.findByRole("button", { name: "取消续火 小明" });
-  const deleteButton = screen.getByRole("button", { name: "删除目标 小明" });
-
-  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-  fireEvent.click(deleteButton);
-  expect(confirm).toHaveBeenCalledWith("删除目标「小明」？");
-  expect(apiMocks.friendBatch).toHaveBeenCalledWith(["friend-xiaoming"], "delete");
-  expect(apiMocks.friendBatch).not.toHaveBeenCalledWith(["friend-xiaoming"], "disable");
-
-});
-
-test("moves a deleted configured target to candidates and re-adds it immediately", async () => {
-  render(<FriendsPage notify={vi.fn()} onDataChanged={vi.fn()} />);
-  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-  apiMocks.friends.mockImplementation(() => new Promise(() => undefined));
-  apiMocks.discoveredFriends.mockImplementation(() => new Promise(() => undefined));
-
-  fireEvent.click(await screen.findByRole("button", { name: "删除目标 小明" }));
-
-  await waitFor(() => {
-    expect(apiMocks.friendBatch).toHaveBeenCalledWith(["friend-xiaoming"], "delete");
-  });
-  const candidate = screen.getByRole("button", { name: "添加 小明" });
-  expect(screen.queryByRole("button", { name: "取消续火 小明" })).not.toBeInTheDocument();
-
-  fireEvent.click(candidate);
-
-  await waitFor(() => {
-    expect(apiMocks.addCandidateToTargets).toHaveBeenCalledWith("friend-xiaoming");
-  });
+  expect(screen.queryByRole("button", { name: "删除目标 小明" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "全部删除" })).toBeInTheDocument();
 });
 
 test("cancels and immediately re-adds one continuation target without a manual refresh", async () => {
@@ -283,15 +255,6 @@ test("offers whole-set enable, disable, and destructive delete without selection
     ["friend-xiaoming", "friend-xiaohong"],
     "delete",
   ));
-});
-
-test("renders the target delete control as a compact absolute card action", async () => {
-  render(<FriendsPage notify={vi.fn()} />);
-
-  const button = await screen.findByRole("button", { name: "删除目标 小明" });
-  expect(button).toHaveAttribute("title", "删除目标");
-  expect(button).toHaveClass("icon-button", "danger");
-  expect(button.parentElement).toHaveClass("friend-editor-row");
 });
 
 test("does not expose single-target preflight controls or request preflight data", async () => {

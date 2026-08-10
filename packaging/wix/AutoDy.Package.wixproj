@@ -2,16 +2,15 @@
   <PropertyGroup>
     <OutputType>Package</OutputType>
     <Platform>x64</Platform>
-    <ProductVersion Condition="'$(ProductVersion)' == ''">1.4.2</ProductVersion>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">1.4.3</ProductVersion>
     <ProductCode Condition="'$(ProductCode)' == ''">*</ProductCode>
     <StageDir Condition="'$(StageDir)' == ''">$(MSBuildProjectDirectory)\stage</StageDir>
     <GeneratedWxs Condition="'$(GeneratedWxs)' == ''">$(MSBuildProjectDirectory)\GeneratedFiles.wxs</GeneratedWxs>
     <DefineConstants>ProductVersion=$(ProductVersion);ProductCode=$(ProductCode);StageDir=$(StageDir)</DefineConstants>
     <OutputName Condition="'$(Configuration)' == 'Debug'">AutoDy-$(ProductVersion)-x64-UNOFFICIAL-DEBUG</OutputName>
     <OutputName Condition="'$(Configuration)' != 'Debug'">AutoDy-$(ProductVersion)-x64</OutputName>
-    <!-- ICE91 is inapplicable to this per-user-only package; ICE60 flags
-         language-neutral third-party runtime binaries. All other ICEs remain enabled. -->
-    <SuppressIces>ICE60;ICE91</SuppressIces>
+    <!-- ICE60 flags language-neutral third-party runtime binaries. -->
+    <SuppressIces>ICE60</SuppressIces>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="$(GeneratedWxs)" />

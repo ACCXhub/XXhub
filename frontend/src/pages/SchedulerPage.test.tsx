@@ -57,7 +57,6 @@ beforeEach(() => {
     weekly_health_check_enabled: false,
     weekly_health_check_weekday: "Sunday",
     weekly_health_check_time: "20:00",
-    startup_recovery_enabled: true,
     recovery_deadline: "23:59",
   });
 });
@@ -77,4 +76,6 @@ test("shows one compact authoritative schedule row with state, time, targets, re
 
   fireEvent.click(screen.getByRole("button", { name: "编辑 每日续火发送" }));
   expect(screen.getByLabelText("每日续火发送", { selector: "input" })).toHaveFocus();
+  expect(screen.queryByLabelText("启动后补跑错过任务")).not.toBeInTheDocument();
+  expect(screen.getByText("当日重试截止时间")).toBeInTheDocument();
 });

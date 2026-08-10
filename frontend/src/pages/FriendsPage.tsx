@@ -1,4 +1,4 @@
-import { Radar, RefreshCw, Trash2 } from "lucide-react";
+import { Radar, RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { AppConfig, ConfiguredFriend, FriendDiscovery } from "../types";
@@ -273,7 +273,6 @@ export function FriendsPage({
                 <small><span className={friend.enabled ? "target-status" : "target-status paused"}>{friend.enabled ? "已启用" : "已停用"}</span>{friend.binding_status === "revalidation_required" ? <span className="target-status paused">绑定待重新验证</span> : todayLabel(friend.today_status)}{friend.binding_status !== "revalidation_required" && friend.last_success_date ? ` · 最近成功：${friend.last_success_date}` : ""}</small>
               </div>
               <small className="friend-row-hint">{targetMutationId === targetId ? "保存中…" : "点击取消续火"}</small>
-              <button className="icon-button danger" aria-label={`删除目标 ${friend.display_name}`} title="删除目标" disabled={targetMutationId !== null} onClick={(event) => { event.stopPropagation(); if (window.confirm(`删除目标「${friend.display_name}」？`)) void mutateTargets([targetId], "delete", targetId); }}><Trash2 size={17} /></button>
             </div>;
           })}
           {!enabledFriends.length ? <p className="empty-list-copy">暂无启用的续火目标，可从候选好友中点击加入。</p> : null}
@@ -289,7 +288,6 @@ export function FriendsPage({
           return <div className="candidate stored-candidate" key={`stored-${targetId}`} role="button" tabIndex={0} aria-label={`加入续火 ${friend.display_name}`} aria-disabled={targetMutationId !== null} onClick={join} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); join(); } }}>
             <FriendAvatar name={friend.display_name} url={friend.avatar_url} />
             <span>{friend.display_name}</span><small>{targetMutationId === targetId ? "保存中…" : "点击加入续火目标"}</small>
-            <button className="icon-button danger" aria-label={`删除目标 ${friend.display_name}`} title="删除目标" disabled={targetMutationId !== null} onClick={(event) => { event.stopPropagation(); if (window.confirm(`删除目标「${friend.display_name}」？`)) void mutateTargets([targetId], "delete", targetId); }}><Trash2 size={16} /></button>
           </div>;
         })}{discovery.candidates.filter((candidate) => candidate.presence_status !== "stale" && !candidate.configured && candidate.match_status !== "configured").sort((left, right) => {
           const group = (candidate: FriendDiscovery["candidates"][number]) => candidate.presence_status === "stale" ? 2 : candidate.configured ? 1 : 0;

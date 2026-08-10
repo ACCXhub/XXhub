@@ -17,7 +17,7 @@ from typing import Callable, Protocol
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from autody.chat import DOUYIN_SELECTORS
-from autody.config import AppConfig, Target
+from autody.config import AppConfig, Target, target_identity
 
 
 REASON_MESSAGES = {
@@ -282,14 +282,10 @@ def _timestamp(value: object) -> float:
         return 0
 
 
-def _masked_target_id(target: Target) -> str:
-    return target.stable_id or target.candidate_id or ""
-
-
 def _row(target: Target, readiness: Readiness, started: float) -> dict:
     result = asdict(readiness)
     result.update({
-        "target_id": _masked_target_id(target),
+        "target_id": target_identity(target),
         "checked_at": datetime.now().isoformat(timespec="seconds"),
         "duration_ms": round((time.monotonic() - started) * 1000),
         "reason_code": readiness.target_status,
@@ -316,7 +312,11 @@ def run_preflight(
     started_at = datetime.now().isoformat(timespec="seconds")
     started = time.monotonic()
     requested = set(target_ids or [])
-    enabled = [target for target in config.targets if target.enabled and (not requested or _masked_target_id(target) in requested)]
+    enabled = [
+        target
+        for target in config.targets
+        if target.enabled and (not requested or target_identity(target) in requested)
+    ]
     names = [target.name.casefold() for target in enabled]
     duplicate_names = {name for name in names if names.count(name) > 1}
     rows: list[dict] = []

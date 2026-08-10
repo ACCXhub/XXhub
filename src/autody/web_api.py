@@ -11,7 +11,6 @@ import platform
 import re
 import subprocess
 import sys
-import threading
 import time
 import uuid
 from urllib.parse import quote
@@ -23,6 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import yaml
 
+from autody import scheduler
 from autody.config import (
     AppConfig,
     MessageSuffixConfig,
@@ -30,7 +30,9 @@ from autody.config import (
     enabled_execution_targets,
     load_config,
     save_config,
+    target_identity,
 )
+from autody.daily_status import dashboard_statistics, effective_daily_target_statuses
 from autody.account_profile import (
     bindings_revalidation_required,
     clear_managed_authentication,
@@ -43,7 +45,7 @@ from autody.account_profile import (
 from autody.account_profiles import AccountProfileStoreError, MultiAccountStore
 from autody.failures import FailureDetail, failure_detail
 from autody.friend_discovery import is_discovery_stale, load_discovered_friends
-from autody.history import TaskHistoryStore, bootstrap_legacy_daily_history, dashboard_statistics, effective_daily_target_statuses, target_identity
+from autody.history import TaskHistoryStore, bootstrap_legacy_daily_history
 from autody.log_center import archive_historical_logs, archive_logs, automatic_cleanup_once_daily, cleanup_logs, log_storage_summary, log_summary, query_logs, record_cleanup_result
 from autody.message_packs import ImportMode, MessagePackError, MessagePackService
 from autody.modules import (
@@ -56,7 +58,6 @@ from autody.modules import (
 from autody.messages import read_messages
 from autody.locking import SingleInstanceLock, TaskAlreadyRunning
 from autody.preflight import PreflightStore
-from autody.recovery import recovery_due
 from autody.runner import preview_today_target_message
 from autody.state import StateStore
 from autody.scheduler import ScheduleSettings, SchedulerService
@@ -109,13 +110,11 @@ class ConfigUpdate(BaseModel):
     timeout_ms: int = Field(ge=5_000, le=120_000)
     headless: bool
     message_suffix: MessageSuffixConfig = Field(default_factory=MessageSuffixConfig)
-    message_pack_index_url: str | None = None
     daily_send_time: str = Field(default="07:30", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     daily_health_check_time: str = Field(default="07:20", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     weekly_health_check_enabled: bool = True
     weekly_health_check_weekday: str = Field(default="Sunday", pattern=r"^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)$")
     weekly_health_check_time: str = Field(default="20:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
-    startup_recovery_enabled: bool = True
     recovery_deadline: str = Field(default="23:59", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     min_delay_seconds: float = Field(default=1.0, ge=0, le=60)
     max_delay_seconds: float = Field(default=3.0, ge=0, le=60)
@@ -537,6 +536,19 @@ def _current_target_health(
             "reason_code": "scan_incomplete",
             "summary_zh": "当前扫描未完成",
         }
+    if discovered.last_result.get("status") in {
+        "failed",
+        "lock_busy",
+        "login_unavailable",
+        "page_load_failed",
+        "partial_timeout",
+        "cancelled",
+    }:
+        return {
+            "status": "unknown",
+            "reason_code": "scan_failed",
+            "summary_zh": "最近一次实时扫描失败",
+        }
     evaluation = evaluate_account_scope(
         profile,
         binding_scope=discovered.account_scope,
@@ -719,13 +731,12 @@ def _today_plan(config: AppConfig, state, day: date, overrides: dict[str, dict] 
 
 def _failed_targets(config: AppConfig, state, day: date) -> dict:
     daily = state.daily.get(day.isoformat(), {})
-    succeeded = set(daily.get("succeeded", []))
-    failures = daily.get("failures", {})
+    effective_statuses = effective_daily_target_statuses(config, state, day)
     rows = []
-    for target in config.targets:
-        if not target.enabled or target.name in succeeded or target.name not in failures:
-            continue
+    for target in enabled_execution_targets(config):
         identity = target_identity(target)
+        if effective_statuses.get(identity) != "failed":
+            continue
         detail = _daily_failure_detail(config, target, daily)
         if detail is None:
             continue
@@ -746,7 +757,9 @@ def _failed_targets(config: AppConfig, state, day: date) -> dict:
     return {
         "items": rows,
         "summary": {
-            "success": sum(target.name in succeeded for target in config.targets if target.enabled),
+            "success": sum(
+                status == "success" for status in effective_statuses.values()
+            ),
             "failed": len(rows),
             "uncertain": sum(row["uncertain"] for row in rows),
             "needs_attention": len(rows),
@@ -801,13 +814,11 @@ def _config_payload(config: AppConfig) -> dict:
         "timeout_ms": config.timeout_ms,
         "headless": config.headless,
         "message_suffix": config.message_suffix.model_dump(mode="json"),
-        "message_pack_index_url": config.message_pack_index_url,
         "daily_send_time": config.daily_send_time,
         "daily_health_check_time": config.daily_health_check_time,
         "weekly_health_check_enabled": config.weekly_health_check_enabled,
         "weekly_health_check_weekday": config.weekly_health_check_weekday,
         "weekly_health_check_time": config.weekly_health_check_time,
-        "startup_recovery_enabled": config.startup_recovery_enabled,
         "recovery_deadline": config.recovery_deadline,
         "min_delay_seconds": config.min_delay_seconds,
         "max_delay_seconds": config.max_delay_seconds,
@@ -830,184 +841,6 @@ def _config_payload(config: AppConfig) -> dict:
     }
 
 
-def _task_rows() -> list[dict]:
-    if platform.system() != "Windows":
-        return []
-    script = """
-$rows=@()
-foreach($name in @('AutoDy-Health-Daily','AutoDy-DailySpark','AutoDy-Health-Weekly')){
-  $task=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-  if($task){
-    $info=Get-ScheduledTaskInfo -TaskName $name
-    $trigger=$task.Triggers | Select-Object -First 1
-    $action=$task.Actions | Select-Object -First 1
-    $startBoundary=''
-    if($trigger){$startBoundary=[string]$trigger.StartBoundary}
-    $rows += [pscustomobject]@{
-      name=$name; state=[string]$task.State; next_run=$info.NextRunTime.ToString('s');
-      last_run=$info.LastRunTime.ToString('s'); last_result=$info.LastTaskResult;
-      start_boundary=$startBoundary;
-      execute=if($action){[string]$action.Execute}else{''};
-      arguments=if($action){[string]$action.Arguments}else{''};
-      working_directory=if($action){[string]$action.WorkingDirectory}else{''}
-    }
-  }
-}
-$rows | ConvertTo-Json -Compress
-"""
-    try:
-        output = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", script],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=8,
-            check=False,
-        ).stdout.strip()
-        if not output:
-            return []
-        data = json.loads(output)
-        return data if isinstance(data, list) else [data]
-    except Exception:
-        return []
-
-
-def _registered_install_roots() -> tuple[Path, Path] | None:
-    """Return the per-user registered roots without exposing them to APIs."""
-    if platform.system() != "Windows":
-        return None
-    try:
-        import winreg
-
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\AutoDy") as key:
-            program_root = Path(winreg.QueryValueEx(key, "InstallFolder")[0])
-            data_root = Path(winreg.QueryValueEx(key, "DataRoot")[0])
-    except (ImportError, OSError, TypeError, ValueError):
-        return None
-    return program_root.resolve(), data_root.resolve()
-
-
-def _scheduler_status_rows(
-    config: AppConfig,
-    rows: list[dict],
-    executable_target_count: int,
-    *,
-    program_root: Path | None = None,
-    data_root: Path | None = None,
-) -> list[dict]:
-    """Combine configured intent with the small live Windows task snapshot."""
-    expected = {
-        "AutoDy-Health-Daily": (True, config.daily_health_check_time, None),
-        "AutoDy-DailySpark": (
-            True,
-            config.daily_send_time,
-            executable_target_count,
-        ),
-        "AutoDy-Health-Weekly": (
-            config.weekly_health_check_enabled,
-            config.weekly_health_check_time,
-            None,
-        ),
-    }
-    by_name: dict[str, list[dict]] = defaultdict(list)
-    for row in rows:
-        name = str(row.get("name", ""))
-        if name in expected:
-            by_name[name].append(row)
-
-    result = []
-    for name, (configured_enabled, configured_time, target_count) in expected.items():
-        matches = by_name[name]
-        live = matches[0] if matches else {}
-        installed = bool(matches)
-        state = str(live.get("state") or "Missing")
-        windows_enabled = installed and state.casefold() != "disabled"
-        start_boundary = str(live.get("start_boundary") or "")
-        time_match = re.search(r"T(\d{2}:\d{2})", start_boundary)
-        windows_time = time_match.group(1) if time_match else None
-        schedule_drift = (
-            len(matches) > 1
-            or windows_enabled != configured_enabled
-            or (
-                configured_enabled
-                and installed
-                and windows_time != configured_time
-            )
-        )
-        runtime_root_mismatch = False
-        action_metadata_available = any(
-            key in live for key in ("execute", "arguments", "working_directory")
-        )
-        if (
-            installed
-            and action_metadata_available
-            and program_root is not None
-            and data_root is not None
-        ):
-            arguments = str(live.get("arguments") or "")
-
-            def argument_path(name: str) -> str | None:
-                match = re.search(
-                    rf"(?:^|\s)-{re.escape(name)}\s+(?:\"([^\"]+)\"|(\S+))",
-                    arguments,
-                    flags=re.IGNORECASE,
-                )
-                return (match.group(1) or match.group(2)) if match else None
-
-            def normalized(path: str | Path | None) -> str:
-                if path is None or not str(path).strip():
-                    return ""
-                return os.path.normcase(os.path.normpath(str(path))).rstrip("\\/")
-
-            script_name = (
-                "run-scheduled.ps1"
-                if name == "AutoDy-DailySpark"
-                else "health-check.ps1"
-            )
-            runtime_root_mismatch = any(
-                (
-                    str(live.get("execute") or "")
-                    .replace("/", "\\")
-                    .rsplit("\\", 1)[-1]
-                    .casefold()
-                    != "powershell.exe",
-                    normalized(argument_path("File"))
-                    != normalized(program_root / "scripts" / script_name),
-                    normalized(argument_path("ProgramRoot"))
-                    != normalized(program_root),
-                    normalized(argument_path("DataRoot"))
-                    != normalized(data_root),
-                    normalized(live.get("working_directory"))
-                    != normalized(program_root),
-                )
-            )
-        drift = schedule_drift or runtime_root_mismatch
-        result.append(
-            {
-                "name": name,
-                "state": state,
-                "next_run": live.get("next_run") or "",
-                "last_run": live.get("last_run") or "",
-                "last_result": live.get("last_result"),
-                "installed": installed,
-                "configured_enabled": configured_enabled,
-                "configured_time": configured_time,
-                "windows_time": windows_time,
-                "target_count": target_count,
-                "duplicate_count": max(0, len(matches) - 1),
-                "drift": drift,
-                "drift_reason": (
-                    "runtime_root_mismatch"
-                    if runtime_root_mismatch
-                    else "schedule_mismatch"
-                    if schedule_drift
-                    else None
-                ),
-            }
-        )
-    return result
-
-
 def _portable_config(config_path: Path, config: AppConfig) -> bytes:
     root = config_path.parent
 
@@ -1028,13 +861,11 @@ def _portable_config(config_path: Path, config: AppConfig) -> bytes:
         "timeout_ms": config.timeout_ms,
         "headless": config.headless,
         "message_suffix": config.message_suffix.model_dump(mode="json"),
-        "message_pack_index_url": config.message_pack_index_url,
         "daily_send_time": config.daily_send_time,
         "daily_health_check_time": config.daily_health_check_time,
         "weekly_health_check_enabled": config.weekly_health_check_enabled,
         "weekly_health_check_weekday": config.weekly_health_check_weekday,
         "weekly_health_check_time": config.weekly_health_check_time,
-        "startup_recovery_enabled": config.startup_recovery_enabled,
         "recovery_deadline": config.recovery_deadline,
         "min_delay_seconds": config.min_delay_seconds,
         "max_delay_seconds": config.max_delay_seconds,
@@ -1146,13 +977,6 @@ def create_app(
     if initial_config.log_cleanup_enabled:
         automatic_cleanup_once_daily(initial_config.state_file.parent / "logs", active_days=initial_config.active_log_retention_days, archive_days=initial_config.archive_log_retention_days)
     task_cache: dict[str, object] = {"expires": 0.0, "rows": []}
-    recovery_attempted: set[str] = set()
-    discovery_refresh_lock = threading.Lock()
-    discovery_refresh: dict[str, object] = {
-        "job_id": None,
-        "running": False,
-        "last_attempt": None,
-    }
     preflight_job_id: str | None = None
     module_preflight_job_id: str | None = None
 
@@ -1177,8 +1001,8 @@ def create_app(
         except (OSError, json.JSONDecodeError):
             stored = {}
         targets = [
-            {"target_id": target.stable_id or target.candidate_id, "display_name": target.name}
-            for target in config.targets if target.enabled and (target.stable_id or target.candidate_id)
+            {"target_id": target_identity(target), "display_name": target.name}
+            for target in enabled_execution_targets(config)
         ]
         selected = str(stored.get("selected_target_id", "")) or None
         if selected not in {item["target_id"] for item in targets}:
@@ -1206,7 +1030,7 @@ def create_app(
         exclusion_reasons = batch_target_exclusion_reasons(config, presence)
         return [
             {
-                "target_id": target.stable_id or target.candidate_id or f"configured-{index}",
+                "target_id": target_identity(target),
                 "conversation_id": target.candidate_id,
                 "display_name": target.name,
                 "single_eligible": bool(target.enabled and target.stable_id and target.candidate_id),
@@ -1271,7 +1095,7 @@ def create_app(
     def preflight_payload(config: AppConfig, result: dict | None) -> dict:
         if not result:
             return {"result": None}
-        names = {target.stable_id or target.candidate_id: target.name for target in config.targets}
+        names = {target_identity(target): target.name for target in config.targets}
         safe = dict(result)
         safe["targets"] = [
             {**row, "display_name": names.get(row.get("target_id"), "已移除目标")}
@@ -1279,75 +1103,11 @@ def create_app(
         ]
         return {"result": safe}
 
-    def refresh_running() -> bool:
-        with discovery_refresh_lock:
-            job_id = discovery_refresh["job_id"]
-            running = bool(discovery_refresh["running"])
-        if running and action_runner is None and isinstance(job_id, str):
-            job = manager.get(job_id)
-            if job is not None and job["status"] != "running":
-                with discovery_refresh_lock:
-                    discovery_refresh["running"] = False
-                return False
-        return running
-
-    def maybe_start_background_discovery(config: AppConfig) -> bool:
-        result = load_discovered_friends(
-            config.state_file.parent / "discovered_friends.json"
-        )
-        if not is_discovery_stale(result.scanned_at if result else None, current_time()):
-            return refresh_running()
-        if _login_status(config.state_file.parent / "health.json") != "success":
-            return False
-        with discovery_refresh_lock:
-            if discovery_refresh["running"]:
-                return True
-            last_attempt = discovery_refresh["last_attempt"]
-            if last_attempt is not None and time.monotonic() - float(last_attempt) < 300:
-                return False
-            try:
-                job = run_action("background-discovery")
-            except ActionAlreadyRunning:
-                discovery_refresh["last_attempt"] = time.monotonic()
-                return False
-            discovery_refresh["job_id"] = job.get("id")
-            discovery_refresh["running"] = job.get("status") == "running"
-            discovery_refresh["last_attempt"] = time.monotonic()
-            return bool(discovery_refresh["running"])
-
     def cached_task_rows() -> list[dict]:
         if time.monotonic() >= float(task_cache["expires"]):
-            task_cache["rows"] = _task_rows()
+            task_cache["rows"] = scheduler.windows_task_rows()
             task_cache["expires"] = time.monotonic() + 10
         return list(task_cache["rows"])  # type: ignore[arg-type]
-
-    def scheduler_runtime_mismatch(config: AppConfig) -> bool:
-        registered = _registered_install_roots()
-        if registered is None:
-            return False
-
-        def normalized(path: Path) -> str:
-            return os.path.normcase(os.path.normpath(str(path.resolve()))).rstrip("\\/")
-
-        if (
-            normalized(registered[0]) != normalized(program_root)
-            or normalized(registered[1]) != normalized(root)
-        ):
-            return False
-        try:
-            rows = _scheduler_status_rows(
-                config,
-                cached_task_rows(),
-                len(enabled_execution_targets(config)),
-                program_root=program_root,
-                data_root=root,
-            )
-        except Exception:
-            return False
-        return any(
-            row.get("drift_reason") == "runtime_root_mismatch"
-            for row in rows
-        )
 
     @app.get("/api/service-identity")
     def service_identity():
@@ -1368,17 +1128,11 @@ def create_app(
     @app.get("/api/status")
     def status(today: str | None = None):
         config = load_config(config_path)
-        try:
-            maybe_start_background_discovery(config)
-        except Exception:
-            pass
         state = StateStore(config.state_file).load()
         key = today or date.today().isoformat()
         daily = state.daily.get(
             key, {"message": "", "succeeded": [], "failures": {}, "consumed": False}
         )
-        succeeded = set(daily.get("succeeded", []))
-        failures = daily.get("failures", {})
         executable_targets = enabled_execution_targets(config)
         history_store = TaskHistoryStore(
             config.state_file.parent / "history" / "task-runs.jsonl"
@@ -1410,19 +1164,11 @@ def create_app(
             target_id = target_identity(target)
             effective_status = effective_statuses.get(target_id)
             detail = (
-                None
-                if effective_status == "success"
-                else _daily_failure_detail(config, target, daily)
+                _daily_failure_detail(config, target, daily)
+                if effective_status == "failed"
+                else None
             )
-            friend_status = (
-                effective_status
-                if effective_status is not None
-                else "success"
-                if target.name in succeeded
-                else "failed"
-                if detail is not None
-                else "pending"
-            )
+            friend_status = effective_status or "pending"
             friends.append(
                 {
                     "target_id": target_id,
@@ -1431,7 +1177,7 @@ def create_app(
                     "error": (
                         detail.user_summary_zh
                         if detail is not None
-                        else failures.get(target.name)
+                        else None
                     ),
                     "failure": (
                         detail.model_dump(mode="json")
@@ -1477,7 +1223,7 @@ def create_app(
             tasks = []
             scheduler_available = False
         scheduler_rows = (
-            _scheduler_status_rows(
+            scheduler.scheduler_status_rows(
                 config,
                 tasks,
                 len(executable_targets),
@@ -1554,24 +1300,39 @@ def create_app(
                 "action": "scheduler",
                 "action_label": "修复任务",
             })
-        if daily.get("message") and not daily.get("consumed"):
-            issues.append({
-                "id": "last_run_partial", "status": "warning",
-                "explanation": "最近一次发送未全部完成，再次运行只补发失败目标。",
-                "action": "run", "action_label": "继续补发",
-            })
+        if (
+            daily.get("message")
+            and len(executable_succeeded) < len(executable_targets)
+        ):
+            current_failures = [
+                friend["failure"]
+                for friend in friends
+                if friend["status"] == "failed" and friend["failure"] is not None
+            ]
+            requires_reassociation = bool(current_failures) and all(
+                failure.get("safe_retry_available") is False
+                and failure.get("suggested_action") == "reassociate"
+                for failure in current_failures
+            )
+            issues.append(
+                {
+                    "id": "last_run_partial",
+                    "status": "warning",
+                    "explanation": (
+                        "有失败目标的稳定绑定已过期；请先重新关联，当前不会继续自动重试。"
+                        if requires_reassociation
+                        else "最近一次发送未全部完成，再次运行只补发失败目标。"
+                    ),
+                    "action": "friends" if requires_reassociation else "run",
+                    "action_label": "管理好友" if requires_reassociation else "继续补发",
+                }
+            )
         latest_run = history_page.items[0] if history_page.items else None
         if latest_run and "confirmation_failed" in latest_run.confirmation_results.values():
             issues.append({
                 "id": "message_confirmation_failure", "status": "error",
                 "explanation": "最近一次发送存在未确认消息，再次运行只处理未完成目标。",
                 "action": "run", "action_label": "继续补发",
-            })
-        if not config.message_pack_index_url:
-            issues.append({
-                "id": "remote_library", "status": "warning",
-                "explanation": "未配置 GitHub 远程文案索引，当前使用内置文案包。",
-                "action": "packs", "action_label": "查看文案包",
             })
         notice = config.state_file.parent / "notifications" / "need-attention.txt"
         if notice.exists():
@@ -1595,7 +1356,11 @@ def create_app(
                 "explanation": notification_explanation,
                 "action": "logs", "action_label": "查看日志",
             })
-        statistics = dashboard_statistics(records, date.fromisoformat(key))
+        statistics = dashboard_statistics(
+            state.daily,
+            records,
+            date.fromisoformat(key),
+        )
         for friend in friends:
             friend["binding_status"] = (
                 "revalidation_required" if binding_guarded else "verified"
@@ -1625,7 +1390,8 @@ def create_app(
                 "succeeded": len(executable_succeeded),
                 "failed": len(executable_failures),
                 "total": len(executable_targets),
-                "complete": bool(daily.get("consumed")),
+                "complete": bool(executable_targets)
+                and len(executable_succeeded) == len(executable_targets),
             },
             "friends": friends,
             "history": history[:30],
@@ -1925,7 +1691,10 @@ def create_app(
         nonlocal module_preflight_job_id
         _require_test_center()
         config = load_config(config_path)
-        valid_ids = {target.stable_id or target.candidate_id for target in config.targets if target.enabled}
+        valid_ids = {
+            target_identity(target)
+            for target in enabled_execution_targets(config)
+        }
         if payload.target_ids is not None and (not payload.target_ids or any(item not in valid_ids for item in payload.target_ids)):
             raise HTTPException(422, "续火目标无效或已停用")
         request_path = module_data_path("preflight/request.json")
@@ -2196,7 +1965,7 @@ def create_app(
             SchedulerService(program_root, data_root=root).apply(config_path, current, candidate)
         except RuntimeError as exc:
             raise HTTPException(409, f"定时任务未更新：{exc}") from exc
-        return {"config": _config_payload(candidate), "tasks": _task_rows(), "message": "定时任务已更新"}
+        return {"config": _config_payload(candidate), "tasks": scheduler.windows_task_rows(), "message": "定时任务已更新"}
 
     @app.post("/api/scheduler/{operation}")
     def scheduler_operation(operation: str):
@@ -2211,29 +1980,7 @@ def create_app(
                 raise HTTPException(404, "未知定时任务操作")
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
-        return {"tasks": _task_rows(), "message": "定时任务操作完成"}
-
-    @app.post("/api/recovery/check")
-    def check_startup_recovery():
-        config = load_config(config_path)
-        now = current_time()
-        key = now.date().isoformat()
-        due = config.startup_recovery_enabled and recovery_due(config, StateStore(config.state_file).load(), now)
-        if due and scheduler_runtime_mismatch(config):
-            return {
-                "due": True,
-                "started": False,
-                "already_checked": False,
-                "blocked_reason": "scheduler_runtime_mismatch",
-            }
-        if not due or key in recovery_attempted:
-            return {"due": due, "started": False, "already_checked": key in recovery_attempted}
-        recovery_attempted.add(key)
-        try:
-            job = run_action("startup-recovery")
-        except ActionAlreadyRunning:
-            return {"due": True, "started": False, "already_checked": False}
-        return {"due": True, "started": True, "job": job}
+        return {"tasks": scheduler.windows_task_rows(), "message": "定时任务操作完成"}
 
     @app.get("/api/history")
     def task_history(
@@ -2313,7 +2060,7 @@ def create_app(
             if source == "local":
                 messages = read_messages(config.messages_file)
             else:
-                service = MessagePackService(root, config.message_pack_index_url)
+                service = MessagePackService(program_root)
                 packs = service.list_packs().packs
                 selected = [item for item in packs if (pack_id and item.id == pack_id) or (category and item.category == category)]
                 if not selected:
@@ -2338,9 +2085,7 @@ def create_app(
     def message_packs():
         config = load_config(config_path)
         try:
-            return MessagePackService(
-                root, config.message_pack_index_url
-            ).list_packs()
+            return MessagePackService(program_root).list_packs()
         except MessagePackError as exc:
             raise HTTPException(503, str(exc)) from exc
 
@@ -2348,9 +2093,7 @@ def create_app(
     def preview_message_pack(pack_id: str):
         config = load_config(config_path)
         try:
-            return MessagePackService(
-                root, config.message_pack_index_url
-            ).preview(pack_id)
+            return MessagePackService(program_root).preview(pack_id)
         except MessagePackError as exc:
             raise HTTPException(404, str(exc)) from exc
 
@@ -2358,9 +2101,11 @@ def create_app(
     def import_message_pack(pack_id: str, payload: MessagePackImportRequest):
         config = load_config(config_path)
         try:
-            return MessagePackService(
-                root, config.message_pack_index_url
-            ).import_pack(pack_id, config.messages_file, payload.mode)
+            return MessagePackService(program_root).import_pack(
+                pack_id,
+                config.messages_file,
+                payload.mode,
+            )
         except MessagePackError as exc:
             raise HTTPException(422, str(exc)) from exc
 
@@ -2388,7 +2133,7 @@ def create_app(
             config.state_file.parent / "discovered_friends.json"
         )
         stale = is_discovery_stale(result.scanned_at if result else None, current_time())
-        refresh_is_running = maybe_start_background_discovery(config)
+        refresh_is_running = bool(progress.get("running"))
         if result is None:
             return {
                 "scanned_at": None,
@@ -2500,7 +2245,7 @@ def create_app(
         result = load_discovered_friends(
             config.state_file.parent / "discovered_friends.json"
         )
-        running = refresh_running()
+        running = bool(progress.get("running"))
         return {
             "refresh_running": running,
             "stage": str(progress.get("stage", "opening_douyin" if running else "completed")),
@@ -2509,16 +2254,18 @@ def create_app(
         }
 
     @app.get("/api/friends")
-    def get_friends(today: str | None = None):
+    def get_friends(today: date | None = None):
         config = load_config(config_path)
         binding_guarded = bindings_revalidation_required(
             config.state_file.parent
         )
         state = StateStore(config.state_file).load()
-        key = today or date.today().isoformat()
-        daily = state.daily.get(key, {})
-        succeeded = set(daily.get("succeeded", []))
-        failures = daily.get("failures", {})
+        status_day = today or date.today()
+        effective_statuses = effective_daily_target_statuses(
+            config,
+            state,
+            status_day,
+        )
         cache_dir = config.state_file.parent / "avatar-cache"
         discovered = load_discovered_friends(
             config.state_file.parent / "discovered_friends.json"
@@ -2550,7 +2297,9 @@ def create_app(
                     "note": target.note,
                     "avatar_url": _avatar_url(avatar_key, candidate.avatar_updated_at if candidate else None) if avatar_status == "cached" else "",
                     "avatar_status": avatar_status,
-                    "today_status": "success" if target.name in succeeded else "failed" if target.name in failures else "pending",
+                    "today_status": effective_statuses.get(
+                        target_identity(target), "pending"
+                    ),
                     "last_success_date": _last_success_date(state, target.name),
                     "ambiguous_duplicate": target.enabled and normalized_names[" ".join(target.name.split()).casefold()] > 1,
                     "binding_status": (
@@ -2572,7 +2321,10 @@ def create_app(
             values = payload.model_dump(exclude={"reset_overrides"}, exclude_none=True)
             if values.get("message_pack"):
                 try:
-                    ids = {pack.id for pack in MessagePackService(root, config.message_pack_index_url).list_packs().packs}
+                    ids = {
+                        pack.id
+                        for pack in MessagePackService(program_root).list_packs().packs
+                    }
                 except MessagePackError as exc:
                     raise HTTPException(422, str(exc)) from exc
                 if values["message_pack"] not in ids:
@@ -2991,7 +2743,10 @@ def create_app(
     def preflight_run(payload: PreflightRunRequest):
         nonlocal preflight_job_id
         config = load_config(config_path)
-        valid_ids = {target.stable_id or target.candidate_id for target in config.targets if target.enabled}
+        valid_ids = {
+            target_identity(target)
+            for target in enabled_execution_targets(config)
+        }
         if payload.target_ids is not None and (not payload.target_ids or any(item not in valid_ids for item in payload.target_ids)):
             raise HTTPException(422, "续火目标无效或已停用")
         request_path = config.state_file.parent / "preflight" / "request.json"

@@ -96,14 +96,6 @@ export default function App() {
     document.addEventListener("visibilitychange", refresh);
     return () => { window.clearInterval(id); document.removeEventListener("visibilitychange", refresh); };
   }, [refreshAll]);
-  useEffect(() => {
-    void api.checkRecovery().then(async (result) => {
-      if (result.started && result.job) {
-        await api.waitForAction(result.job.id);
-        await refreshAll();
-      }
-    }).catch(() => undefined);
-  }, [refreshAll]);
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 3200); };
   const action = async (name: string) => {
     setBusy(name);
@@ -190,9 +182,9 @@ export default function App() {
           throw new Error(failure?.user_summary_zh || "目标重试未完成，请查看失败详情");
         }
       }
-      notify(`已完成 ${targetIds.length} 个安全目标的重试`);
+      notify(`已完成 ${targetIds.length} 个安全目标的补发`);
     } catch (error) {
-      notify(error instanceof Error ? error.message : "批量重试失败");
+      notify(error instanceof Error ? error.message : "安全补发失败");
     } finally {
       setBusy(null);
     }

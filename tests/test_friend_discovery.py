@@ -67,6 +67,9 @@ class FakeScrollLocator:
         return self
 
     def evaluate(self, expression, *_args):
+        if "scrollTop = 0" in expression:
+            self.page.position = 0
+            return None
         if "before" in expression:
             return {
                 "before": self.page.position,
@@ -174,6 +177,35 @@ class FakePage:
         self.waits.append(delay)
 
 
+class DelayedExpansionScrollLocator(FakeScrollLocator):
+    def evaluate(self, expression, *_args):
+        if "scrollTop = 0" in expression:
+            self.page.position = 0
+            return None
+        if "before" in expression:
+            return {
+                "before": self.page.position,
+                "maximum": 2 if self.page.elapsed_ms >= 1_250 else 1,
+                "step": 1,
+            }
+        self.page.position += 1
+
+
+class DelayedExpansionPage(FakePage):
+    def __init__(self, selectors: ChatSelectors):
+        super().__init__(selectors)
+        self.elapsed_ms = 0
+
+    def locator(self, selector):
+        if selector == self.selectors.conversation_list:
+            return DelayedExpansionScrollLocator(self)
+        return super().locator(selector)
+
+    def wait_for_timeout(self, delay):
+        super().wait_for_timeout(delay)
+        self.elapsed_ms += delay
+
+
 def test_scan_friend_names_scrolls_and_deduplicates():
     selectors = ChatSelectors.test_defaults()
     page = FakePage(selectors)
@@ -205,6 +237,52 @@ def test_discovery_persists_candidates_without_overwriting_config(tmp_path: Path
     saved = json.loads(output.read_text(encoding="utf-8"))
     assert saved["scanned_at"] == "2026-07-04T12:30:00"
     assert len(saved["candidates"]) == 4
+
+
+def test_discovery_resets_a_reused_conversation_list_before_full_scan(
+    tmp_path: Path,
+):
+    selectors = ChatSelectors.test_defaults()
+    page = FakePage(selectors)
+    page.position = 1
+
+    result = discover_friends(
+        AppConfig(),
+        page,
+        selectors,
+        tmp_path / "data" / "discovered_friends.json",
+    )
+
+    assert [candidate.display_name for candidate in result.candidates] == [
+        "测试好友甲",
+        "测试好友乙",
+        "测试好友丙",
+        "测试好友丁",
+    ]
+    assert result.last_result["candidates_found"] == 4
+    assert result.last_result["completed_bottom_reached"] is True
+
+
+def test_discovery_waits_for_delayed_virtual_list_expansion_before_scanning(
+    tmp_path: Path,
+):
+    selectors = ChatSelectors.test_defaults()
+
+    result = discover_friends(
+        AppConfig(),
+        DelayedExpansionPage(selectors),
+        selectors,
+        tmp_path / "data" / "discovered_friends.json",
+    )
+
+    assert [candidate.display_name for candidate in result.candidates] == [
+        "测试好友甲",
+        "测试好友乙",
+        "测试好友丙",
+        "测试好友丁",
+    ]
+    assert result.last_result["candidates_found"] == 4
+    assert result.last_result["completed_bottom_reached"] is True
 
 
 def test_discovery_captures_avatar_and_matches_existing_target(tmp_path: Path):

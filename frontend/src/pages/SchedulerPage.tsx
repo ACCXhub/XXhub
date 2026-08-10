@@ -30,7 +30,6 @@ export function SchedulerPage({ status, notify, onRefresh }: { status: Dashboard
     weekly_health_check_enabled: config.weekly_health_check_enabled,
     weekly_health_check_weekday: config.weekly_health_check_weekday,
     weekly_health_check_time: config.weekly_health_check_time,
-    startup_recovery_enabled: config.startup_recovery_enabled,
     recovery_deadline: config.recovery_deadline
   })); }, []);
   if (!settings) return <div className="loading">加载定时任务设置…</div>;
@@ -60,8 +59,7 @@ export function SchedulerPage({ status, notify, onRefresh }: { status: Dashboard
       <label><span>每日续火发送<small>计划时间到达后执行；全局锁会阻止并发</small></span><input id="daily-send-time" aria-label="每日续火发送" type="time" value={settings.daily_send_time} onChange={(event) => set("daily_send_time", event.target.value)} /></label>
       <label><span>启用每周健康检查<small>用于尽早发现需要扫码登录</small></span><input id="weekly-health-enabled" className="toggle" aria-label="启用每周健康检查" type="checkbox" checked={settings.weekly_health_check_enabled} onChange={(event) => set("weekly_health_check_enabled", event.target.checked)} /></label>
       <label><span>每周检查时间<small>选择周几和执行时间</small></span><span className="inline-settings"><select value={settings.weekly_health_check_weekday} onChange={(event) => set("weekly_health_check_weekday", event.target.value)}>{weekdays.map((day) => <option value={day} key={day}>{weekdayLabels[day]}</option>)}</select><input type="time" value={settings.weekly_health_check_time} onChange={(event) => set("weekly_health_check_time", event.target.value)} /></span></label>
-      <label><span>启动后补跑错过任务<small>仅在当天恢复截止时间前，并仍保留同日去重</small></span><input className="toggle" aria-label="启动后补跑错过任务" type="checkbox" checked={settings.startup_recovery_enabled} onChange={(event) => set("startup_recovery_enabled", event.target.checked)} /></label>
-      <label><span>当日恢复截止时间<small>超过该时间不会自动补跑</small></span><input type="time" value={settings.recovery_deadline} onChange={(event) => set("recovery_deadline", event.target.value)} /></label>
+      <label><span>当日重试截止时间<small>超过该时间不再执行安全重试</small></span><input type="time" value={settings.recovery_deadline} onChange={(event) => set("recovery_deadline", event.target.value)} /></label>
     </div>
     <div className="header-actions schedule-apply-actions"><button className="action-button" disabled={busy} onClick={() => void showPreview()}><RefreshCw size={17} />预览变更</button><button className="action-button primary" disabled={busy || !preview} onClick={() => void apply()}><Save size={17} />应用到 Windows 任务</button></div>
     {preview ? <section className="panel import-result"><strong>计划预览</strong><span>发送：{preview.old.daily_send_time} → {preview.new.daily_send_time}</span><span>登录检查：{preview.old.daily_health_check_time} → {preview.new.daily_health_check_time}</span><small>受影响任务：{preview.affected_tasks.map((task) => `${labels[task.name]}（${task.action === "remove" ? "移除" : "更新"}）`).join("、")}</small></section> : null}

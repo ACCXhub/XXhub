@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 RETRY_DELAYS = (timedelta(minutes=2), timedelta(minutes=5), timedelta(minutes=10))
+RECOVERY_RETRY_DELAY = timedelta(minutes=30)
 
 
 class TaskOutcome(str, Enum):
@@ -117,10 +118,22 @@ class TaskOutcomeStore:
         record = self.get(run_id)
         if record is None:
             raise KeyError(run_id)
+        if record.outcome in {
+            TaskOutcome.RECOVERED,
+            TaskOutcome.COMPLETED,
+            TaskOutcome.FINAL_FAILED,
+            TaskOutcome.UNCERTAIN,
+            TaskOutcome.CANCELLED,
+        }:
+            return record
         retry_limit = min(len(RETRY_DELAYS), max_retries if max_retries is not None else len(RETRY_DELAYS))
-        if record.retry_attempts >= retry_limit:
+        if retry_limit == 0 or now >= record.completion_deadline:
             return self._update(run_id, outcome=TaskOutcome.FINAL_FAILED, next_attempt_at=None, updated_at=now, reason=reason)
-        delay = RETRY_DELAYS[record.retry_attempts]
+        delay = (
+            RETRY_DELAYS[record.retry_attempts]
+            if record.retry_attempts < retry_limit
+            else RECOVERY_RETRY_DELAY
+        )
         retry_at = now + delay
         if retry_at > record.completion_deadline:
             return self._update(run_id, outcome=TaskOutcome.FINAL_FAILED, next_attempt_at=None, updated_at=now, reason=reason)
@@ -135,6 +148,29 @@ class TaskOutcomeStore:
 
     def recover(self, run_id: str, now: datetime) -> TaskRunState:
         return self._update(run_id, outcome=TaskOutcome.RECOVERED, next_attempt_at=None, updated_at=now, reason=None)
+
+    def resume_safe_recovery(
+        self,
+        run_id: str,
+        now: datetime,
+        reason: str,
+    ) -> TaskRunState:
+        """Reopen a legacy final failure after the caller proves retry safety."""
+        record = self.get(run_id)
+        if record is None:
+            raise KeyError(run_id)
+        if (
+            record.outcome is not TaskOutcome.FINAL_FAILED
+            or now >= record.completion_deadline
+        ):
+            return record
+        return self._update(
+            run_id,
+            outcome=TaskOutcome.RETRY_PENDING,
+            next_attempt_at=now,
+            updated_at=now,
+            reason=reason,
+        )
 
     def complete(self, run_id: str, now: datetime) -> TaskRunState:
         return self._update(run_id, outcome=TaskOutcome.COMPLETED, next_attempt_at=None, updated_at=now, reason=None)

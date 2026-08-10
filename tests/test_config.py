@@ -56,20 +56,23 @@ def test_rejects_duplicate_stable_target_ids(tmp_path: Path):
         load_config(path)
 
 
-def test_save_config_persists_suffix_and_remote_pack_url(tmp_path: Path):
+def test_save_config_persists_suffix_and_removes_legacy_remote_pack_url(tmp_path: Path):
     path = tmp_path / "config.yaml"
-    path.write_text("targets: []\n", encoding="utf-8")
+    path.write_text(
+        "targets: []\nmessage_pack_index_url: https://example.com/index.json\n",
+        encoding="utf-8",
+    )
     config = load_config(path)
     config.message_suffix.text = "每日问候"
     config.message_suffix.style = MessageSuffixStyle.BRACKET
-    config.message_pack_index_url = "https://example.com/index.json"
 
     save_config(path, config)
     restored = load_config(path)
 
     assert restored.message_suffix.text == "每日问候"
     assert restored.message_suffix.style is MessageSuffixStyle.BRACKET
-    assert restored.message_pack_index_url == "https://example.com/index.json"
+    assert not hasattr(restored, "message_pack_index_url")
+    assert "message_pack_index_url" not in path.read_text(encoding="utf-8")
 
 
 def test_concurrent_config_updates_each_commit_one_complete_document(tmp_path: Path):

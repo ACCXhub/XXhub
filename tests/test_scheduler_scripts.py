@@ -1,4 +1,6 @@
+import json
 from pathlib import Path
+import subprocess
 
 
 def test_install_script_has_required_scheduler_contract():
@@ -57,7 +59,112 @@ def test_scheduler_wrappers_set_portable_playwright_environment():
 def test_every_scheduled_task_uses_ignore_new_policy():
     text = Path("scripts/install-task.ps1").read_text(encoding="utf-8-sig")
     assert "-MultipleInstances IgnoreNew" in text
-    assert text.count("-Settings $Settings") == 3
+    assert text.count("-Settings $RunSettings") == 1
+    assert text.count("-Settings $HealthSettings") == 2
+
+
+def test_daily_send_task_repeats_under_scheduler_until_recovery_deadline():
+    text = Path("scripts/install-task.ps1").read_text(encoding="utf-8-sig")
+
+    for token in [
+        '[string]$RecoveryDeadline = "23:59"',
+        "$RecoveryDuration = $RecoveryEnd - $DailyStart",
+        "-RepetitionInterval $RecoveryInterval",
+        "-RepetitionDuration $RecoveryDuration",
+        "$RunTrigger.Repetition = $Repetition.Repetition",
+        "same-day recovery repetition is disabled",
+    ]:
+        assert token in text
+    assert "[string]$TaskUserId" in text
+    assert "New-ScheduledTaskPrincipal -UserId $PrincipalUserId" in text
+    assert "-RunLevel Limited" in text
+    assert "WindowsIdentity]::GetCurrent().Name" not in text
+
+
+def test_scheduler_repair_defines_the_daily_send_start_in_the_future(
+    tmp_path: Path,
+):
+    program_root = tmp_path / "program"
+    data_root = tmp_path / "data-root"
+    python = program_root / "runtime" / "python" / "python.exe"
+    python.parent.mkdir(parents=True)
+    python.touch()
+    data_root.mkdir()
+    (data_root / "config.yaml").write_text("targets: []\n", encoding="utf-8")
+    script = Path("scripts/install-task.ps1").resolve()
+    command = rf'''
+$global:Registered = @{{}}
+function New-ScheduledTaskSettingsSet {{
+    param([switch]$StartWhenAvailable, $MultipleInstances, $ExecutionTimeLimit)
+    [pscustomobject]@{{ StartWhenAvailable = [bool]$StartWhenAvailable }}
+}}
+function New-ScheduledTaskPrincipal {{
+    param($UserId, $LogonType, $RunLevel)
+    [pscustomobject]@{{ UserId = $UserId }}
+}}
+function New-ScheduledTaskAction {{
+    param($Execute, $Argument, $WorkingDirectory)
+    [pscustomobject]@{{ Execute = $Execute; Arguments = $Argument; WorkingDirectory = $WorkingDirectory }}
+}}
+function New-ScheduledTaskTrigger {{
+    param(
+        [switch]$Daily, [switch]$Once, [switch]$Weekly,
+        [datetime]$At, [timespan]$RepetitionInterval,
+        [timespan]$RepetitionDuration, $WeeksInterval, $DaysOfWeek
+    )
+    $repetition = if ($Once) {{
+        [pscustomobject]@{{ Interval = $RepetitionInterval; Duration = $RepetitionDuration }}
+    }} else {{
+        [pscustomobject]@{{ Interval = $null; Duration = $null }}
+    }}
+    [pscustomobject]@{{ StartBoundary = $At; Repetition = $repetition }}
+}}
+function Register-ScheduledTask {{
+    param($TaskName, $Action, $Trigger, $Settings, $Principal, $Description, [switch]$Force)
+    $global:Registered[$TaskName] = [pscustomobject]@{{
+        Triggers = @($Trigger); Settings = $Settings
+    }}
+}}
+function Get-ScheduledTask {{
+    param($TaskName)
+    if ($global:Registered.ContainsKey($TaskName)) {{ $global:Registered[$TaskName] }}
+}}
+& '{script}' `
+    -ProgramRoot '{program_root}' `
+    -DataRoot '{data_root}' `
+    -DailyHealthCheckTime '00:01' `
+    -DailySendTime '00:01' `
+    -RecoveryDeadline '23:59' `
+    -WeeklyHealthCheckEnabled 0
+$trigger = $global:Registered['AutoDy-DailySpark'].Triggers[0]
+$start = [datetime]$trigger.StartBoundary
+$result = [pscustomobject]@{{
+    start_is_future = $start -gt (Get-Date)
+    start_time = $start.ToString('HH:mm')
+    hours_until_start = ($start - (Get-Date)).TotalHours
+}}
+Write-Output ('__RESULT__' + ($result | ConvertTo-Json -Compress))
+'''
+
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", command],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    payload = json.loads(
+        next(
+            line.removeprefix("__RESULT__")
+            for line in completed.stdout.splitlines()
+            if line.startswith("__RESULT__")
+        )
+    )
+    assert payload["start_is_future"] is True
+    assert payload["start_time"] == "00:01"
+    assert 0 < payload["hours_until_start"] <= 24
 
 
 def test_source_launchers_use_project_local_python_not_console_entrypoint():
@@ -79,10 +186,17 @@ def test_source_launchers_use_project_local_python_not_console_entrypoint():
 
 
 def test_scheduled_wrappers_fail_closed_only_for_registered_installed_mode():
+    resolver = Path("scripts/resolve-runtime-roots.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+    assert "HKCU:\\Software\\AutoDy" in resolver
+    assert "Registered installed AutoDy requires explicit ProgramRoot and DataRoot" in resolver
+    assert "Registered installed AutoDy runtime roots do not match" in resolver
+    assert "[switch]$DevelopmentMode" in resolver
+
     for path in [Path("scripts/run-scheduled.ps1"), Path("scripts/health-check.ps1")]:
         text = path.read_text(encoding="utf-8-sig")
-        assert "HKCU:\\Software\\AutoDy" in text
-        assert "Registered installed AutoDy requires explicit ProgramRoot and DataRoot" in text
-        assert "Registered installed AutoDy runtime roots do not match" in text
+        assert 'Join-Path $PSScriptRoot "resolve-runtime-roots.ps1"' in text
+        assert "Resolve-AutoDyRuntimeRoots" in text
         assert "[switch]$DevelopmentMode" in text
-        assert text.index("Registered installed AutoDy requires explicit ProgramRoot and DataRoot") < text.index("$Python =")
+        assert text.index("Resolve-AutoDyRuntimeRoots") < text.index("$Python =")

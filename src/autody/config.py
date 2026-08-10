@@ -1,3 +1,4 @@
+import hashlib
 from enum import Enum
 import os
 from pathlib import Path
@@ -20,6 +21,16 @@ class Target(BaseModel):
     delay_offset_minutes: int = Field(default=0, ge=0, le=30)
     message_selection: str | None = Field(default=None, pattern=r"^(one_for_all|per_friend)$")
     send_order: int | None = Field(default=None, ge=0)
+
+
+def stable_target_id(name: str) -> str:
+    """Return the legacy deterministic ID used by name-only target records."""
+    return f"friend-{hashlib.sha256(name.encode('utf-8')).hexdigest()[:12]}"
+
+
+def target_identity(target: Target) -> str:
+    """Return the persistent application identity for a configured target."""
+    return target.stable_id or target.candidate_id or stable_target_id(target.name)
 
 
 class MessageSuffixStyle(str, Enum):
@@ -46,13 +57,11 @@ class AppConfig(BaseModel):
     timeout_ms: int = Field(default=30_000, ge=5_000, le=120_000)
     headless: bool = True
     message_suffix: MessageSuffixConfig = Field(default_factory=MessageSuffixConfig)
-    message_pack_index_url: str | None = None
     daily_send_time: str = Field(default="07:30", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     daily_health_check_time: str = Field(default="07:20", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     weekly_health_check_enabled: bool = True
     weekly_health_check_weekday: str = Field(default="Sunday", pattern=r"^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)$")
     weekly_health_check_time: str = Field(default="20:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
-    startup_recovery_enabled: bool = True
     recovery_deadline: str = Field(default="23:59", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     min_delay_seconds: float = Field(default=1.0, ge=0.0, le=60.0)
     max_delay_seconds: float = Field(default=3.0, ge=0.0, le=60.0)
@@ -84,8 +93,6 @@ class AppConfig(BaseModel):
         candidate_ids = [target.candidate_id for target in self.targets if target.candidate_id]
         if len(candidate_ids) != len(set(candidate_ids)):
             raise ValueError("target candidate IDs must be unique")
-        if self.message_pack_index_url is not None:
-            self.message_pack_index_url = self.message_pack_index_url.strip() or None
         if self.recovery_deadline < self.daily_send_time:
             raise ValueError("recovery deadline must not be earlier than daily send time")
         if self.min_delay_seconds > self.max_delay_seconds:
@@ -144,13 +151,11 @@ def save_config(path: Path, config: AppConfig) -> None:
         "timeout_ms": config.timeout_ms,
         "headless": config.headless,
         "message_suffix": config.message_suffix.model_dump(mode="json"),
-        "message_pack_index_url": config.message_pack_index_url,
         "daily_send_time": config.daily_send_time,
         "daily_health_check_time": config.daily_health_check_time,
         "weekly_health_check_enabled": config.weekly_health_check_enabled,
         "weekly_health_check_weekday": config.weekly_health_check_weekday,
         "weekly_health_check_time": config.weekly_health_check_time,
-        "startup_recovery_enabled": config.startup_recovery_enabled,
         "recovery_deadline": config.recovery_deadline,
         "min_delay_seconds": config.min_delay_seconds,
         "max_delay_seconds": config.max_delay_seconds,

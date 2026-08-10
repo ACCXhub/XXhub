@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 import hashlib
 import json
 import os
@@ -10,9 +10,8 @@ import uuid
 
 from pydantic import BaseModel, Field
 
-from autody.config import AppConfig, enabled_execution_targets
+from autody.config import stable_target_id as _stable_target_id
 from autody.failures import FailureDetail
-from autody.state import AppState
 
 
 TaskType = Literal["daily_send", "health_check", "login", "friend_scan", "system"]
@@ -110,88 +109,6 @@ class TaskHistoryStore:
         return {"valid": invalid == 0, "record_count": len(records), "invalid_count": invalid}
 
 
-def stable_target_id(name: str) -> str:
-    return f"friend-{hashlib.sha256(name.encode('utf-8')).hexdigest()[:12]}"
-
-
-def target_identity(target) -> str:
-    return target.stable_id or target.candidate_id or stable_target_id(target.name)
-
-
-def effective_daily_target_statuses(
-    config: AppConfig,
-    state: AppState,
-    day: date,
-    records: list[TaskRunRecord] | None = None,
-) -> dict[str, str]:
-    """Return daily status while keeping confirmed success terminal.
-
-    Historical execution identity, current persistent binding identity, and
-    live DOM identity are separate concepts.  Stored events are associated
-    only through explicit current aliases; historical records are never
-    rewritten, and a later failure can never downgrade a confirmed success.
-    """
-    targets = enabled_execution_targets(config)
-    statuses = {target_identity(target): "pending" for target in targets}
-    aliases: dict[str, str] = {}
-    ambiguous_aliases: set[str] = set()
-    for target in targets:
-        identity = target_identity(target)
-        for alias in {
-            target.stable_id,
-            target.candidate_id,
-            stable_target_id(target.name),
-        } - {None}:
-            previous = aliases.get(alias)
-            if previous is not None and previous != identity:
-                ambiguous_aliases.add(alias)
-                continue
-            aliases[alias] = identity
-    for alias in ambiguous_aliases:
-        aliases.pop(alias, None)
-
-    daily = state.daily.get(day.isoformat(), {})
-    succeeded_names = set(daily.get("succeeded", []))
-    failed_names = set(daily.get("failures", {}))
-    for target in targets:
-        identity = target_identity(target)
-        if target.name in succeeded_names:
-            statuses[identity] = "success"
-        elif target.name in failed_names:
-            statuses[identity] = "failed"
-    for historical_id, result in daily.get("confirmation_results", {}).items():
-        identity = aliases.get(historical_id)
-        if identity is None:
-            continue
-        if result in {"confirmed", "retry_confirmed"}:
-            statuses[identity] = "success"
-        elif statuses[identity] != "success":
-            statuses[identity] = "failed"
-
-    if records is None:
-        records = TaskHistoryStore(
-            config.state_file.parent / "history" / "task-runs.jsonl"
-        ).query(start_date=day, end_date=day, page_size=100).items
-    for record in sorted(records, key=lambda item: item.end_time):
-        if record.task_type != "daily_send" or record.date != day.isoformat():
-            continue
-        failed_target_ids = set(record.failed_target_ids) | set(
-            record.target_failures
-        )
-        for historical_id in failed_target_ids:
-            identity = aliases.get(historical_id)
-            if identity is not None and statuses[identity] != "success":
-                statuses[identity] = "failed"
-        for historical_id, result in record.confirmation_results.items():
-            identity = aliases.get(historical_id)
-            if identity is not None and result in {
-                "confirmed",
-                "retry_confirmed",
-            }:
-                statuses[identity] = "success"
-    return statuses
-
-
 def bootstrap_legacy_daily_history(
     store: TaskHistoryStore,
     daily: dict[str, dict],
@@ -220,58 +137,8 @@ def bootstrap_legacy_daily_history(
                 final_status="completed" if complete else "partial_failed",
                 base_message_id=hashlib.sha256(base_message.encode("utf-8")).hexdigest()[:16] if base_message else None,
                 message_pack="global",
-                failed_target_ids=[stable_target_id(name) for name in failed_names],
+                failed_target_ids=[_stable_target_id(name) for name in failed_names],
             )
         )
         written += 1
     return written
-
-
-def dashboard_statistics(records: list[TaskRunRecord], today: date | None = None) -> dict:
-    today = today or date.today()
-    latest: dict[str, TaskRunRecord] = {}
-    totals: dict[str, int] = {}
-    confirmed: dict[str, int] = {}
-    for record in records:
-        if record.task_type == "daily_send":
-            latest[record.date] = record
-            totals[record.date] = max(totals.get(record.date, 0), record.total_targets)
-            confirmed[record.date] = min(
-                totals[record.date],
-                confirmed.get(record.date, 0) + record.success_count,
-            )
-
-    def success_rate(days: int) -> float:
-        cutoff = (today - timedelta(days=days - 1)).isoformat()
-        selected_days = [
-            day for day in latest if cutoff <= day <= today.isoformat()
-        ]
-        total = sum(totals[day] for day in selected_days)
-        successful = sum(confirmed[day] for day in selected_days)
-        return round(successful * 100 / total, 1) if total else 0.0
-
-    streak = 0
-    cursor = today if today.isoformat() in latest else today - timedelta(days=1)
-    while (
-        (day_key := cursor.isoformat()) in latest
-        and totals[day_key] > 0
-        and confirmed[day_key] >= totals[day_key]
-    ):
-        streak += 1
-        cursor -= timedelta(days=1)
-    last_completed = next(
-        (
-            item.end_time
-            for item in reversed(records)
-            if item.task_type == "daily_send" and item.final_status in {"completed", "already_done"}
-        ),
-        None,
-    )
-    cutoff_7 = (today - timedelta(days=6)).isoformat()
-    return {
-        "last_completed_run": last_completed,
-        "consecutive_successful_days": streak,
-        "success_rate_7d": success_rate(7),
-        "success_rate_30d": success_rate(30),
-        "retries_7d": sum(item.retry_count for item in records if item.date >= cutoff_7),
-    }
