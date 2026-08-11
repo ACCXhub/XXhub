@@ -4,11 +4,20 @@
 
 ## [Unreleased]
 
+## [1.4.4] - 2026-08-11
+
+1.4.4 是 v1.4.x 产品线的最终稳定基线，也是针对 Windows MSI 的聚焦 Scheduler 可靠性热修。
+
 ### Fixed
 
 - 修复 Task Scheduler 快照读取超时、PowerShell 失败或 JSON 无效时被错误折叠为“无任务”，导致正确注册的任务被误判缺失并使 MSI 回滚的问题。
 - Scheduler 修复后的验证现在对瞬时读取失败执行有限重试；成功快照中的真实任务漂移仍会明确失败。
 - failed fresh install 的 MSI rollback 会清理由本次安装创建的 AutoDy 任务；Repair 和同安装范围升级不会盲目删除已有任务。
+- 安装器内嵌 Scheduler 修复使用 Python `-B`，避免失败回滚后留下字节码文件。
+
+### Security
+
+- 保持原交互用户 SID、ProgramRoot、DataRoot、Scheduler 自动运行权威和 Limited Principal 不变；提升后的安装进程不重新推断用户身份或数据目录。
 
 ## [1.4.3] - 2026-08-11
 

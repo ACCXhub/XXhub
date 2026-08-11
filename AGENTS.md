@@ -2,11 +2,11 @@
 
 ## Project
 
-- Repository: `C:\Users\Administrator\Documents\autody`
-- Remote: `Siqihub/hlhub`
+- Repository: current checkout root.
+- Remote: `ACCXhub/hlhub`
 - Product: Windows-local AutoDy dashboard.
-- Current published baseline: AutoDy `1.3.0`, Test Center `1.1.0`.
-- Read `docs/PROJECT_HANDOFF.md` before editing.
+- Current published baseline: AutoDy `1.4.4`, Test Center `1.2.0`.
+- Read `docs/codex/PROJECT_HANDOFF.md` before editing.
 - Then read only files directly related to the current task.
 
 ## Start Every Session
@@ -98,6 +98,6 @@ cd ..
 ## Documentation
 
 - Keep this file limited to durable rules.
-- Keep current state in `docs/PROJECT_HANDOFF.md`.
+- Keep current state in `docs/codex/PROJECT_HANDOFF.md`.
 - Keep usage in `README.md` and history in `CHANGELOG.md`.
 - Prefer one substantial engineering manual over many one-paragraph documents.

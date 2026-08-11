@@ -5,4 +5,4 @@
 - [文档总览](文档总览.md)
 - [软件工程文档目录](软件工程/01-软件需求规格说明书.md)
 
-AutoDy 1.4.3 为已验证稳定源码基线，尚未创建标签或 GitHub Release；本地 MSI 不属于公开发布资产。
+AutoDy v1.4.4 是已发布并进入维护状态的 v1.4.x 最终稳定基线。当前维护交接见 [`docs/codex/PROJECT_HANDOFF.md`](codex/PROJECT_HANDOFF.md)，发布摘要见 [`docs/RELEASE_NOTES.md`](RELEASE_NOTES.md)。
