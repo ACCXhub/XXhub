@@ -3,14 +3,14 @@ name: Release
 on:
   push:
     tags:
-      - "v1.4.3"
+      - "v1.4.4"
 
 permissions:
   contents: write
 
 env:
-  AUTODY_RELEASE_VERSION: "1.4.3"
-  AUTODY_PREVIOUS_VERSION: "1.4.1"
+  AUTODY_RELEASE_VERSION: "1.4.4"
+  AUTODY_PREVIOUS_VERSION: "1.4.3"
 
 jobs:
   build-accept-publish:
@@ -41,7 +41,10 @@ jobs:
           if ((git rev-parse v1.4.1) -ne "a547ff28c083a5767b4865f0c6e8ca99cf89289d") {
             throw "Published v1.4.1 tag changed."
           }
-      - name: Download verified v1.4.1 upgrade baseline
+          if ((git rev-parse v1.4.3) -ne "e4fb0502f4935ffa834be6584e886a261d92488a") {
+            throw "Published v1.4.3 tag changed."
+          }
+      - name: Download verified v1.4.3 upgrade baseline
         shell: powershell
         run: |
           $baseline = "output\baselines\v$env:AUTODY_PREVIOUS_VERSION"
@@ -50,8 +53,8 @@ jobs:
           Invoke-WebRequest `
             -Uri "https://github.com/ACCXhub/hlhub/releases/download/v$env:AUTODY_PREVIOUS_VERSION/AutoDy-$env:AUTODY_PREVIOUS_VERSION-x64.msi" `
             -OutFile $previous -UseBasicParsing
-          if ((Get-FileHash -Algorithm SHA256 $previous).Hash.ToLowerInvariant() -ne "c2d77f1ab38a8f15d9a2ef251f0b88512d46ad6c737c6b3bb81ebca329d5f8f1") {
-            throw "v1.4.1 baseline hash mismatch"
+          if ((Get-FileHash -Algorithm SHA256 $previous).Hash.ToLowerInvariant() -ne "6d08b2c613da048c470de93ccffbb87b3e81fd610dc84e049465db28cd904079") {
+            throw "v1.4.3 baseline hash mismatch"
           }
       - name: Build and accept the clean-source release
         shell: powershell
@@ -67,11 +70,11 @@ jobs:
         with:
           fail_on_unmatched_files: true
           files: |
-            output/release/v1.4.3/AutoDy-1.4.3-x64.msi
-            output/release/v1.4.3/AutoDy-1.4.3-x64.msi.sha256
-            output/release/v1.4.3/AutoDy-Windows-Portable-1.4.3.zip
-            output/release/v1.4.3/AutoDy-Windows-Portable-1.4.3.zip.sha256
-            output/release/v1.4.3/release-manifest.json
+            output/release/v1.4.4/AutoDy-1.4.4-x64.msi
+            output/release/v1.4.4/AutoDy-1.4.4-x64.msi.sha256
+            output/release/v1.4.4/AutoDy-Windows-Portable-1.4.4.zip
+            output/release/v1.4.4/AutoDy-Windows-Portable-1.4.4.zip.sha256
+            output/release/v1.4.4/release-manifest.json
           body_path: docs/RELEASE_NOTES.md
 
   verify-public-assets:

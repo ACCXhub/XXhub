@@ -1,8 +1,8 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = "1.4.3",
+    [string]$Version = "1.4.4",
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$PreviousVersion = "1.4.1",
+    [string]$PreviousVersion = "1.4.3",
     [string]$ArtifactDirectory,
     [string]$PreviousMsiPath,
     [string]$ReportDirectory
@@ -223,6 +223,17 @@ function Assert-MsiUi {
     if ($repairData.Count -ne 1 -or $repair.Count -ne 1) {
         throw "MSI Scheduler repair CustomActionData contract is invalid."
     }
+    $rollbackData = @($customActions | Where-Object {
+        $_.Values[0] -eq "SetRollbackFreshInstallAutoDyTasksData" -and
+        $_.Values[3] -like '*scripts\remove-task.ps1*'
+    })
+    $rollback = @($customActions | Where-Object {
+        $_.Values[0] -eq "RollbackFreshInstallAutoDyTasks" -and
+        $_.Values[3] -eq "[CustomActionData]"
+    })
+    if ($rollbackData.Count -ne 1 -or $rollback.Count -ne 1) {
+        throw "MSI Scheduler fresh-install rollback CustomActionData contract is invalid."
+    }
     $removeData = @($customActions | Where-Object {
         $_.Values[0] -eq "SetRemoveInstalledAutoDyTasksData" -and
         $_.Values[3] -like '*scripts\remove-task.ps1*'
@@ -237,6 +248,23 @@ function Assert-MsiUi {
 
     $executeRows = @(Get-MsiRows $MsiPath `
         'SELECT `Action`,`Condition`,`Sequence` FROM `InstallExecuteSequence`' 3)
+    $rollbackDataRow = @($executeRows | Where-Object {
+        $_.Values[0] -eq "SetRollbackFreshInstallAutoDyTasksData"
+    })
+    $rollbackRow = @($executeRows | Where-Object {
+        $_.Values[0] -eq "RollbackFreshInstallAutoDyTasks"
+    })
+    $repairRow = @($executeRows | Where-Object {
+        $_.Values[0] -eq "RepairInstalledAutoDyTasks"
+    })
+    $expectedRollbackCondition = 'NOT Installed AND NOT WIX_UPGRADE_DETECTED AND NOT REMOVE~="ALL"'
+    if ($rollbackDataRow.Count -ne 1 -or $rollbackRow.Count -ne 1 -or $repairRow.Count -ne 1 -or
+        $rollbackDataRow[0].Values[1] -ne $expectedRollbackCondition -or
+        $rollbackRow[0].Values[1] -ne $expectedRollbackCondition -or
+        [int]$rollbackDataRow[0].Values[2] -ge [int]$rollbackRow[0].Values[2] -or
+        [int]$rollbackRow[0].Values[2] -ge [int]$repairRow[0].Values[2]) {
+        throw "MSI Scheduler fresh-install rollback contract is invalid."
+    }
     $removeDataRow = @($executeRows | Where-Object { $_.Values[0] -eq "SetRemoveInstalledAutoDyTasksData" })
     $removeRow = @($executeRows | Where-Object { $_.Values[0] -eq "RemoveInstalledAutoDyTasks" })
     $removeFilesRow = @($executeRows | Where-Object { $_.Values[0] -eq "RemoveFiles" })

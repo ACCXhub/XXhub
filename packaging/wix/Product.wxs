@@ -118,6 +118,18 @@
       Impersonate="no"
       Return="check" />
     <CustomAction
+      Id="SetRollbackFreshInstallAutoDyTasksData"
+      Property="RollbackFreshInstallAutoDyTasks"
+      Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]scripts\remove-task.ps1&quot;"
+      Execute="immediate" />
+    <CustomAction
+      Id="RollbackFreshInstallAutoDyTasks"
+      BinaryRef="Wix4UtilCA_X64"
+      DllEntry="WixQuietExec"
+      Execute="rollback"
+      Impersonate="no"
+      Return="ignore" />
+    <CustomAction
       Id="SetRemoveInstalledAutoDyTasksData"
       Property="RemoveInstalledAutoDyTasks"
       Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]scripts\remove-task.ps1&quot;"
@@ -139,8 +151,16 @@
         After="StopExistingAutoDyTray"
         Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom
-        Action="RepairInstalledAutoDyTasks"
+        Action="SetRollbackFreshInstallAutoDyTasksData"
         After="SetRepairInstalledAutoDyTasksData"
+        Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED AND NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom
+        Action="RollbackFreshInstallAutoDyTasks"
+        After="SetRollbackFreshInstallAutoDyTasksData"
+        Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED AND NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom
+        Action="RepairInstalledAutoDyTasks"
+        After="RollbackFreshInstallAutoDyTasks"
         Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom
         Action="SetRemoveInstalledAutoDyTasksData"

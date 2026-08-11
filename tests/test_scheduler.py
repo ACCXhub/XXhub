@@ -2,6 +2,7 @@ import base64
 import json
 from pathlib import Path
 import subprocess
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -79,6 +80,79 @@ def expected_task_rows(
             }
         )
     return rows
+
+
+def test_windows_task_rows_returns_empty_only_after_successful_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict = {}
+
+    def successful_empty_snapshot(command, **kwargs):
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(scheduler.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(scheduler.subprocess, "run", successful_empty_snapshot)
+
+    assert scheduler.windows_task_rows() == []
+    assert captured["kwargs"]["timeout"] >= 20
+    script = captured["command"][-1]
+    assert "$ErrorActionPreference='Stop'" in script
+    assert "Get-ScheduledTask -ErrorAction Stop" in script
+    assert "-TaskPath '\\'" in script
+    assert "-ErrorAction SilentlyContinue" not in script
+    assert "ConvertTo-Json -InputObject @($rows)" in script
+
+
+def test_windows_task_rows_raises_explicit_error_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(scheduler.platform, "system", lambda: "Windows")
+
+    def timed_out(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("powershell.exe", 20)
+
+    monkeypatch.setattr(scheduler.subprocess, "run", timed_out)
+
+    with pytest.raises(RuntimeError, match="定时任务快照读取超时"):
+        scheduler.windows_task_rows()
+
+
+def test_windows_task_rows_raises_explicit_error_on_powershell_failure(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(scheduler.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        scheduler.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="Task Scheduler service is unavailable",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="定时任务快照读取失败"):
+        scheduler.windows_task_rows()
+
+
+def test_windows_task_rows_raises_explicit_error_on_invalid_json(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(scheduler.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        scheduler.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="not-json",
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="定时任务快照返回了无效数据"):
+        scheduler.windows_task_rows()
 
 
 def test_schedule_settings_validate_times_and_recovery_window():
@@ -573,6 +647,61 @@ def test_scheduler_repair_fails_when_required_task_is_missing(tmp_path: Path):
 
     with pytest.raises(RuntimeError, match="定时任务修复后验证失败"):
         service.repair(config)
+
+
+def test_scheduler_repair_retries_transient_snapshot_failure_then_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    program_root = (tmp_path / "program").resolve()
+    data_root = (tmp_path / "data").resolve()
+    config = AppConfig(targets=[Target(name="fixture")])
+    rows = expected_task_rows(program_root, data_root, config)
+    attempts = 0
+
+    def transient_rows():
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise scheduler.SchedulerSnapshotError("Task Scheduler is warming up")
+        return rows
+
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    SchedulerService(
+        program_root,
+        install=lambda _config: None,
+        data_root=data_root,
+        task_rows=transient_rows,
+    ).repair(config)
+
+    assert attempts == 3
+
+
+def test_scheduler_repair_reports_persistent_snapshot_failure_as_read_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    attempts = 0
+
+    def unavailable_rows():
+        nonlocal attempts
+        attempts += 1
+        raise scheduler.SchedulerSnapshotError("Task Scheduler is unavailable")
+
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    service = SchedulerService(
+        tmp_path / "program",
+        install=lambda _config: None,
+        data_root=tmp_path / "data",
+        task_rows=unavailable_rows,
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        service.repair(AppConfig(targets=[Target(name="fixture")]))
+
+    error = str(exc_info.value)
+    assert "无法读取定时任务修复后的验证快照" in error
+    assert "定时任务修复后验证失败" not in error
+    assert "AutoDy-Health-Daily" not in error
+    assert attempts == 3
 
 
 def test_scheduler_repair_requires_complete_runtime_metadata(tmp_path: Path):

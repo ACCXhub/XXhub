@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = "1.4.3",
+    [string]$Version = "1.4.4",
     [ValidatePattern('^$|^[0-9a-fA-F]{40}$')]
     [string]$Commit = '',
     [switch]$ReuseRuntime,

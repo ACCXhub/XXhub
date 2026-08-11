@@ -4,7 +4,7 @@ AutoDy 是 Windows 本机运行的 Douyin 私信工作流管理台。它管理�
 
 ## 当前状态
 
-AutoDy 1.4.3 是已验证稳定源码基线，尚未创建 v1.4.3 标签或 GitHub Release；本地 MSI 仅用于冻结验证，不是公开发布资产。v1.4.0 与 v1.4.1 已存在，不会被移动。官方 Test Center 为 1.2.0，模块 API 为 1，兼容范围为 >=1.3.0,<2.0.0。
+AutoDy 1.4.3 是当前已发布的 standalone 稳定版本；源码树正在准备 1.4.4 Scheduler/MSI 聚焦热修候选，尚未发布。既有标签与 Release 不会被移动或覆盖。官方 Test Center 为 1.2.0，模块 API 为 1，兼容范围为 >=1.3.0,<2.0.0。
 
 ## 主要能力
 

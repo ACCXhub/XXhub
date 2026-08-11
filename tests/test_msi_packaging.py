@@ -110,7 +110,7 @@ def test_msi_upgrade_repairs_scheduler_from_canonical_config_and_roots():
         namespace,
     )
     assert scheduled is not None
-    assert scheduled.attrib["After"] == "SetRepairInstalledAutoDyTasksData"
+    assert scheduled.attrib["After"] == "RollbackFreshInstallAutoDyTasks"
     assert scheduled.attrib["Condition"] == 'NOT REMOVE~="ALL"'
     data_action = root.find(
         ".//w:InstallExecuteSequence/w:Custom[@Action='SetRepairInstalledAutoDyTasksData']",
@@ -118,6 +118,63 @@ def test_msi_upgrade_repairs_scheduler_from_canonical_config_and_roots():
     )
     assert data_action is not None
     assert data_action.attrib["After"] == "StopExistingAutoDyTray"
+
+
+def test_msi_rolls_back_tasks_only_for_failed_fresh_install():
+    namespace = {"w": "http://wixtoolset.org/schemas/v4/wxs"}
+    root = ET.parse("packaging/wix/Product.wxs").getroot()
+
+    rollback = root.find(
+        ".//w:CustomAction[@Id='RollbackFreshInstallAutoDyTasks']",
+        namespace,
+    )
+    assert rollback is not None
+    assert rollback.attrib["BinaryRef"] == "Wix4UtilCA_X64"
+    assert rollback.attrib["DllEntry"] == "WixQuietExec"
+    assert rollback.attrib["Execute"] == "rollback"
+    assert rollback.attrib["Impersonate"] == "no"
+    assert rollback.attrib["Return"] == "ignore"
+
+    command = next(
+        item.attrib["Value"]
+        for item in root.findall(".//w:CustomAction", namespace)
+        if item.attrib.get("Property") == "RollbackFreshInstallAutoDyTasks"
+    )
+    assert "WindowsPowerShell\\v1.0\\powershell.exe" in command
+    assert "scripts\\remove-task.ps1" in command
+
+    scheduled = root.find(
+        ".//w:InstallExecuteSequence/w:Custom[@Action='RollbackFreshInstallAutoDyTasks']",
+        namespace,
+    )
+    assert scheduled is not None
+    condition = scheduled.attrib["Condition"]
+    assert "NOT Installed" in condition
+    assert "NOT WIX_UPGRADE_DETECTED" in condition
+    assert 'NOT REMOVE~="ALL"' in condition
+
+    repair = root.find(
+        ".//w:InstallExecuteSequence/w:Custom[@Action='RepairInstalledAutoDyTasks']",
+        namespace,
+    )
+    assert repair is not None
+    assert repair.attrib["After"] == "RollbackFreshInstallAutoDyTasks"
+
+
+def test_msi_verifiers_enforce_fresh_install_scheduler_rollback_contract():
+    release_verifier = Path("scripts/verify-release-artifacts.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+    lifecycle_verifier = Path("scripts/verify-msi-lifecycle.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+    condition = 'NOT Installed AND NOT WIX_UPGRADE_DETECTED AND NOT REMOVE~="ALL"'
+
+    for verifier in (release_verifier, lifecycle_verifier):
+        assert "SetRollbackFreshInstallAutoDyTasksData" in verifier
+        assert "RollbackFreshInstallAutoDyTasks" in verifier
+    assert condition in lifecycle_verifier
+    assert "MSI Scheduler fresh-install rollback contract is invalid" in lifecycle_verifier
 
 
 def test_msi_uninstall_removes_scheduler_tasks_before_program_files():
@@ -398,17 +455,20 @@ def test_ci_uploads_msi_lifecycle_diagnostics_after_failure():
 def test_release_workflow_publishes_only_versioned_public_assets():
     workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
 
-    assert "AUTODY_RELEASE_VERSION: \"1.4.3\"" in workflow
+    assert "AUTODY_RELEASE_VERSION: \"1.4.4\"" in workflow
+    assert "AUTODY_PREVIOUS_VERSION: \"1.4.3\"" in workflow
+    assert "e4fb0502f4935ffa834be6584e886a261d92488a" in workflow
+    assert "6d08b2c613da048c470de93ccffbb87b3e81fd610dc84e049465db28cd904079" in workflow
     assert ".\\scripts\\build-release-from-clean-source.ps1" in workflow
     assert "write-release-manifest.ps1" not in workflow.split(
         "Publish only canonical guarded assets", 1
     )[1]
     for asset in [
-        "output/release/v1.4.3/AutoDy-1.4.3-x64.msi",
-        "output/release/v1.4.3/AutoDy-1.4.3-x64.msi.sha256",
-        "output/release/v1.4.3/AutoDy-Windows-Portable-1.4.3.zip",
-        "output/release/v1.4.3/AutoDy-Windows-Portable-1.4.3.zip.sha256",
-        "output/release/v1.4.3/release-manifest.json",
+        "output/release/v1.4.4/AutoDy-1.4.4-x64.msi",
+        "output/release/v1.4.4/AutoDy-1.4.4-x64.msi.sha256",
+        "output/release/v1.4.4/AutoDy-Windows-Portable-1.4.4.zip",
+        "output/release/v1.4.4/AutoDy-Windows-Portable-1.4.4.zip.sha256",
+        "output/release/v1.4.4/release-manifest.json",
     ]:
         assert asset in workflow
     published_files = workflow.split("files: |", 1)[1].split(

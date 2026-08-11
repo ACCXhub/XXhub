@@ -5,8 +5,8 @@ on:
   pull_request:
 
 env:
-  AUTODY_RELEASE_VERSION: "1.4.3"
-  AUTODY_PREVIOUS_VERSION: "1.4.1"
+  AUTODY_RELEASE_VERSION: "1.4.4"
+  AUTODY_PREVIOUS_VERSION: "1.4.3"
 
 jobs:
   test:
@@ -115,8 +115,8 @@ jobs:
             -Uri "https://github.com/ACCXhub/hlhub/releases/download/v$env:AUTODY_PREVIOUS_VERSION/AutoDy-$env:AUTODY_PREVIOUS_VERSION-x64.msi" `
             -OutFile $previous -UseBasicParsing
           $previousHash = (Get-FileHash -Algorithm SHA256 $previous).Hash.ToLowerInvariant()
-          if ($previousHash -ne "c2d77f1ab38a8f15d9a2ef251f0b88512d46ad6c737c6b3bb81ebca329d5f8f1") {
-            throw "v1.4.1 baseline hash mismatch"
+          if ($previousHash -ne "6d08b2c613da048c470de93ccffbb87b3e81fd610dc84e049465db28cd904079") {
+            throw "v1.4.3 baseline hash mismatch"
           }
           [ordered]@{
             schema_version = 1

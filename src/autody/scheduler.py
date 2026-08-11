@@ -17,6 +17,7 @@ from pathlib import Path
 import platform
 import re
 import subprocess
+import time
 from typing import Callable
 import uuid
 
@@ -28,10 +29,17 @@ from autody.config import AppConfig, enabled_execution_targets, save_config
 TIME_PATTERN = r"^([01]\d|2[0-3]):[0-5]\d$"
 WEEKDAYS = "Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday"
 TASK_NAMES = ("AutoDy-Health-Daily", "AutoDy-DailySpark", "AutoDy-Health-Weekly")
+TASK_SNAPSHOT_TIMEOUT_SECONDS = 20
+TASK_VERIFICATION_ATTEMPTS = 3
+TASK_VERIFICATION_BACKOFF_SECONDS = 0.75
 
 
 class SchedulerElevationCancelled(RuntimeError):
     """The user declined the operation-scoped Windows elevation request."""
+
+
+class SchedulerSnapshotError(RuntimeError):
+    """The Windows Task Scheduler snapshot could not be acquired reliably."""
 
 
 def _sid_pointer_to_string(sid_pointer: int | None) -> str | None:
@@ -438,11 +446,16 @@ def windows_task_rows() -> list[dict]:
     if platform.system() != "Windows":
         return []
     script = """
+$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)
+$OutputEncoding=[System.Text.UTF8Encoding]::new($false)
+$taskNames=@('AutoDy-Health-Daily','AutoDy-DailySpark','AutoDy-Health-Weekly')
+$tasks=@(Get-ScheduledTask -ErrorAction Stop -TaskPath '\\' | Where-Object { $_.TaskName -in $taskNames })
 $rows=@()
-foreach($name in @('AutoDy-Health-Daily','AutoDy-DailySpark','AutoDy-Health-Weekly')){
-  $task=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+foreach($name in $taskNames){
+  $task=$tasks | Where-Object { $_.TaskName -eq $name } | Select-Object -First 1
   if($task){
-    $info=Get-ScheduledTaskInfo -TaskName $name
+    $info=Get-ScheduledTaskInfo -InputObject $task -ErrorAction Stop
     $trigger=$task.Triggers | Select-Object -First 1
     $action=$task.Actions | Select-Object -First 1
     $startBoundary=''
@@ -466,23 +479,41 @@ foreach($name in @('AutoDy-Health-Daily','AutoDy-DailySpark','AutoDy-Health-Week
     }
   }
 }
-$rows | ConvertTo-Json -Compress
+ConvertTo-Json -InputObject @($rows) -Compress
 """
     try:
-        output = subprocess.run(
+        completed = subprocess.run(
             ["powershell.exe", "-NoProfile", "-Command", script],
             capture_output=True,
             text=True,
             encoding="utf-8",
-            timeout=8,
+            timeout=TASK_SNAPSHOT_TIMEOUT_SECONDS,
             check=False,
-        ).stdout.strip()
-        if not output:
-            return []
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise SchedulerSnapshotError("定时任务快照读取超时") from exc
+    except OSError as exc:
+        raise SchedulerSnapshotError("无法启动定时任务快照读取命令") from exc
+
+    if completed.returncode:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        message = "定时任务快照读取失败"
+        if detail:
+            message = f"{message}：{detail}"
+        raise SchedulerSnapshotError(message)
+
+    output = completed.stdout.strip()
+    if not output:
+        raise SchedulerSnapshotError("定时任务快照未返回有效 JSON")
+    try:
         data = json.loads(output)
-        return data if isinstance(data, list) else [data]
-    except Exception:
-        return []
+    except json.JSONDecodeError as exc:
+        raise SchedulerSnapshotError("定时任务快照返回了无效数据") from exc
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list) or any(not isinstance(row, dict) for row in data):
+        raise SchedulerSnapshotError("定时任务快照返回了无效数据")
+    return data
 
 
 def registered_install_roots() -> tuple[Path, Path] | None:
@@ -776,9 +807,23 @@ class SchedulerService:
 
     def repair(self, config: AppConfig) -> None:
         self._install(config)
+        rows = None
+        last_snapshot_error = None
+        for attempt in range(TASK_VERIFICATION_ATTEMPTS):
+            try:
+                rows = self._task_rows()
+                break
+            except SchedulerSnapshotError as exc:
+                last_snapshot_error = exc
+                if attempt + 1 < TASK_VERIFICATION_ATTEMPTS:
+                    time.sleep(TASK_VERIFICATION_BACKOFF_SECONDS)
+        if rows is None:
+            raise SchedulerSnapshotError(
+                "无法读取定时任务修复后的验证快照"
+            ) from last_snapshot_error
         statuses = scheduler_status_rows(
             config,
-            self._task_rows(),
+            rows,
             len(enabled_execution_targets(config)),
             program_root=self.root,
             data_root=self.data_root,

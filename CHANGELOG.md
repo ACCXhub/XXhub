@@ -4,11 +4,15 @@
 
 ## [Unreleased]
 
-暂无已发布变更。
+### Fixed
 
-## [1.4.3] - 已准备，未发布
+- 修复 Task Scheduler 快照读取超时、PowerShell 失败或 JSON 无效时被错误折叠为“无任务”，导致正确注册的任务被误判缺失并使 MSI 回滚的问题。
+- Scheduler 修复后的验证现在对瞬时读取失败执行有限重试；成功快照中的真实任务漂移仍会明确失败。
+- failed fresh install 的 MSI rollback 会清理由本次安装创建的 AutoDy 任务；Repair 和同安装范围升级不会盲目删除已有任务。
 
-1.4.3 是已验证稳定源码基线，尚未创建标签或 GitHub Release。本地 MSI 只用于冻结验证，不是公开发布资产。
+## [1.4.3] - 2026-08-11
+
+1.4.3 已作为首个 standalone MSI/Portable 稳定版本发布。
 
 ### Added
 

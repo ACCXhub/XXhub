@@ -1,5 +1,10 @@
-# 发布说明兼容入口
+# AutoDy v1.4.4
 
-该英文文件名由当前 Release 工作流引用，因此保留为兼容入口。面向用户的完整中文发布说明在[08-v1.4.3发布说明](软件工程/08-v1.4.3发布说明.md)。
+这是针对 Windows MSI 安装的聚焦可靠性热修。
 
-状态：已验证稳定源码基线，尚未创建标签或 GitHub Release；本地 MSI 仅用于冻结验证，没有正式发布日期。
+- Task Scheduler 快照读取超时、PowerShell 查询失败或返回无效数据时，不再被误判为“三项任务均缺失”。
+- 安装程序注册任务后的验证会对瞬时 Scheduler 读取失败执行有限重试；成功快照中的真实配置漂移仍会阻止安装。
+- failed fresh install 会在 MSI rollback 时移除本次安装创建的 AutoDy 任务，避免程序文件回滚后留下孤儿任务。
+- Repair 与同安装范围升级不会执行 fresh-install 清理，保留已有 Scheduler 状态、原交互用户 SID、ProgramRoot、DataRoot 和 Limited Principal 语义。
+
+本热修不改变 Dashboard、消息发送、好友管理、Portable 架构或本地数据边界。用户数据继续仅保存在本机，卸载仍默认保留 DataRoot。
