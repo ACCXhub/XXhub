@@ -203,6 +203,87 @@ def test_status_degrades_when_an_optional_scheduler_section_fails(
     assert response.json()["statistics"]["next_daily_send"] is None
 
 
+def test_scheduler_route_uses_sid_captured_from_normal_dashboard_process(
+    tmp_path: Path,
+    monkeypatch,
+):
+    task_user_id = "S-1-5-21-1000"
+    captured: list[str | None] = []
+
+    monkeypatch.setattr(
+        "autody.scheduler.current_process_user_sid",
+        lambda: task_user_id,
+        raising=False,
+    )
+    monkeypatch.setattr("autody.scheduler.windows_task_rows", lambda: [])
+
+    class RecordingSchedulerService:
+        def __init__(self, _program_root, **kwargs):
+            captured.append(kwargs.get("task_user_id"))
+
+        def repair(self, _config):
+            return None
+
+    monkeypatch.setattr(
+        "autody.web_api.SchedulerService", RecordingSchedulerService
+    )
+
+    response = TestClient(create_app(make_project(tmp_path))).post(
+        "/api/scheduler/repair"
+    )
+
+    assert response.status_code == 200
+    assert captured == [task_user_id]
+
+
+def test_scheduler_write_invalidates_cached_windows_task_state(
+    tmp_path: Path,
+    monkeypatch,
+):
+    calls = 0
+    installed_rows = [
+        {
+            "name": "AutoDy-DailySpark",
+            "state": "Ready",
+            "next_run": "2026-08-12T07:30:00",
+            "last_run": "",
+            "last_result": 0,
+            "start_boundary": "2026-08-12T07:30:00",
+            "repetition_interval": "PT30M",
+            "repetition_duration": "PT16H29M",
+        }
+    ]
+
+    def task_rows():
+        nonlocal calls
+        calls += 1
+        return installed_rows if calls == 1 else []
+
+    class RecordingSchedulerService:
+        def __init__(self, _program_root, **_kwargs):
+            pass
+
+        def remove(self):
+            return None
+
+    monkeypatch.setattr("autody.scheduler.windows_task_rows", task_rows)
+    monkeypatch.setattr(
+        "autody.web_api.SchedulerService", RecordingSchedulerService
+    )
+    client = TestClient(create_app(make_project(tmp_path)))
+
+    before = client.get("/api/status").json()["scheduler"]
+    removed = client.post("/api/scheduler/remove")
+    after = client.get("/api/status").json()["scheduler"]
+
+    assert next(row for row in before if row["name"] == "AutoDy-DailySpark")[
+        "installed"
+    ] is True
+    assert removed.status_code == 200
+    assert all(row["installed"] is False for row in after)
+    assert calls == 3
+
+
 def test_scheduler_status_marks_duplicate_or_drifted_windows_tasks(tmp_path: Path):
     config = load_config(make_project(tmp_path))
     live = {
@@ -326,7 +407,11 @@ def test_dashboard_exposes_runtime_root_drift_as_path_free_repair_issue(
     wrong_root = tmp_path / "source-checkout"
     data_root.mkdir()
     config_path = make_project(data_root)
+    task_user_id = "S-1-5-21-1000"
     monkeypatch.setenv("AUTODY_PROGRAM_ROOT", str(program_root))
+    monkeypatch.setattr(
+        "autody.scheduler.current_process_user_sid", lambda: task_user_id
+    )
     monkeypatch.setattr(
         "autody.scheduler.registered_install_roots",
         lambda: (program_root.resolve(), data_root.resolve()),
@@ -344,10 +429,11 @@ def test_dashboard_exposes_runtime_root_drift_as_path_free_repair_issue(
                 '-NoProfile -ExecutionPolicy Bypass '
                 f'-File "{wrong_root / "scripts" / "run-scheduled.ps1"}" '
                 f'-ProgramRoot "{wrong_root}" -DataRoot "{wrong_root}"'
-            ),
-            "working_directory": str(wrong_root),
-        }],
-    )
+                ),
+                "working_directory": str(wrong_root),
+                "principal_user_id": task_user_id,
+            }],
+        )
 
     payload = TestClient(create_app(config_path)).get("/api/status").json()
 
@@ -708,6 +794,10 @@ def test_dashboard_and_plan_count_only_enabled_targets_with_executable_bindings(
         encoding="utf-8",
     )
     _install_test_center(config_path)
+    task_user_id = "S-1-5-21-1000"
+    monkeypatch.setattr(
+        "autody.scheduler.current_process_user_sid", lambda: task_user_id
+    )
     monkeypatch.setattr(
         "autody.scheduler.windows_task_rows",
         lambda: [
@@ -720,6 +810,7 @@ def test_dashboard_and_plan_count_only_enabled_targets_with_executable_bindings(
                     "start_boundary": "2026-06-24T07:30:00",
                     "repetition_interval": "PT30M",
                     "repetition_duration": "PT16H29M",
+                    "principal_user_id": task_user_id,
                 }
             ],
         )

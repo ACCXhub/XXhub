@@ -894,6 +894,7 @@ def create_app(
     config_path = config_path.resolve()
     root = config_path.parent
     program_root = Path(os.environ.get("AUTODY_PROGRAM_ROOT", root)).resolve()
+    scheduler_task_user_id = scheduler.current_process_user_sid()
     manager = ActionManager(program_root, config_path)
     account_store = MultiAccountStore(root, config_path)
     run_action = action_runner or manager.start
@@ -1109,6 +1110,17 @@ def create_app(
             task_cache["expires"] = time.monotonic() + 10
         return list(task_cache["rows"])  # type: ignore[arg-type]
 
+    def dashboard_scheduler_service() -> SchedulerService:
+        return SchedulerService(
+            program_root,
+            data_root=root,
+            task_user_id=scheduler_task_user_id,
+        )
+
+    def invalidate_task_cache() -> None:
+        task_cache["rows"] = []
+        task_cache["expires"] = 0.0
+
     @app.get("/api/service-identity")
     def service_identity():
         package_path = Path(__file__).resolve().parent
@@ -1229,6 +1241,7 @@ def create_app(
                 len(executable_targets),
                 program_root=program_root,
                 data_root=root,
+                task_user_id=scheduler_task_user_id,
             )
             if scheduler_available
             else []
@@ -1955,21 +1968,22 @@ def create_app(
         current = load_config(config_path)
         candidate = current.model_copy(update=payload.model_dump())
         candidate = AppConfig.model_validate(candidate.model_dump())
-        return SchedulerService(program_root, data_root=root).preview(current, candidate)
+        return dashboard_scheduler_service().preview(current, candidate)
 
     @app.post("/api/scheduler/apply")
     def scheduler_apply(payload: ScheduleUpdate):
         current = load_config(config_path)
         candidate = AppConfig.model_validate(current.model_copy(update=payload.model_dump()).model_dump())
         try:
-            SchedulerService(program_root, data_root=root).apply(config_path, current, candidate)
+            dashboard_scheduler_service().apply(config_path, current, candidate)
         except RuntimeError as exc:
             raise HTTPException(409, f"定时任务未更新：{exc}") from exc
+        invalidate_task_cache()
         return {"config": _config_payload(candidate), "tasks": scheduler.windows_task_rows(), "message": "定时任务已更新"}
 
     @app.post("/api/scheduler/{operation}")
     def scheduler_operation(operation: str):
-        service = SchedulerService(program_root, data_root=root)
+        service = dashboard_scheduler_service()
         config = load_config(config_path)
         try:
             if operation in {"install", "update", "repair"}:
@@ -1980,6 +1994,7 @@ def create_app(
                 raise HTTPException(404, "未知定时任务操作")
         except RuntimeError as exc:
             raise HTTPException(409, str(exc)) from exc
+        invalidate_task_cache()
         return {"tasks": scheduler.windows_task_rows(), "message": "定时任务操作完成"}
 
     @app.get("/api/history")

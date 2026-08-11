@@ -1,4 +1,7 @@
+import base64
+import json
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +14,14 @@ from autody.scheduler import (
     scheduler_status_rows,
     validate_schedule_settings,
 )
+
+
+@pytest.mark.skipif(scheduler.platform.system() != "Windows", reason="Windows token")
+def test_current_process_user_sid_is_read_from_the_process_token():
+    task_user_id = scheduler.current_process_user_sid()
+
+    assert task_user_id is not None
+    assert task_user_id.startswith("S-1-")
 
 
 def expected_task_rows(
@@ -151,6 +162,33 @@ def test_scheduler_status_accepts_no_repetition_for_zero_recovery_window():
     assert send["drift_reason"] is None
 
 
+def test_scheduler_status_accepts_account_name_equivalent_to_expected_sid(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = AppConfig(targets=[Target(name="fixture")])
+    task_user_id = "S-1-5-21-1000"
+    rows = expected_task_rows(
+        Path("C:/AutoDy"), Path("C:/Users/fixture/AppData/Local/AutoDy"), config
+    )
+    rows[1]["principal_user_id"] = "AUTODY-TEST\\fixture"
+    monkeypatch.setattr(
+        scheduler,
+        "_windows_user_sid",
+        lambda value: task_user_id if value == "AUTODY-TEST\\fixture" else value,
+        raising=False,
+    )
+
+    statuses = scheduler_status_rows(
+        config,
+        rows,
+        1,
+        task_user_id=task_user_id,
+    )
+
+    send = next(row for row in statuses if row["name"] == "AutoDy-DailySpark")
+    assert send["drift_reason"] is None
+
+
 def test_scheduler_apply_rolls_windows_tasks_back_when_update_fails(tmp_path: Path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text("targets:\n  - name: 小明\nmessages_file: messages.txt\n", encoding="utf-8")
@@ -198,6 +236,7 @@ def test_packaged_scheduler_repair_passes_program_and_data_roots(
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(scheduler.subprocess, "run", fake_run)
+    monkeypatch.setattr(scheduler, "_is_process_elevated", lambda: True)
 
     config = AppConfig(targets=[Target(name="fixture")])
     SchedulerService(
@@ -211,6 +250,247 @@ def test_packaged_scheduler_repair_passes_program_and_data_roots(
     assert captured[captured.index("-ProgramRoot") + 1] == str(program_root.resolve())
     assert captured[captured.index("-DataRoot") + 1] == str(data_root.resolve())
     assert captured[captured.index("-RecoveryDeadline") + 1] == "23:59"
+
+
+def test_scheduler_repair_builds_elevated_payload_with_original_identity_and_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    program_root = (tmp_path / "program").resolve()
+    data_root = (tmp_path / "user-data").resolve()
+    task_user_id = "S-1-5-21-1000"
+    config = AppConfig(
+        targets=[Target(name="fixture")],
+        daily_health_check_time="06:20",
+        daily_send_time="06:30",
+        recovery_deadline="22:45",
+        weekly_health_check_enabled=False,
+        weekly_health_check_weekday="Tuesday",
+        weekly_health_check_time="19:10",
+    )
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        scheduler, "_is_process_elevated", lambda: False, raising=False
+    )
+
+    def fake_elevated_operation(payload: dict, operation_data_root: Path) -> None:
+        captured.update(payload)
+        captured["operation_data_root"] = operation_data_root
+
+    monkeypatch.setattr(
+        scheduler,
+        "_run_elevated_scheduler_operation",
+        fake_elevated_operation,
+        raising=False,
+    )
+
+    SchedulerService(
+        program_root,
+        data_root=data_root,
+        task_user_id=task_user_id,
+        task_rows=lambda: expected_task_rows(
+            program_root, data_root, config, task_user_id
+        ),
+    ).repair(config)
+
+    assert captured == {
+        "operation": "install",
+        "program_root": str(program_root),
+        "data_root": str(data_root),
+        "task_user_id": task_user_id,
+        "daily_health_check_time": "06:20",
+        "daily_send_time": "06:30",
+        "recovery_deadline": "22:45",
+        "weekly_health_check_enabled": False,
+        "weekly_health_check_weekday": "Tuesday",
+        "weekly_health_check_time": "19:10",
+        "operation_data_root": data_root,
+    }
+
+
+def test_scheduler_remove_builds_constrained_elevated_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    program_root = (tmp_path / "program").resolve()
+    data_root = (tmp_path / "user-data").resolve()
+    task_user_id = "S-1-5-21-1000"
+    captured: dict = {}
+
+    monkeypatch.setattr(
+        scheduler, "_is_process_elevated", lambda: False, raising=False
+    )
+
+    def fake_elevated_operation(payload: dict, operation_data_root: Path) -> None:
+        captured.update(payload)
+        captured["operation_data_root"] = operation_data_root
+
+    monkeypatch.setattr(
+        scheduler,
+        "_run_elevated_scheduler_operation",
+        fake_elevated_operation,
+        raising=False,
+    )
+
+    SchedulerService(
+        program_root,
+        data_root=data_root,
+        task_user_id=task_user_id,
+    ).remove()
+
+    assert captured == {
+        "operation": "remove",
+        "program_root": str(program_root),
+        "data_root": str(data_root),
+        "task_user_id": task_user_id,
+        "operation_data_root": data_root,
+    }
+
+
+def test_elevated_scheduler_command_dispatches_to_existing_install_script(
+    tmp_path: Path,
+):
+    program_root = (tmp_path / "program").resolve()
+    data_root = (tmp_path / "user-data").resolve()
+    scripts = program_root / "scripts"
+    scripts.mkdir(parents=True)
+    data_root.mkdir()
+    (data_root / "config.yaml").write_text("targets: []\n", encoding="utf-8")
+    (scripts / "install-task.ps1").write_text(
+        r'''param(
+    [string]$ProgramRoot,
+    [string]$DataRoot,
+    [string]$TaskUserId,
+    [string]$DailyHealthCheckTime,
+    [string]$DailySendTime,
+    [string]$RecoveryDeadline,
+    [int]$WeeklyHealthCheckEnabled,
+    [string]$WeeklyHealthCheckWeekday,
+    [string]$WeeklyHealthCheckTime
+)
+[pscustomobject]@{
+    program_root = $ProgramRoot
+    data_root = $DataRoot
+    task_user_id = $TaskUserId
+    daily_health_check_time = $DailyHealthCheckTime
+    daily_send_time = $DailySendTime
+    recovery_deadline = $RecoveryDeadline
+    weekly_health_check_enabled = $WeeklyHealthCheckEnabled
+    weekly_health_check_weekday = $WeeklyHealthCheckWeekday
+    weekly_health_check_time = $WeeklyHealthCheckTime
+} | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $DataRoot 'capture.json') -Encoding UTF8
+''',
+        encoding="utf-8",
+    )
+    result_path = data_root / "result.json"
+    payload = {
+        "operation": "install",
+        "nonce": "contract-nonce",
+        "program_root": str(program_root),
+        "data_root": str(data_root),
+        "task_user_id": "S-1-5-21-1000",
+        "daily_health_check_time": "06:20",
+        "daily_send_time": "06:30",
+        "recovery_deadline": "22:45",
+        "weekly_health_check_enabled": False,
+        "weekly_health_check_weekday": "Tuesday",
+        "weekly_health_check_time": "19:10",
+    }
+    script = scheduler._elevated_scheduler_script(payload, result_path)
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+
+    completed = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-EncodedCommand",
+            encoded,
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert json.loads(result_path.read_text(encoding="utf-8-sig")) == {
+        "success": True,
+        "operation": "install",
+        "nonce": "contract-nonce",
+        "message": "Windows 定时任务已更新",
+        "error_code": "",
+    }
+    assert json.loads(
+        (data_root / "capture.json").read_text(encoding="utf-8-sig")
+    ) == {
+        "program_root": str(program_root),
+        "data_root": str(data_root),
+        "task_user_id": "S-1-5-21-1000",
+        "daily_health_check_time": "06:20",
+        "daily_send_time": "06:30",
+        "recovery_deadline": "22:45",
+        "weekly_health_check_enabled": 0,
+        "weekly_health_check_weekday": "Tuesday",
+        "weekly_health_check_time": "19:10",
+    }
+
+
+def test_scheduler_apply_does_not_prompt_for_restore_after_uac_cancel(
+    tmp_path: Path,
+):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "targets:\n  - name: fixture\nmessages_file: messages.txt\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "messages.txt").write_text("hello\n", encoding="utf-8")
+    previous = AppConfig(targets=[Target(name="fixture")])
+    candidate = previous.model_copy(update={"daily_send_time": "08:00"})
+    calls: list[str] = []
+    cancelled_error = getattr(
+        scheduler, "SchedulerElevationCancelled", RuntimeError
+    )
+
+    def install(config: AppConfig):
+        calls.append(config.daily_send_time)
+        raise cancelled_error("用户取消了管理员授权")
+
+    service = SchedulerService(tmp_path, install=install)
+    with pytest.raises(cancelled_error, match="取消"):
+        service.apply(config_path, previous, candidate)
+
+    assert calls == ["08:00"]
+
+
+def test_cancelled_elevation_removes_the_temporary_result_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    data_root = tmp_path / "user-data"
+    data_root.mkdir()
+    (data_root / "config.yaml").write_text("targets: []\n", encoding="utf-8")
+    payload = {
+        "operation": "remove",
+        "program_root": str((tmp_path / "program").resolve()),
+        "data_root": str(data_root.resolve()),
+        "task_user_id": "S-1-5-21-1000",
+    }
+
+    def cancel(_script: str, _cwd: Path) -> int:
+        raise scheduler.SchedulerElevationCancelled(
+            "已取消管理员授权，定时任务未更改"
+        )
+
+    monkeypatch.setattr(scheduler, "_launch_elevated_powershell", cancel)
+
+    with pytest.raises(scheduler.SchedulerElevationCancelled, match="取消"):
+        scheduler._run_elevated_scheduler_operation(payload, data_root)
+
+    operation_root = data_root / "data" / "scheduler-operations"
+    assert operation_root.is_dir()
+    assert list(operation_root.iterdir()) == []
 
 
 def test_scheduler_repair_passes_explicit_task_user_sid(
@@ -227,6 +507,7 @@ def test_scheduler_repair_passes_explicit_task_user_sid(
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(scheduler.subprocess, "run", fake_run)
+    monkeypatch.setattr(scheduler, "_is_process_elevated", lambda: True)
     SchedulerService(
         program_root,
         data_root=data_root,
@@ -313,7 +594,7 @@ def test_scheduler_repair_requires_complete_runtime_metadata(tmp_path: Path):
 
 @pytest.mark.parametrize("enabled", [True, False])
 def test_packaged_scheduler_repair_crosses_powershell_native_boolean_boundary(
-    tmp_path: Path, enabled: bool
+    tmp_path: Path, enabled: bool, monkeypatch: pytest.MonkeyPatch
 ):
     program_root = tmp_path / "program"
     data_root = tmp_path / "user-data"
@@ -324,6 +605,7 @@ def test_packaged_scheduler_repair_crosses_powershell_native_boolean_boundary(
         Path("scripts/install-task.ps1").read_text(encoding="utf-8-sig"),
         encoding="utf-8",
     )
+    monkeypatch.setattr(scheduler, "_is_process_elevated", lambda: True)
 
     with pytest.raises(RuntimeError) as exc_info:
         SchedulerService(program_root, data_root=data_root).repair(

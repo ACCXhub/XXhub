@@ -39,6 +39,8 @@
 
 ### Fixed
 
+- 修复非提升 Dashboard 无法安装、修复、移除或应用 Windows 计划任务的问题；Scheduler 写操作现在只为该次操作请求 UAC，并显式保留原用户 SID、ProgramRoot 与 DataRoot。
+- 修复 Task Scheduler 将同一 Principal 读回为账户名时与 SID 原始字符串比较导致的虚假漂移，以及写操作成功后页面短暂保留旧任务缓存的问题。
 - 修复历史成功日依赖今天启用目标配置、配置变化会追溯改写过去统计的问题。
 - 修复提升 MSI 从管理员进程 %LOCALAPPDATA% 推断数据根，导致任务 Principal 与 DataRoot 分裂的问题。
 - 拒绝陈旧或失效的已登记安装路径，避免向未知旧目录写入 payload。
@@ -52,6 +54,7 @@
 
 ### Security
 
+- Scheduler 提升边界是立即退出的受约束子进程，只分派到既有安装/移除脚本；Dashboard 与计划任务本身保持非提升/Limited，短生命周期结果文件不包含业务资料。
 - 无关端口监听者不会被结束；只有托盘确认管理的服务可被停止或重启。
 - 发行物继续使用 allowlist，隐私扫描排除运行时数据、认证资料、浏览器 profile、日志、备份和开发夹具。
 - 发布失败诊断保留最小必要信息，不应包含真实账号、目标、消息或 Cookie。
