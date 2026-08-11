@@ -248,6 +248,7 @@ def test_portable_release_archive_is_byte_reproducible(monkeypatch):
         str(BUILD_PORTABLE),
         "-Version",
         "1.4.3",
+        "-ReuseRuntime",
     ]
 
     first = subprocess.run(command, capture_output=True, env=env, check=False)
@@ -263,6 +264,14 @@ def test_portable_release_archive_is_byte_reproducible(monkeypatch):
             (2000, 1, 1, 0, 0, 0)
         }
         names = set(portable.namelist())
+        assert "runtime/python/python.exe" in names
+        assert "runtime/distribution-mode.txt" in names
+        assert portable.read("runtime/distribution-mode.txt") == b"portable"
+        assert any(name.startswith("runtime/ms-playwright/") for name in names)
+        assert "runtime/python/Lib/site-packages/autody/web/static/index.html" in names
+        assert "message-packs/index.json" in names
+        assert "AutoDy.cmd" in names
+        assert not any(name.startswith("src/") for name in names)
         for release_only in {
             "scripts/bootstrap-source.ps1",
             "scripts/build-release-from-clean-source.ps1",
@@ -360,3 +369,64 @@ def test_release_text_normalization_makes_crlf_and_lf_archives_identical(
     assert (tmp_path / "left.zip").read_bytes() == (tmp_path / "right.zip").read_bytes()
     assert b"\r" not in (left / "script.ps1").read_bytes()
     assert (left / "icon.ico").read_bytes() == b"\x00\x01\r\n"
+
+
+def test_release_text_normalization_keeps_windows_scripts_utf8_for_powershell_51(
+    tmp_path: Path, monkeypatch
+):
+    script = tmp_path / "unicode.ps1"
+    script.write_text('Write-Output "需要处理"\r\n', encoding="utf-8")
+
+    monkeypatch.setenv("AUTODY_RELEASE_COMMON", str(RELEASE_COMMON))
+    monkeypatch.setenv("AUTODY_TEST_ROOT", str(tmp_path))
+    completed = run_powershell(
+        r"""
+        $ErrorActionPreference = "Stop"
+        . $env:AUTODY_RELEASE_COMMON
+        Convert-ReleaseTextFilesToLf -Root $env:AUTODY_TEST_ROOT
+        """,
+        env=dict(__import__("os").environ),
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    normalized = script.read_bytes()
+    assert normalized.startswith(b"\xef\xbb\xbf")
+    executed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-File", str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert executed.returncode == 0, executed.stderr
+    assert executed.stdout.strip() == "需要处理"
+
+
+def test_release_text_normalization_keeps_vbs_compatible_with_windows_script_host(
+    tmp_path: Path, monkeypatch
+):
+    script = tmp_path / "launcher.vbs"
+    script.write_text('WScript.Echo "launcher-ok"\r\n', encoding="utf-8")
+
+    monkeypatch.setenv("AUTODY_RELEASE_COMMON", str(RELEASE_COMMON))
+    monkeypatch.setenv("AUTODY_TEST_ROOT", str(tmp_path))
+    completed = run_powershell(
+        r"""
+        $ErrorActionPreference = "Stop"
+        . $env:AUTODY_RELEASE_COMMON
+        Convert-ReleaseTextFilesToLf -Root $env:AUTODY_TEST_ROOT
+        """,
+        env=dict(__import__("os").environ),
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    assert not script.read_bytes().startswith(b"\xef\xbb\xbf")
+    executed = subprocess.run(
+        ["cscript.exe", "//nologo", str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert executed.returncode == 0, executed.stderr
+    assert executed.stdout.strip() == "launcher-ok"

@@ -1,15 +1,29 @@
+param(
+    [string]$ProgramRoot = (Join-Path $PSScriptRoot ".."),
+    [string]$DataRoot
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$env:AUTODY_HOME = $Root
-$env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $Root "data\ms-playwright"
+. (Join-Path $PSScriptRoot "resolve-runtime-roots.ps1")
+$RuntimeContext = Resolve-AutoDyLaunchContext -ProgramRoot $ProgramRoot -DataRoot $DataRoot
+$Root = $RuntimeContext.ProgramRoot
+$DataRoot = $RuntimeContext.DataRoot
+$Python = $RuntimeContext.Python
+$BrowserRoot = $RuntimeContext.BrowserRoot
+$Config = Join-Path $DataRoot "config.yaml"
+$env:AUTODY_HOME = $DataRoot
+$env:AUTODY_PROGRAM_ROOT = $Root
+$env:AUTODY_BROWSERS_PATH = $BrowserRoot
+$env:PLAYWRIGHT_BROWSERS_PATH = $BrowserRoot
 $env:PLAYWRIGHT_SKIP_BROWSER_GC = "1"
-$Python = Join-Path $Root ".venv\Scripts\python.exe"
-$Config = Join-Path $Root "config.yaml"
 
 if (-not (Test-Path -LiteralPath $Python -PathType Leaf)) {
-    throw "AutoDy virtual environment was not found. Run install.cmd first."
+    throw "AutoDy Python runtime was not found. Repair or reinstall this AutoDy distribution."
+}
+if (-not (Test-Path -LiteralPath $Config -PathType Leaf)) {
+    throw "AutoDy configuration was not found in the resolved data root."
 }
 
 & $Python -m autody.cli repair-playwright --config $Config

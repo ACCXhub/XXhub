@@ -47,6 +47,7 @@ $DesktopShortcut = Join-Path ([Environment]::GetFolderPath("Desktop")) "AutoDy M
 $StartMenuShortcut = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\AutoDy\AutoDy Management.lnk"
 $UninstallShortcut = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\AutoDy\卸载 AutoDy.lnk"
 $ShortcutPaths = @($DesktopShortcut, $StartMenuShortcut, $UninstallShortcut)
+$ScheduledTaskNames = @("AutoDy-DailySpark", "AutoDy-Health-Daily", "AutoDy-Health-Weekly")
 
 if (Test-Path -LiteralPath "HKCU:\Software\AutoDy") {
     throw "Refusing to run MSI lifecycle verification in a user profile with existing AutoDy registration. Use a clean Windows user profile."
@@ -56,6 +57,11 @@ if (Test-Path -LiteralPath $InstallRoot) {
 }
 if (Test-Path -LiteralPath $InstalledDataRoot) {
     throw "Refusing to run MSI lifecycle verification because the AutoDy runtime-data directory already exists. Use a clean Windows user profile."
+}
+foreach ($taskName in $ScheduledTaskNames) {
+    if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+        throw "Refusing to run MSI lifecycle verification because an AutoDy scheduled task already exists: $taskName"
+    }
 }
 
 function Assert-OutputChild {
@@ -216,6 +222,31 @@ function Assert-MsiUi {
     })
     if ($repairData.Count -ne 1 -or $repair.Count -ne 1) {
         throw "MSI Scheduler repair CustomActionData contract is invalid."
+    }
+    $removeData = @($customActions | Where-Object {
+        $_.Values[0] -eq "SetRemoveInstalledAutoDyTasksData" -and
+        $_.Values[3] -like '*scripts\remove-task.ps1*'
+    })
+    $remove = @($customActions | Where-Object {
+        $_.Values[0] -eq "RemoveInstalledAutoDyTasks" -and
+        $_.Values[3] -eq "[CustomActionData]"
+    })
+    if ($removeData.Count -ne 1 -or $remove.Count -ne 1) {
+        throw "MSI Scheduler uninstall CustomActionData contract is invalid."
+    }
+
+    $executeRows = @(Get-MsiRows $MsiPath `
+        'SELECT `Action`,`Condition`,`Sequence` FROM `InstallExecuteSequence`' 3)
+    $removeDataRow = @($executeRows | Where-Object { $_.Values[0] -eq "SetRemoveInstalledAutoDyTasksData" })
+    $removeRow = @($executeRows | Where-Object { $_.Values[0] -eq "RemoveInstalledAutoDyTasks" })
+    $removeFilesRow = @($executeRows | Where-Object { $_.Values[0] -eq "RemoveFiles" })
+    $expectedRemoveCondition = 'REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE'
+    if ($removeDataRow.Count -ne 1 -or $removeRow.Count -ne 1 -or $removeFilesRow.Count -ne 1 -or
+        $removeDataRow[0].Values[1] -ne $expectedRemoveCondition -or
+        $removeRow[0].Values[1] -ne $expectedRemoveCondition -or
+        [int]$removeDataRow[0].Values[2] -ge [int]$removeRow[0].Values[2] -or
+        [int]$removeRow[0].Values[2] -ge [int]$removeFilesRow[0].Values[2]) {
+        throw "MSI Scheduler uninstall actions are not sequenced before RemoveFiles."
     }
 
     $registry = @(Get-MsiRows $MsiPath `
@@ -395,6 +426,22 @@ function Assert-InstalledPayload {
     }
 }
 
+function Assert-ScheduledTasksPresent {
+    foreach ($taskName in $ScheduledTaskNames) {
+        if (-not (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) {
+            throw "Expected installed scheduled task is missing: $taskName"
+        }
+    }
+}
+
+function Assert-ScheduledTasksAbsent {
+    foreach ($taskName in $ScheduledTaskNames) {
+        if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+            throw "Scheduled task remains after MSI uninstall: $taskName"
+        }
+    }
+}
+
 if (-not (Test-Path -LiteralPath $Msi -PathType Leaf)) {
     throw "MSI artifact is missing."
 }
@@ -467,6 +514,7 @@ try {
         throw "MSI product did not reach the installed state."
     }
     Assert-InstalledPayload $InstallRoot
+    Assert-ScheduledTasksPresent
     $stages.fresh_install = "passed"
 
     Assert-Shortcut $DesktopShortcut $InstallRoot
@@ -479,6 +527,7 @@ try {
         throw "MSI product did not remain installed after repair."
     }
     Assert-InstalledPayload $InstallRoot
+    Assert-ScheduledTasksPresent
     Assert-Shortcut $DesktopShortcut $InstallRoot
     Assert-Shortcut $StartMenuShortcut $InstallRoot
     Assert-UninstallShortcut $UninstallShortcut $ProductCode
@@ -489,6 +538,7 @@ try {
     if ((Get-ProductState $ProductCode) -ne -1) {
         throw "MSI product remains registered after uninstall."
     }
+    Assert-ScheduledTasksAbsent
     if (Test-Path -LiteralPath $InstallRoot) {
         $remainingInstalledFiles = @(Get-ChildItem -LiteralPath $InstallRoot -Recurse -Force -File)
         if ($remainingInstalledFiles.Count -gt 0) {
@@ -503,6 +553,7 @@ try {
         throw "Custom-path MSI install did not reach the installed state."
     }
     Assert-InstalledPayload $CustomInstallRoot
+    Assert-ScheduledTasksPresent
     Assert-Shortcut $DesktopShortcut $CustomInstallRoot
     Assert-Shortcut $StartMenuShortcut $CustomInstallRoot
     Assert-UninstallShortcut $UninstallShortcut $ProductCode
@@ -516,6 +567,7 @@ try {
     if ((Get-ProductState $ProductCode) -ne -1) {
         throw "Custom-path MSI product remains registered after uninstall."
     }
+    Assert-ScheduledTasksAbsent
     if (Test-Path -LiteralPath $CustomInstallRoot) {
         $remainingCustomFiles = @(Get-ChildItem -LiteralPath $CustomInstallRoot -Recurse -Force -File)
         if ($remainingCustomFiles.Count -gt 0) {
@@ -531,13 +583,22 @@ try {
     if ((Get-ProductState $PreviousProductCode) -ne 5) {
         throw "Previous-version MSI baseline did not reach the installed state."
     }
-    Invoke-MsiChecked "Major upgrade" `
+    # Windows Installer does not discover a per-user related product from a
+    # per-machine package. The supported scope migration therefore removes the
+    # legacy product registration/program payload first; its permanent DataRoot
+    # remains in place for the new per-machine install.
+    Invoke-MsiChecked "Remove previous per-user baseline for scope migration" `
+        "/x $PreviousProductCode" (Join-Path $Work "upgrade-baseline-uninstall.log")
+    if ((Get-ProductState $PreviousProductCode) -ne -1) {
+        throw "Previous per-user MSI remains registered after migration uninstall."
+    }
+    Invoke-MsiChecked "Install current per-machine package after scope migration" `
         "/i `"$Msi`"" (Join-Path $Work "upgrade.log")
-    if ((Get-ProductState $PreviousProductCode) -ne -1 -or
-        (Get-ProductState $ProductCode) -ne 5) {
-        throw "MSI major upgrade did not replace the previous product."
+    if ((Get-ProductState $ProductCode) -ne 5) {
+        throw "MSI scope migration did not install the current product."
     }
     Assert-InstalledPayload $InstallRoot
+    Assert-ScheduledTasksPresent
     Assert-Shortcut $DesktopShortcut $InstallRoot
     Assert-Shortcut $StartMenuShortcut $InstallRoot
     Assert-UninstallShortcut $UninstallShortcut $ProductCode
@@ -548,6 +609,7 @@ try {
     if ((Get-ProductState $ProductCode) -ne -1) {
         throw "Upgraded MSI product remains registered after uninstall."
     }
+    Assert-ScheduledTasksAbsent
     $stages.uninstall = "passed"
 } catch {
     $failure = Get-SanitizedText $_.Exception.Message

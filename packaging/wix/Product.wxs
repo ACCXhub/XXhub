@@ -17,6 +17,33 @@
     <Property Id="ARPPRODUCTICON" Value="AutoDyIcon" />
     <Property Id="AUTODY_INTERACTIVE_USER_SID" Secure="yes" />
     <Property Id="AUTODY_INTERACTIVE_LOCALAPPDATA" Secure="yes" />
+    <Property Id="AUTODY_LEGACY_PERUSER_140">
+      <RegistrySearch
+        Id="LegacyPerUser140Search"
+        Root="HKCU"
+        Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\{BA1EC9E1-105F-87D6-ADB2-BFC533517E95}"
+        Name="DisplayVersion"
+        Type="raw" />
+    </Property>
+    <Property Id="AUTODY_LEGACY_PERUSER_141">
+      <RegistrySearch
+        Id="LegacyPerUser141Search"
+        Root="HKCU"
+        Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\{ED630967-103C-0CB8-7CD3-565B67B27629}"
+        Name="DisplayVersion"
+        Type="raw" />
+    </Property>
+    <Property Id="AUTODY_LEGACY_PERUSER_142">
+      <RegistrySearch
+        Id="LegacyPerUser142Search"
+        Root="HKCU"
+        Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\{F2845514-95E6-787A-7B1A-5679988B63AE}"
+        Name="DisplayVersion"
+        Type="raw" />
+    </Property>
+    <Launch
+      Condition="NOT AUTODY_LEGACY_PERUSER_140 AND NOT AUTODY_LEGACY_PERUSER_141 AND NOT AUTODY_LEGACY_PERUSER_142"
+      Message="A per-user AutoDy 1.4.0-1.4.2 installation was found. Uninstall it first; AutoDy user data will be preserved, then run this installer again." />
     <Property Id="AUTODY_REGISTERED_INSTALLFOLDER" Value="Z:\__AutoDyNoExistingInstall__">
       <RegistrySearch
         Id="InstalledFolderSearch"
@@ -85,8 +112,20 @@
       Execute="immediate" />
     <CustomAction
       Id="RepairInstalledAutoDyTasks"
-      Directory="INSTALLFOLDER"
-      ExeCommand="[CustomActionData]"
+      BinaryRef="Wix4UtilCA_X64"
+      DllEntry="WixQuietExec"
+      Execute="deferred"
+      Impersonate="no"
+      Return="check" />
+    <CustomAction
+      Id="SetRemoveInstalledAutoDyTasksData"
+      Property="RemoveInstalledAutoDyTasks"
+      Value="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]scripts\remove-task.ps1&quot;"
+      Execute="immediate" />
+    <CustomAction
+      Id="RemoveInstalledAutoDyTasks"
+      BinaryRef="Wix4UtilCA_X64"
+      DllEntry="WixQuietExec"
       Execute="deferred"
       Impersonate="no"
       Return="check" />
@@ -103,6 +142,14 @@
         Action="RepairInstalledAutoDyTasks"
         After="SetRepairInstalledAutoDyTasksData"
         Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom
+        Action="SetRemoveInstalledAutoDyTasksData"
+        Before="RemoveInstalledAutoDyTasks"
+        Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom
+        Action="RemoveInstalledAutoDyTasks"
+        Before="RemoveFiles"
+        Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
     <Feature Id="MainFeature" Title="AutoDy" Level="1">
       <ComponentGroupRef Id="PayloadComponents" />

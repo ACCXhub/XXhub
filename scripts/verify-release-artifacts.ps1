@@ -343,7 +343,9 @@ try {
                 [pscustomobject]@{ Action = 'SetDDriveInstallFolder'; Type = '51'; Source = 'INSTALLFOLDER'; Target = 'D:\AutoDy' },
                 [pscustomobject]@{ Action = 'StopExistingAutoDyTray'; Type = '1058'; Source = 'INSTALLFOLDER'; Target = '"[SystemFolder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "[INSTALLFOLDER]scripts\autody-tray.ps1" -StopExisting' },
                 [pscustomobject]@{ Action = 'SetRepairInstalledAutoDyTasksData'; Type = '51'; Source = 'RepairInstalledAutoDyTasks'; Target = '"[INSTALLFOLDER]runtime\python\python.exe" -m autody.cli repair-scheduler --config "[AUTODYDATAROOT]config.yaml" --program-root "[INSTALLFOLDER]." --data-root "[AUTODYDATAROOT]." --task-user-id "[AUTODY_INTERACTIVE_USER_SID]"' },
-                [pscustomobject]@{ Action = 'RepairInstalledAutoDyTasks'; Type = '3106'; Source = 'INSTALLFOLDER'; Target = '[CustomActionData]' },
+                [pscustomobject]@{ Action = 'RepairInstalledAutoDyTasks'; Type = '3073'; Source = 'Wix4UtilCA_X64'; Target = 'WixQuietExec' },
+                [pscustomobject]@{ Action = 'SetRemoveInstalledAutoDyTasksData'; Type = '51'; Source = 'RemoveInstalledAutoDyTasks'; Target = '"[SystemFolder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "[INSTALLFOLDER]scripts\remove-task.ps1"' },
+                [pscustomobject]@{ Action = 'RemoveInstalledAutoDyTasks'; Type = '3073'; Source = 'Wix4UtilCA_X64'; Target = 'WixQuietExec' },
                 [pscustomobject]@{ Action = 'Wix4RemoveFoldersEx_X64'; Type = '65'; Source = 'Wix4UtilCA_X64'; Target = 'WixRemoveFoldersEx' }
             )
             $unexpectedCustomAction = $customActionRows.Count -ne $expectedCustomActions.Count
@@ -430,6 +432,46 @@ try {
         Expand-Archive -LiteralPath $Portable -DestinationPath $PortableExtract -Force
         $counts.portable_files = Test-ExtractedTree $PortableExtract "portable"
         $checks.portable_zip = "passed"
+        $portableRequired = @(
+            'AutoDy.cmd',
+            'runtime\distribution-mode.txt',
+            'runtime\python\python.exe',
+            'runtime\python\Lib\site-packages\autody\web\static\index.html',
+            'runtime\python\Lib\site-packages\pydantic_core\_pydantic_core.cp311-win_amd64.pyd',
+            'runtime\ms-playwright',
+            'message-packs\index.json',
+            'scripts\autody-tray.ps1',
+            'scripts\run-scheduled.ps1'
+        )
+        foreach ($relative in $portableRequired) {
+            if (-not (Test-Path -LiteralPath (Join-Path $PortableExtract $relative))) {
+                [void]$findings.Add([ordered]@{
+                    category = 'portable_standalone_payload_missing'
+                    file = $relative
+                })
+                $checks.portable_zip = 'failed'
+            }
+        }
+        $portableMode = Join-Path $PortableExtract 'runtime\distribution-mode.txt'
+        if ((Test-Path -LiteralPath $portableMode -PathType Leaf) -and
+            (Get-Content -Raw -LiteralPath $portableMode).Trim() -ne 'portable') {
+            [void]$findings.Add([ordered]@{
+                category = 'portable_distribution_mode_invalid'
+                file = 'runtime\distribution-mode.txt'
+            })
+            $checks.portable_zip = 'failed'
+        }
+        $portableChromium = @(
+            Get-ChildItem -LiteralPath (Join-Path $PortableExtract 'runtime\ms-playwright') `
+                -Recurse -File -Filter 'chrome.exe' -ErrorAction SilentlyContinue
+        )
+        if ($portableChromium.Count -lt 1) {
+            [void]$findings.Add([ordered]@{
+                category = 'portable_chromium_missing'
+                file = 'runtime\ms-playwright'
+            })
+            $checks.portable_zip = 'failed'
+        }
         $modules = @(Get-ChildItem -LiteralPath $PortableExtract -Recurse -File `
             -Filter 'AutoDy-Test-Center.autody-module.zip')
         if ($modules.Count -ne 1) {

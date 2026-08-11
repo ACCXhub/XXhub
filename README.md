@@ -15,10 +15,13 @@ AutoDy 1.4.3 是已验证稳定源码基线，尚未创建 v1.4.3 标签或 GitH
 - Windows 托盘单实例、服务身份验证、已验证服务复用和计划任务独立运行。
 - 首选端口 8765；无关监听者占用时安全回退到 8766–8799，不终止对方。
 - MSI 安装、Repair、升级和卸载；提升安装仍显式绑定原交互用户的任务 Principal 与 %LocalAppData%\AutoDy 数据目录。
+- MSI 与 portable 都自带固定 Python、依赖、Chromium、生产前端和内置资源，不依赖系统 Python、Node/npm、仓库或网络恢复依赖。
 
 ## 安装摘要
 
-普通用户请在正式 Release 下载 MSI 与同名 SHA-256 文件。新安装优先 D:\AutoDy，D: 不可用时回退至 %LocalAppData%\Programs\AutoDy；用户可写数据始终位于 %LocalAppData%\AutoDy，卸载默认保留。portable 包适合技术用户，仍需要 Python 3.11 与网络；源码包只用于开发。
+普通用户请在正式 Release 下载 MSI 与同名 SHA-256 文件。新安装优先 D:\AutoDy，D: 不可用时回退至 %LocalAppData%\Programs\AutoDy；用户可写数据始终位于 %LocalAppData%\AutoDy，卸载默认保留。已安装 per-user 版 1.4.0–1.4.2 时，先从 Windows 设置卸载旧程序，再安装 per-machine 版 1.4.3；旧 DataRoot 会保留。
+
+portable 包解压到独立可写目录后运行 `AutoDy.cmd`。它无需系统 Python、Node/npm 或联网安装依赖，程序与数据都留在该解包目录中；移动或删除目录前应先退出托盘并自行备份。源码包只用于开发。
 
 ~~~powershell
 Get-FileHash -Algorithm SHA256 '.\AutoDy-1.4.3-x64.msi'

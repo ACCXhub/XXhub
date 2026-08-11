@@ -14,13 +14,14 @@ $RuntimeRoots = Resolve-AutoDyRuntimeRoots `
     -ScriptRoot $PSScriptRoot
 $Root = $RuntimeRoots.ProgramRoot
 $DataRoot = $RuntimeRoots.DataRoot
+$RuntimeContext = Resolve-AutoDyLaunchContext -ProgramRoot $Root -DataRoot $DataRoot
 $env:AUTODY_HOME = $DataRoot
 $env:AUTODY_PROGRAM_ROOT = $Root
-$BrowserRoot = if (Test-Path -LiteralPath (Join-Path $Root "runtime\ms-playwright")) { Join-Path $Root "runtime\ms-playwright" } else { Join-Path $DataRoot "data\ms-playwright" }
+$BrowserRoot = $RuntimeContext.BrowserRoot
 $env:AUTODY_BROWSERS_PATH = $BrowserRoot
 $env:PLAYWRIGHT_BROWSERS_PATH = $BrowserRoot
 $env:PLAYWRIGHT_SKIP_BROWSER_GC = "1"
-$Python = if (Test-Path -LiteralPath (Join-Path $Root "runtime\python\python.exe")) { Join-Path $Root "runtime\python\python.exe" } else { Join-Path $Root ".venv\Scripts\python.exe" }
+$Python = $RuntimeContext.Python
 $Config = Join-Path $DataRoot "config.yaml"
 $LogDir = Join-Path $DataRoot "data\logs"
 $Log = Join-Path $LogDir ("scheduler-{0}.log" -f (Get-Date -Format "yyyy-MM-dd"))

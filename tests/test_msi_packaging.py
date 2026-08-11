@@ -16,6 +16,14 @@ def test_wix_project_is_sdk_style_and_per_machine():
     assert 'Id="PreserveDataRoot"' in product
     assert 'Permanent="yes"' in product
     assert "<MajorUpgrade" in product
+    for version, product_code in {
+        "140": "{BA1EC9E1-105F-87D6-ADB2-BFC533517E95}",
+        "141": "{ED630967-103C-0CB8-7CD3-565B67B27629}",
+        "142": "{F2845514-95E6-787A-7B1A-5679988B63AE}",
+    }.items():
+        assert f'Id="AUTODY_LEGACY_PERUSER_{version}"' in product
+        assert f"Uninstall\\{product_code}" in product
+    assert "A per-user AutoDy 1.4.0-1.4.2 installation was found" in product
     assert 'PackageReference Include="WixToolset.UI.wixext" Version="7.0.0"' in project
     assert 'PackageReference Include="WixToolset.Util.wixext" Version="7.0.0"' in project
     assert 'xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"' in product
@@ -90,7 +98,9 @@ def test_msi_upgrade_repairs_scheduler_from_canonical_config_and_roots():
     assert '--data-root "[AUTODYDATAROOT]."' in command
     assert '--task-user-id "[AUTODY_INTERACTIVE_USER_SID]"' in command
     assert "--if-config-exists" not in command
-    assert action.attrib["ExeCommand"] == "[CustomActionData]"
+    assert action.attrib["BinaryRef"] == "Wix4UtilCA_X64"
+    assert action.attrib["DllEntry"] == "WixQuietExec"
+    assert "ExeCommand" not in action.attrib
     assert action.attrib["Execute"] == "deferred"
     assert action.attrib["Impersonate"] == "no"
     assert action.attrib["Return"] == "check"
@@ -108,6 +118,45 @@ def test_msi_upgrade_repairs_scheduler_from_canonical_config_and_roots():
     )
     assert data_action is not None
     assert data_action.attrib["After"] == "StopExistingAutoDyTray"
+
+
+def test_msi_uninstall_removes_scheduler_tasks_before_program_files():
+    namespace = {"w": "http://wixtoolset.org/schemas/v4/wxs"}
+    root = ET.parse("packaging/wix/Product.wxs").getroot()
+
+    action = root.find(
+        ".//w:CustomAction[@Id='RemoveInstalledAutoDyTasks']",
+        namespace,
+    )
+    assert action is not None
+    command = next(
+        item.attrib["Value"]
+        for item in root.findall(".//w:CustomAction", namespace)
+        if item.attrib.get("Property") == "RemoveInstalledAutoDyTasks"
+    )
+    assert "WindowsPowerShell\\v1.0\\powershell.exe" in command
+    assert "scripts\\remove-task.ps1" in command
+    assert action.attrib["BinaryRef"] == "Wix4UtilCA_X64"
+    assert action.attrib["DllEntry"] == "WixQuietExec"
+    assert action.attrib["Execute"] == "deferred"
+    assert action.attrib["Impersonate"] == "no"
+    assert action.attrib["Return"] == "check"
+
+    data_action = root.find(
+        ".//w:InstallExecuteSequence/w:Custom[@Action='SetRemoveInstalledAutoDyTasksData']",
+        namespace,
+    )
+    assert data_action is not None
+    assert data_action.attrib["Before"] == "RemoveInstalledAutoDyTasks"
+    assert data_action.attrib["Condition"] == 'REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE'
+
+    scheduled = root.find(
+        ".//w:InstallExecuteSequence/w:Custom[@Action='RemoveInstalledAutoDyTasks']",
+        namespace,
+    )
+    assert scheduled is not None
+    assert scheduled.attrib["Before"] == "RemoveFiles"
+    assert scheduled.attrib["Condition"] == 'REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE'
 
 
 def test_msi_uninstall_shortcut_and_install_folder_resolution_are_msi_native():
@@ -143,6 +192,8 @@ def test_msi_builder_uses_explicit_allowlist_and_clean_runtime():
         "packaging\\runtime-requirements.txt",
         "AutoDy-Test-Center.autody-module.zip",
         "EmbeddedPythonSha256",
+        "distribution-mode.txt",
+        "StageOnly",
         "Get-ReleaseFileSha256",
         "AcceptEula=wix7",
         '$previousErrorActionPreference = $ErrorActionPreference',
@@ -256,7 +307,9 @@ def test_release_privacy_verifier_covers_all_release_artifacts():
         "StopExistingAutoDyTray",
         "SetRepairInstalledAutoDyTasksData",
         "RepairInstalledAutoDyTasks",
-        "[CustomActionData]",
+        "SetRemoveInstalledAutoDyTasksData",
+        "RemoveInstalledAutoDyTasks",
+        "WixQuietExec",
         "invalid_initial_config_seed",
         '"/a `"$Msi`" /qn',
         "AutoDy-Windows-Portable-$Version.zip",
@@ -291,7 +344,8 @@ def test_msi_lifecycle_verifier_preserves_shortcuts_and_data():
         '"SetTargetPath"',
         '"SpawnDialog"',
         '"Install previous-version baseline"',
-        '"Major upgrade"',
+        '"Remove previous per-user baseline for scope migration"',
+        '"Install current per-machine package after scope migration"',
         "Assert-Shortcut",
         "Assert-UninstallShortcut",
         "卸载 AutoDy.lnk",
@@ -302,6 +356,8 @@ def test_msi_lifecycle_verifier_preserves_shortcuts_and_data():
         "existing AutoDy registration",
         "shortcutBackups",
         "prior_installation_restoration",
+        "Assert-ScheduledTasksPresent",
+        "Assert-ScheduledTasksAbsent",
         "msi-lifecycle-report.json",
     ]:
         assert token in verifier

@@ -106,11 +106,14 @@ function Convert-ReleaseTextFilesToLf {
         throw 'Release text normalization root is missing.'
     }
     $extensions = @(
-        '.cmd', '.css', '.html', '.js', '.json', '.md', '.ps1', '.py',
-        '.toml', '.ts', '.tsx', '.txt', '.vbs', '.yaml', '.yml'
+        '.cmd', '.css', '.html', '.js', '.json', '.md', '.ps1', '.psd1',
+        '.psm1', '.py', '.toml', '.ts', '.tsx', '.txt', '.vbs', '.yaml',
+        '.yml'
     )
     $names = @('LICENSE', 'SECURITY')
     $utf8 = New-Object Text.UTF8Encoding($false)
+    $utf8Bom = New-Object Text.UTF8Encoding($true)
+    $windowsScriptExtensions = @('.ps1', '.psd1', '.psm1')
     Get-ChildItem -LiteralPath $resolvedRoot -Recurse -Force -File | ForEach-Object {
         if ($_.Extension.ToLowerInvariant() -notin $extensions -and $_.Name -notin $names) {
             return
@@ -120,7 +123,12 @@ function Convert-ReleaseTextFilesToLf {
             $text = $text.Substring(1)
         }
         $normalized = $text.Replace("`r`n", "`n").Replace("`r", "`n")
-        [IO.File]::WriteAllText($_.FullName, $normalized, $utf8)
+        $encoding = if ($_.Extension.ToLowerInvariant() -in $windowsScriptExtensions) {
+            $utf8Bom
+        } else {
+            $utf8
+        }
+        [IO.File]::WriteAllText($_.FullName, $normalized, $encoding)
     }
 }
 

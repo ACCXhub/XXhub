@@ -4,6 +4,7 @@ param(
     [ValidatePattern('^$|^[0-9a-fA-F]{40}$')]
     [string]$Commit = '',
     [switch]$ReuseRuntime,
+    [switch]$StageOnly,
     [switch]$PlanOnly
 )
 
@@ -485,6 +486,7 @@ $releaseFiles = [ordered]@{
     "scripts\start-dashboard.cmd" = "scripts\start-dashboard.cmd"
     "scripts\start-dashboard.ps1" = "scripts\start-dashboard.ps1"
     "scripts\start-dashboard.vbs" = "scripts\start-dashboard.vbs"
+    "AutoDy.cmd" = "AutoDy.cmd"
     "assets\icons\autody.ico" = "assets\icons\autody.ico"
     "message-packs\cute-style.txt" = "message-packs\cute-style.txt"
     "message-packs\daily-greeting.txt" = "message-packs\daily-greeting.txt"
@@ -510,6 +512,7 @@ $moduleArchive = Join-Path $Stage "optional-modules\AutoDy-Test-Center.autody-mo
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $moduleArchive) | Out-Null
 $moduleCommand = "from pathlib import Path; from autody.modules import build_official_module_archive; build_official_module_archive(Path(r'$moduleArchive'))"
 Invoke-NativeChecked "Build optional Test Center package" $HostPython @("-c", $moduleCommand)
+"installed" | Set-Content -LiteralPath (Join-Path $Stage "runtime\distribution-mode.txt") -Encoding ascii -NoNewline
 
 $allowedExact = @($releaseFiles.Values) + @("optional-modules\AutoDy-Test-Center.autody-module.zip")
 $stagedFiles = @(Get-ChildItem -LiteralPath $Stage -Recurse -Force -File)
@@ -543,6 +546,11 @@ foreach ($file in $stagedFiles) {
         $relative = $file.FullName.Substring($Stage.Length + 1)
         throw "MSI staging contains a private absolute path in: $relative"
     }
+}
+
+if ($StageOnly) {
+    Write-Host "Standalone runtime stage: $Stage"
+    return
 }
 
 $xmlSettings = New-Object System.Xml.XmlWriterSettings

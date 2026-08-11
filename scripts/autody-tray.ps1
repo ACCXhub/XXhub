@@ -11,18 +11,15 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
-$PackagedPython = Join-Path $ProjectRoot "runtime\python\python.exe"
-$IsPackaged = Test-Path -LiteralPath $PackagedPython -PathType Leaf
-if (-not $DataRoot) {
-    $DataRoot = if ($IsPackaged) {
-        Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "AutoDy"
-    } else {
-        $ProjectRoot
-    }
-}
-$DataRoot = [IO.Path]::GetFullPath($DataRoot)
+. (Join-Path $PSScriptRoot "resolve-runtime-roots.ps1")
+$RuntimeContext = Resolve-AutoDyLaunchContext -ProgramRoot $ProjectRoot -DataRoot $DataRoot
+$ProjectRoot = $RuntimeContext.ProgramRoot
+$DataRoot = $RuntimeContext.DataRoot
+$Python = $RuntimeContext.Python
+$BrowserRoot = $RuntimeContext.BrowserRoot
+$DistributionMode = $RuntimeContext.DistributionMode
+$IsPackaged = $RuntimeContext.IsPackaged
 New-Item -ItemType Directory -Force -Path $DataRoot | Out-Null
-$Python = if ($IsPackaged) { $PackagedPython } else { Join-Path $ProjectRoot ".venv\Scripts\python.exe" }
 $Config = Join-Path $DataRoot "config.yaml"
 $PackagePath = if ($IsPackaged) {
     Join-Path $ProjectRoot "runtime\python\Lib\site-packages\autody"
@@ -35,11 +32,6 @@ $script:ServicePort = $PreferredPort
 $script:Url = "http://127.0.0.1:$PreferredPort"
 $env:AUTODY_HOME = $DataRoot
 $env:AUTODY_PROGRAM_ROOT = $ProjectRoot
-$BrowserRoot = if ($IsPackaged) {
-    Join-Path $ProjectRoot "runtime\ms-playwright"
-} else {
-    Join-Path $DataRoot "data\ms-playwright"
-}
 $env:AUTODY_BROWSERS_PATH = $BrowserRoot
 $env:PLAYWRIGHT_BROWSERS_PATH = $BrowserRoot
 $env:PLAYWRIGHT_SKIP_BROWSER_GC = "1"
@@ -57,13 +49,13 @@ if ($IsPackaged) {
     }
     $packSource = Join-Path $ProjectRoot "message-packs"
     $packDestination = Join-Path $DataRoot "message-packs"
-    if (Test-Path -LiteralPath $packSource -PathType Container) {
+    if ($packSource -ine $packDestination -and (Test-Path -LiteralPath $packSource -PathType Container)) {
         New-Item -ItemType Directory -Force -Path $packDestination | Out-Null
         Get-ChildItem -LiteralPath $packSource -File | Copy-Item -Destination $packDestination -Force
     }
     $moduleSource = Join-Path $ProjectRoot "optional-modules\AutoDy-Test-Center.autody-module.zip"
     $moduleDestination = Join-Path $DataRoot "optional-modules\AutoDy-Test-Center.autody-module.zip"
-    if (Test-Path -LiteralPath $moduleSource -PathType Leaf) {
+    if ($moduleSource -ine $moduleDestination -and (Test-Path -LiteralPath $moduleSource -PathType Leaf)) {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $moduleDestination) | Out-Null
         Copy-Item -LiteralPath $moduleSource -Destination $moduleDestination -Force
     }

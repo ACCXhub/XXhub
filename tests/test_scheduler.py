@@ -605,6 +605,10 @@ def test_packaged_scheduler_repair_crosses_powershell_native_boolean_boundary(
         Path("scripts/install-task.ps1").read_text(encoding="utf-8-sig"),
         encoding="utf-8",
     )
+    (scripts / "resolve-runtime-roots.ps1").write_text(
+        Path("scripts/resolve-runtime-roots.ps1").read_text(encoding="utf-8-sig"),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(scheduler, "_is_process_elevated", lambda: True)
 
     with pytest.raises(RuntimeError) as exc_info:

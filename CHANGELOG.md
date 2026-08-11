@@ -21,6 +21,7 @@
 - 增加开始菜单卸载快捷方式、安装目录向导和升级/修复目录复用。
 - 增加确定性 MSI 输出与统一的 SHA-256、manifest、allowlist 验证。
 - CI 在发行检查失败时保留受控隐私诊断，便于定位不合规 payload。
+- 增加真正 standalone 的 Windows portable：内含固定 Python、native 扩展、Playwright/Chromium、生产前端、文案包和官方模块，并提供顶层 `AutoDy.cmd`。
 
 ### Changed
 
@@ -35,7 +36,8 @@
 - 好友管理保留整行一键加入/取消续火、取消后立即重新加入，以及全量启用、停用和删除操作。
 - MSI 构建显式使用 Release，Debug 中间 MSI 使用明显的非发布文件名。
 - portable 与官方模块 ZIP 使用排序、固定时间戳和规范 LF 行尾生成可复现归档。
-- 文档明确区分普通用户 MSI、需要 Python 的 portable 与开发者 Source ZIP/TAR。
+- MSI 与 portable 复用同一受控 runtime staging；分发标记和共享 resolver 统一解析 ProgramRoot、DataRoot、Python 与 Chromium，portable 数据固定保存在解包目录。
+- 文档明确区分普通用户 MSI、standalone portable 与开发者 Source ZIP/TAR。
 
 ### Fixed
 
@@ -43,6 +45,7 @@
 - 修复 Task Scheduler 将同一 Principal 读回为账户名时与 SID 原始字符串比较导致的虚假漂移，以及写操作成功后页面短暂保留旧任务缓存的问题。
 - 修复历史成功日依赖今天启用目标配置、配置变化会追溯改写过去统计的问题。
 - 修复提升 MSI 从管理员进程 %LOCALAPPDATA% 推断数据根，导致任务 Principal 与 DataRoot 分裂的问题。
+- 修复 MSI 卸载后遗留指向已删除 ProgramRoot 的 Windows 计划任务；卸载现在调用既有移除脚本删除任务，同时继续保留用户 DataRoot。
 - 拒绝陈旧或失效的已登记安装路径，避免向未知旧目录写入 payload。
 - 修复干净源码缺少 .venv/config.yaml 时 README 首条命令必然失败的问题。
 - 修复 PowerShell 5.1 将成功 native 命令的 stderr warning 当作终止错误的问题。

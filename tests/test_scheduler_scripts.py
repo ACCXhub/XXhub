@@ -9,7 +9,7 @@ def test_install_script_has_required_scheduler_contract():
         "07:30",
         "StartWhenAvailable",
         "IgnoreNew",
-        ".venv\\Scripts\\python.exe",
+        "Resolve-AutoDyLaunchContext",
         "Register-ScheduledTask",
         "-ErrorAction Stop",
         "Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop",
@@ -75,6 +75,9 @@ def test_daily_send_task_repeats_under_scheduler_until_recovery_deadline():
         "same-day recovery repetition is disabled",
     ]:
         assert token in text
+    resolver = Path("scripts/resolve-runtime-roots.ps1").read_text(encoding="utf-8-sig")
+    assert ".venv\\Scripts\\python.exe" in resolver
+    assert "runtime\\python\\python.exe" in resolver
     assert "[string]$TaskUserId" in text
     assert "New-ScheduledTaskPrincipal -UserId $PrincipalUserId" in text
     assert "-RunLevel Limited" in text
@@ -170,18 +173,19 @@ Write-Output ('__RESULT__' + ($result | ConvertTo-Json -Compress))
 def test_source_launchers_use_project_local_python_not_console_entrypoint():
     startup = Path("scripts/start-dashboard.ps1").read_text(encoding="utf-8-sig")
     tray = Path("scripts/autody-tray.ps1").read_text(encoding="utf-8-sig")
+    resolver = Path("scripts/resolve-runtime-roots.ps1").read_text(encoding="utf-8-sig")
     assert "autody-tray.ps1" in startup
-    assert ".venv\\Scripts\\python.exe" in tray
+    assert "Resolve-AutoDyLaunchContext" in tray
+    assert ".venv\\Scripts\\python.exe" in resolver
+    assert "runtime\\python\\python.exe" in resolver
     assert "autody.cli" in tray
     for path in [Path("scripts/run-scheduled.ps1"), Path("scripts/health-check.ps1")]:
         text = path.read_text(encoding="utf-8-sig")
-        assert ".venv\\Scripts\\python.exe" in text
-        assert "runtime\\python\\python.exe" in text
+        assert "Resolve-AutoDyLaunchContext" in text
         assert "[string]$DataRoot" in text
         assert "autody.cli" in text
     installer = Path("scripts/install-task.ps1").read_text(encoding="utf-8-sig")
-    assert ".venv\\Scripts\\python.exe" in installer
-    assert "runtime\\python\\python.exe" in installer
+    assert "Resolve-AutoDyLaunchContext" in installer
     assert '-DataRoot `"$DataRoot`"' in installer
 
 

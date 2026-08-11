@@ -20,13 +20,11 @@ $ErrorActionPreference = "Stop"
 $TaskName = "AutoDy-DailySpark"
 $Root = if ($ProgramRoot) { [IO.Path]::GetFullPath($ProgramRoot) } else { (Resolve-Path (Join-Path $PSScriptRoot "..")).Path }
 $DataRoot = if ($DataRoot) { [IO.Path]::GetFullPath($DataRoot) } elseif ($env:AUTODY_HOME) { [IO.Path]::GetFullPath($env:AUTODY_HOME) } else { $Root }
-$Python = if (Test-Path -LiteralPath (Join-Path $Root "runtime\python\python.exe")) {
-    Join-Path $Root "runtime\python\python.exe"
-} else {
-    Join-Path $Root ".venv\Scripts\python.exe"
-}
+. (Join-Path $PSScriptRoot "resolve-runtime-roots.ps1")
+$RuntimeContext = Resolve-AutoDyLaunchContext -ProgramRoot $Root -DataRoot $DataRoot
+$Python = $RuntimeContext.Python
 
-if (-not (Test-Path $Python)) { throw "Missing $Python. Create .venv and install the project first." }
+if (-not (Test-Path $Python)) { throw "Missing AutoDy Python runtime: $Python" }
 if (-not (Test-Path (Join-Path $DataRoot "config.yaml"))) { throw "Missing config.yaml. Start AutoDy once before installing scheduled tasks." }
 
 $PowerShell = (Get-Command powershell.exe).Source
