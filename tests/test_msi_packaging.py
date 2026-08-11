@@ -91,6 +91,7 @@ def test_msi_upgrade_repairs_scheduler_from_canonical_config_and_roots():
         if item.attrib.get("Property") == "RepairInstalledAutoDyTasks"
     )
     assert "runtime\\python\\python.exe" in command
+    assert 'python.exe" -B -m autody.cli repair-scheduler' in command
     assert "repair-scheduler" in command
     assert "[AUTODYDATAROOT]config.yaml" in command
     assert '--program-root "[INSTALLFOLDER]."' in command

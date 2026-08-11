@@ -108,7 +108,7 @@
     <CustomAction
       Id="SetRepairInstalledAutoDyTasksData"
       Property="RepairInstalledAutoDyTasks"
-      Value="&quot;[INSTALLFOLDER]runtime\python\python.exe&quot; -m autody.cli repair-scheduler --config &quot;[AUTODYDATAROOT]config.yaml&quot; --program-root &quot;[INSTALLFOLDER].&quot; --data-root &quot;[AUTODYDATAROOT].&quot; --task-user-id &quot;[AUTODY_INTERACTIVE_USER_SID]&quot;"
+      Value="&quot;[INSTALLFOLDER]runtime\python\python.exe&quot; -B -m autody.cli repair-scheduler --config &quot;[AUTODYDATAROOT]config.yaml&quot; --program-root &quot;[INSTALLFOLDER].&quot; --data-root &quot;[AUTODYDATAROOT].&quot; --task-user-id &quot;[AUTODY_INTERACTIVE_USER_SID]&quot;"
       Execute="immediate" />
     <CustomAction
       Id="RepairInstalledAutoDyTasks"

@@ -212,6 +212,7 @@ function Assert-MsiUi {
         'SELECT `Action`,`Type`,`Source`,`Target` FROM `CustomAction`' 4)
     $repairData = @($customActions | Where-Object {
         $_.Values[0] -eq "SetRepairInstalledAutoDyTasksData" -and
+        $_.Values[3] -like '* -B -m autody.cli repair-scheduler*' -and
         $_.Values[3] -like '*--data-root*' -and
         $_.Values[3] -like '*--task-user-id*' -and
         $_.Values[3] -notlike '*--if-config-exists*'
