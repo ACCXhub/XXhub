@@ -84,7 +84,7 @@ def test_daily_send_task_repeats_under_scheduler_until_recovery_deadline():
     assert "WindowsIdentity]::GetCurrent().Name" not in text
 
 
-def test_scheduler_repair_defines_the_daily_send_start_in_the_future(
+def test_scheduler_repair_defines_future_send_and_hidden_task_actions(
     tmp_path: Path,
 ):
     program_root = tmp_path / "program"
@@ -125,7 +125,7 @@ function New-ScheduledTaskTrigger {{
 function Register-ScheduledTask {{
     param($TaskName, $Action, $Trigger, $Settings, $Principal, $Description, [switch]$Force)
     $global:Registered[$TaskName] = [pscustomobject]@{{
-        Triggers = @($Trigger); Settings = $Settings
+        Actions = @($Action); Triggers = @($Trigger); Settings = $Settings
     }}
 }}
 function Get-ScheduledTask {{
@@ -138,13 +138,16 @@ function Get-ScheduledTask {{
     -DailyHealthCheckTime '00:01' `
     -DailySendTime '00:01' `
     -RecoveryDeadline '23:59' `
-    -WeeklyHealthCheckEnabled 0
+    -WeeklyHealthCheckEnabled 1
 $trigger = $global:Registered['AutoDy-DailySpark'].Triggers[0]
 $start = [datetime]$trigger.StartBoundary
 $result = [pscustomobject]@{{
     start_is_future = $start -gt (Get-Date)
     start_time = $start.ToString('HH:mm')
     hours_until_start = ($start - (Get-Date)).TotalHours
+    run_arguments = $global:Registered['AutoDy-DailySpark'].Actions[0].Arguments
+    daily_health_arguments = $global:Registered['AutoDy-Health-Daily'].Actions[0].Arguments
+    weekly_health_arguments = $global:Registered['AutoDy-Health-Weekly'].Actions[0].Arguments
 }}
 Write-Output ('__RESULT__' + ($result | ConvertTo-Json -Compress))
 '''
@@ -168,6 +171,10 @@ Write-Output ('__RESULT__' + ($result | ConvertTo-Json -Compress))
     assert payload["start_is_future"] is True
     assert payload["start_time"] == "00:01"
     assert 0 < payload["hours_until_start"] <= 24
+    for key in ["run_arguments", "daily_health_arguments", "weekly_health_arguments"]:
+        assert payload[key].startswith(
+            "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "
+        )
 
 
 def test_source_launchers_use_project_local_python_not_console_entrypoint():

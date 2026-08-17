@@ -45,8 +45,8 @@ $PrincipalUserId = if ($TaskUserId) {
 }
 $Principal = New-ScheduledTaskPrincipal -UserId $PrincipalUserId -LogonType Interactive -RunLevel Limited
 $TaskArguments = "-ProgramRoot `"$Root`" -DataRoot `"$DataRoot`""
-$RunAction = New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$RunScript`" $TaskArguments" -WorkingDirectory $Root
-$HealthAction = New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$HealthScript`" $TaskArguments" -WorkingDirectory $Root
+$RunAction = New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$RunScript`" $TaskArguments" -WorkingDirectory $Root
+$HealthAction = New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$HealthScript`" $TaskArguments" -WorkingDirectory $Root
 $DailyStart = [datetime]::ParseExact($DailySendTime, "HH:mm", [Globalization.CultureInfo]::InvariantCulture)
 $RecoveryEnd = [datetime]::ParseExact($RecoveryDeadline, "HH:mm", [Globalization.CultureInfo]::InvariantCulture)
 $RecoveryDuration = $RecoveryEnd - $DailyStart

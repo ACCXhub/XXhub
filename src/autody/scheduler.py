@@ -668,6 +668,12 @@ def scheduler_status_rows(
             if require_runtime_metadata or "arguments" in live:
                 checks.extend(
                     (
+                        re.search(
+                            r"(?:^|\s)-WindowStyle\s+Hidden(?:\s|$)",
+                            arguments,
+                            flags=re.IGNORECASE,
+                        )
+                        is None,
                         _normalized_path(_argument_path(arguments, "File"))
                         != _normalized_path(program_root / "scripts" / script_name),
                         _normalized_path(_argument_path(arguments, "ProgramRoot"))

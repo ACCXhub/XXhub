@@ -32,10 +32,12 @@ def expected_task_rows(
     task_user_id: str | None = None,
 ) -> list[dict]:
     health_arguments = (
+        '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass '
         f'-File "{program_root / "scripts" / "health-check.ps1"}" '
         f'-ProgramRoot "{program_root}" -DataRoot "{data_root}"'
     )
     send_arguments = (
+        '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass '
         f'-File "{program_root / "scripts" / "run-scheduled.ps1"}" '
         f'-ProgramRoot "{program_root}" -DataRoot "{data_root}"'
     )
@@ -634,6 +636,26 @@ def test_scheduler_repair_fails_when_registered_task_drifts(
     )
     with pytest.raises(RuntimeError, match="定时任务修复后验证失败"):
         service.repair(config)
+
+
+def test_scheduler_status_detects_visible_powershell_actions_as_drift(tmp_path: Path):
+    program_root = (tmp_path / "program").resolve()
+    data_root = (tmp_path / "data").resolve()
+    config = AppConfig(targets=[Target(name="fixture")])
+    rows = expected_task_rows(program_root, data_root, config)
+    for row in rows:
+        row["arguments"] = row["arguments"].replace("-WindowStyle Hidden ", "")
+
+    statuses = scheduler_status_rows(
+        config,
+        rows,
+        1,
+        program_root=program_root,
+        data_root=data_root,
+        require_runtime_metadata=True,
+    )
+
+    assert all(row["drift_reason"] == "runtime_root_mismatch" for row in statuses)
 
 
 def test_scheduler_repair_fails_when_required_task_is_missing(tmp_path: Path):
