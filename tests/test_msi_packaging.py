@@ -245,6 +245,7 @@ def test_msi_builder_uses_explicit_allowlist_and_clean_runtime():
         "$releaseFiles = [ordered]@{",
         "scripts\\install-shortcut.ps1",
         "scripts\\resolve-runtime-roots.ps1",
+        "scripts\\scheduled-task-launcher.vbs",
         "runtime\\python\\python.exe",
         "runtime\\ms-playwright",
         "packaging\\runtime-requirements.txt",

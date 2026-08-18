@@ -537,13 +537,12 @@ def _normalized_path(path: str | Path | None) -> str:
     return os.path.normcase(os.path.normpath(str(path))).rstrip("\\/")
 
 
-def _argument_path(arguments: str, name: str) -> str | None:
-    match = re.search(
-        rf'(?:^|\s)-{re.escape(name)}\s+(?:"([^"]+)"|(\S+))',
+def _scheduled_action_paths(arguments: str) -> tuple[str, str, str, str] | None:
+    match = re.fullmatch(
+        r'\s*"([^"]+)"\s+"([^"]+)"\s+"([^"]+)"\s+"([^"]+)"\s*',
         arguments,
-        flags=re.IGNORECASE,
     )
-    return (match.group(1) or match.group(2)) if match else None
+    return match.groups() if match else None
 
 
 def _clock_minutes(value: str) -> int:
@@ -663,25 +662,33 @@ def scheduler_status_rows(
                     .replace("/", "\\")
                     .rsplit("\\", 1)[-1]
                     .casefold()
-                    != "powershell.exe"
+                    != "wscript.exe"
                 )
             if require_runtime_metadata or "arguments" in live:
-                checks.extend(
-                    (
-                        re.search(
-                            r"(?:^|\s)-WindowStyle\s+Hidden(?:\s|$)",
-                            arguments,
-                            flags=re.IGNORECASE,
-                        )
-                        is None,
-                        _normalized_path(_argument_path(arguments, "File"))
-                        != _normalized_path(program_root / "scripts" / script_name),
-                        _normalized_path(_argument_path(arguments, "ProgramRoot"))
-                        != _normalized_path(program_root),
-                        _normalized_path(_argument_path(arguments, "DataRoot"))
-                        != _normalized_path(data_root),
+                action_paths = _scheduled_action_paths(arguments)
+                checks.append(action_paths is None)
+                if action_paths is not None:
+                    launcher, script, action_program_root, action_data_root = (
+                        action_paths
                     )
-                )
+                    checks.extend(
+                        (
+                            _normalized_path(launcher)
+                            != _normalized_path(
+                                program_root
+                                / "scripts"
+                                / "scheduled-task-launcher.vbs"
+                            ),
+                            _normalized_path(script)
+                            != _normalized_path(
+                                program_root / "scripts" / script_name
+                            ),
+                            _normalized_path(action_program_root)
+                            != _normalized_path(program_root),
+                            _normalized_path(action_data_root)
+                            != _normalized_path(data_root),
+                        )
+                    )
             if require_runtime_metadata or "working_directory" in live:
                 checks.append(
                     _normalized_path(live.get("working_directory"))

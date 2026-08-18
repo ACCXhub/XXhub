@@ -84,7 +84,7 @@ def test_daily_send_task_repeats_under_scheduler_until_recovery_deadline():
     assert "WindowsIdentity]::GetCurrent().Name" not in text
 
 
-def test_scheduler_repair_defines_future_send_and_hidden_task_actions(
+def test_scheduler_repair_defines_future_send_and_windowless_task_actions(
     tmp_path: Path,
 ):
     program_root = tmp_path / "program"
@@ -145,8 +145,11 @@ $result = [pscustomobject]@{{
     start_is_future = $start -gt (Get-Date)
     start_time = $start.ToString('HH:mm')
     hours_until_start = ($start - (Get-Date)).TotalHours
+    run_execute = $global:Registered['AutoDy-DailySpark'].Actions[0].Execute
     run_arguments = $global:Registered['AutoDy-DailySpark'].Actions[0].Arguments
+    daily_health_execute = $global:Registered['AutoDy-Health-Daily'].Actions[0].Execute
     daily_health_arguments = $global:Registered['AutoDy-Health-Daily'].Actions[0].Arguments
+    weekly_health_execute = $global:Registered['AutoDy-Health-Weekly'].Actions[0].Execute
     weekly_health_arguments = $global:Registered['AutoDy-Health-Weekly'].Actions[0].Arguments
 }}
 Write-Output ('__RESULT__' + ($result | ConvertTo-Json -Compress))
@@ -171,10 +174,60 @@ Write-Output ('__RESULT__' + ($result | ConvertTo-Json -Compress))
     assert payload["start_is_future"] is True
     assert payload["start_time"] == "00:01"
     assert 0 < payload["hours_until_start"] <= 24
-    for key in ["run_arguments", "daily_health_arguments", "weekly_health_arguments"]:
-        assert payload[key].startswith(
-            "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "
-        )
+    for key in ["run_execute", "daily_health_execute", "weekly_health_execute"]:
+        assert Path(payload[key]).name.casefold() == "wscript.exe"
+    launcher = program_root / "scripts" / "scheduled-task-launcher.vbs"
+    assert payload["run_arguments"] == (
+        f'"{launcher}" "{program_root / "scripts" / "run-scheduled.ps1"}" '
+        f'"{program_root}" "{data_root}"'
+    )
+    expected_health_arguments = (
+        f'"{launcher}" "{program_root / "scripts" / "health-check.ps1"}" '
+        f'"{program_root}" "{data_root}"'
+    )
+    assert payload["daily_health_arguments"] == expected_health_arguments
+    assert payload["weekly_health_arguments"] == expected_health_arguments
+
+
+def test_windowless_task_launcher_waits_and_propagates_child_result(tmp_path: Path):
+    launcher = Path("scripts/scheduled-task-launcher.vbs").resolve()
+    assert launcher.is_file(), "scheduled task launcher is missing"
+    program_root = tmp_path / "program root"
+    data_root = tmp_path / "data root"
+    program_root.mkdir()
+    data_root.mkdir()
+    child = tmp_path / "child task.ps1"
+    result_path = data_root / "launcher-result.json"
+    child.write_text(
+        """
+param([string]$ProgramRoot, [string]$DataRoot)
+[pscustomobject]@{
+    program_root = $ProgramRoot
+    data_root = $DataRoot
+} | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $DataRoot 'launcher-result.json') -Encoding utf8
+Start-Sleep -Milliseconds 200
+exit 7
+""".strip(),
+        encoding="utf-8-sig",
+    )
+
+    completed = subprocess.run(
+        [
+            "wscript.exe",
+            str(launcher),
+            str(child),
+            str(program_root),
+            str(data_root),
+        ],
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert completed.returncode == 7
+    payload = json.loads(result_path.read_text(encoding="utf-8-sig"))
+    assert Path(payload["program_root"]) == program_root
+    assert Path(payload["data_root"]) == data_root
 
 
 def test_source_launchers_use_project_local_python_not_console_entrypoint():
@@ -193,7 +246,7 @@ def test_source_launchers_use_project_local_python_not_console_entrypoint():
         assert "autody.cli" in text
     installer = Path("scripts/install-task.ps1").read_text(encoding="utf-8-sig")
     assert "Resolve-AutoDyLaunchContext" in installer
-    assert '-DataRoot `"$DataRoot`"' in installer
+    assert '$TaskArguments = "`"$Root`" `"$DataRoot`""' in installer
 
 
 def test_scheduled_wrappers_fail_closed_only_for_registered_installed_mode():

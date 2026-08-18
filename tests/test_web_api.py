@@ -362,7 +362,7 @@ def test_scheduler_status_rejects_task_action_from_another_runtime_root(
     assert "working_directory" not in send
 
 
-def test_scheduler_status_rejects_non_powershell_action_with_correct_roots(
+def test_scheduler_status_rejects_non_wscript_action_with_correct_roots(
     tmp_path: Path,
 ):
     data_root = tmp_path / "data-root"

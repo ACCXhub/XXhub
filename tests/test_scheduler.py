@@ -31,15 +31,14 @@ def expected_task_rows(
     config: AppConfig,
     task_user_id: str | None = None,
 ) -> list[dict]:
+    launcher = program_root / "scripts" / "scheduled-task-launcher.vbs"
     health_arguments = (
-        '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass '
-        f'-File "{program_root / "scripts" / "health-check.ps1"}" '
-        f'-ProgramRoot "{program_root}" -DataRoot "{data_root}"'
+        f'"{launcher}" "{program_root / "scripts" / "health-check.ps1"}" '
+        f'"{program_root}" "{data_root}"'
     )
     send_arguments = (
-        '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass '
-        f'-File "{program_root / "scripts" / "run-scheduled.ps1"}" '
-        f'-ProgramRoot "{program_root}" -DataRoot "{data_root}"'
+        f'"{launcher}" "{program_root / "scripts" / "run-scheduled.ps1"}" '
+        f'"{program_root}" "{data_root}"'
     )
     recovery_minutes = (
         int(config.recovery_deadline[:2]) * 60
@@ -52,7 +51,7 @@ def expected_task_rows(
             "name": "AutoDy-Health-Daily",
             "state": "Ready",
             "start_boundary": f"2026-08-10T{config.daily_health_check_time}:00",
-            "execute": "powershell.exe",
+            "execute": "wscript.exe",
             "arguments": health_arguments,
             "working_directory": str(program_root),
             "principal_user_id": task_user_id or "",
@@ -63,7 +62,7 @@ def expected_task_rows(
             "start_boundary": f"2026-08-10T{config.daily_send_time}:00",
             "repetition_interval": f"PT{min(30, recovery_minutes)}M" if recovery_minutes else "",
             "repetition_duration": f"PT{recovery_minutes}M" if recovery_minutes else "",
-            "execute": "powershell.exe",
+            "execute": "wscript.exe",
             "arguments": send_arguments,
             "working_directory": str(program_root),
             "principal_user_id": task_user_id or "",
@@ -75,7 +74,7 @@ def expected_task_rows(
                 "name": "AutoDy-Health-Weekly",
                 "state": "Ready",
                 "start_boundary": f"2026-08-10T{config.weekly_health_check_time}:00",
-                "execute": "powershell.exe",
+                "execute": "wscript.exe",
                 "arguments": health_arguments,
                 "working_directory": str(program_root),
                 "principal_user_id": task_user_id or "",
@@ -644,7 +643,17 @@ def test_scheduler_status_detects_visible_powershell_actions_as_drift(tmp_path: 
     config = AppConfig(targets=[Target(name="fixture")])
     rows = expected_task_rows(program_root, data_root, config)
     for row in rows:
-        row["arguments"] = row["arguments"].replace("-WindowStyle Hidden ", "")
+        script_name = (
+            "run-scheduled.ps1"
+            if row["name"] == "AutoDy-DailySpark"
+            else "health-check.ps1"
+        )
+        row["execute"] = "powershell.exe"
+        row["arguments"] = (
+            '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass '
+            f'-File "{program_root / "scripts" / script_name}" '
+            f'-ProgramRoot "{program_root}" -DataRoot "{data_root}"'
+        )
 
     statuses = scheduler_status_rows(
         config,
@@ -656,6 +665,36 @@ def test_scheduler_status_detects_visible_powershell_actions_as_drift(tmp_path: 
     )
 
     assert all(row["drift_reason"] == "runtime_root_mismatch" for row in statuses)
+
+
+def test_scheduler_status_accepts_windowless_wscript_actions(tmp_path: Path):
+    program_root = (tmp_path / "program").resolve()
+    data_root = (tmp_path / "data").resolve()
+    config = AppConfig(targets=[Target(name="fixture")])
+    rows = expected_task_rows(program_root, data_root, config)
+    launcher = program_root / "scripts" / "scheduled-task-launcher.vbs"
+    for row in rows:
+        script_name = (
+            "run-scheduled.ps1"
+            if row["name"] == "AutoDy-DailySpark"
+            else "health-check.ps1"
+        )
+        row["execute"] = r"C:\Windows\System32\wscript.exe"
+        row["arguments"] = (
+            f'"{launcher}" "{program_root / "scripts" / script_name}" '
+            f'"{program_root}" "{data_root}"'
+        )
+
+    statuses = scheduler_status_rows(
+        config,
+        rows,
+        1,
+        program_root=program_root,
+        data_root=data_root,
+        require_runtime_metadata=True,
+    )
+
+    assert all(row["drift_reason"] is None for row in statuses)
 
 
 def test_scheduler_repair_fails_when_required_task_is_missing(tmp_path: Path):

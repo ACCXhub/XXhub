@@ -27,7 +27,8 @@ $Python = $RuntimeContext.Python
 if (-not (Test-Path $Python)) { throw "Missing AutoDy Python runtime: $Python" }
 if (-not (Test-Path (Join-Path $DataRoot "config.yaml"))) { throw "Missing config.yaml. Start AutoDy once before installing scheduled tasks." }
 
-$PowerShell = (Get-Command powershell.exe).Source
+$WScript = (Get-Command wscript.exe).Source
+$Launcher = Join-Path $Root "scripts\scheduled-task-launcher.vbs"
 $RunScript = Join-Path $Root "scripts\run-scheduled.ps1"
 $HealthScript = Join-Path $Root "scripts\health-check.ps1"
 $RunSettings = New-ScheduledTaskSettingsSet `
@@ -44,9 +45,9 @@ $PrincipalUserId = if ($TaskUserId) {
     [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 }
 $Principal = New-ScheduledTaskPrincipal -UserId $PrincipalUserId -LogonType Interactive -RunLevel Limited
-$TaskArguments = "-ProgramRoot `"$Root`" -DataRoot `"$DataRoot`""
-$RunAction = New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$RunScript`" $TaskArguments" -WorkingDirectory $Root
-$HealthAction = New-ScheduledTaskAction -Execute $PowerShell -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$HealthScript`" $TaskArguments" -WorkingDirectory $Root
+$TaskArguments = "`"$Root`" `"$DataRoot`""
+$RunAction = New-ScheduledTaskAction -Execute $WScript -Argument "`"$Launcher`" `"$RunScript`" $TaskArguments" -WorkingDirectory $Root
+$HealthAction = New-ScheduledTaskAction -Execute $WScript -Argument "`"$Launcher`" `"$HealthScript`" $TaskArguments" -WorkingDirectory $Root
 $DailyStart = [datetime]::ParseExact($DailySendTime, "HH:mm", [Globalization.CultureInfo]::InvariantCulture)
 $RecoveryEnd = [datetime]::ParseExact($RecoveryDeadline, "HH:mm", [Globalization.CultureInfo]::InvariantCulture)
 $RecoveryDuration = $RecoveryEnd - $DailyStart

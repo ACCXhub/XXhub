@@ -483,6 +483,7 @@ $releaseFiles = [ordered]@{
     "scripts\repair-playwright.ps1" = "scripts\repair-playwright.ps1"
     "scripts\resolve-runtime-roots.ps1" = "scripts\resolve-runtime-roots.ps1"
     "scripts\run-scheduled.ps1" = "scripts\run-scheduled.ps1"
+    "scripts\scheduled-task-launcher.vbs" = "scripts\scheduled-task-launcher.vbs"
     "scripts\start-dashboard.cmd" = "scripts\start-dashboard.cmd"
     "scripts\start-dashboard.ps1" = "scripts\start-dashboard.ps1"
     "scripts\start-dashboard.vbs" = "scripts\start-dashboard.vbs"
