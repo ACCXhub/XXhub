@@ -55,6 +55,34 @@ test("lists provenance, previews a pack, and keeps global import action", async 
   expect(await screen.findByText(/新增 2 条/)).toBeInTheDocument();
 });
 
+test("requires confirmation before replacing the global message library", async () => {
+  vi.mocked(api.importMessagePack).mockResolvedValue({
+    added_count: 2, duplicate_count: 0, total_count: 2,
+    backup_path: "data/backups/messages.txt", mode: "replace"
+  });
+  render(<MessagePacksPage notify={vi.fn()} />);
+  await screen.findAllByText("日常问候");
+
+  fireEvent.click(screen.getAllByRole("button", { name: "覆盖全局文案" })[0]);
+
+  const dialog = screen.getByRole("dialog", { name: "确认覆盖全局文案" });
+  expect(dialog).toHaveTextContent("将用「日常问候」的 2 条文案覆盖当前全局文案。原有全局文案将被替换。");
+  expect(api.importMessagePack).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "确认覆盖" }));
+  await waitFor(() => expect(api.importMessagePack).toHaveBeenCalledWith("daily", "replace"));
+});
+
+test("cancelling global message replacement does not call the import api", async () => {
+  render(<MessagePacksPage notify={vi.fn()} />);
+  await screen.findAllByText("日常问候");
+
+  fireEvent.click(screen.getAllByRole("button", { name: "覆盖全局文案" })[0]);
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+
+  expect(screen.queryByRole("dialog", { name: "确认覆盖全局文案" })).not.toBeInTheDocument();
+  expect(api.importMessagePack).not.toHaveBeenCalled();
+});
+
 test("creates an empty pack and imports a txt as a new pack", async () => {
   const empty = { ...other, id: "empty", name: "新建文案包", count: 0 };
   vi.mocked(api.createMessagePack).mockResolvedValue({

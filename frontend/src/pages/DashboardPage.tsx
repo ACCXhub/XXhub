@@ -59,7 +59,7 @@ export function DashboardPage({
           <ActionButton disabled={!!busy} icon={<ShieldCheck size={17} />} onClick={() => onAction("health-check")}>检查登录</ActionButton>
           <ActionButton disabled={!!busy} primary icon={<Play size={17} fill="currentColor" />} onClick={() => onAction("run")}>立即运行</ActionButton>
           <ActionButton disabled={!!busy} icon={<ScanLine size={17} />} onClick={() => onAction("login")}>扫码登录</ActionButton>
-          <ActionButton disabled={!!busy} icon={<Wrench size={17} />} onClick={() => onAction("repair-playwright")}>修复运行时</ActionButton>
+          <ActionButton disabled={!!busy} icon={<Wrench size={17} />} onClick={() => onAction("diagnose-and-repair")}>一键诊断与修复</ActionButton>
         </div>
       </header>
       <StatusRail status={status} />

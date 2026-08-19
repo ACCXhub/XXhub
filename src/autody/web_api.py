@@ -1171,6 +1171,17 @@ def create_app(
         task_cache["rows"] = []
         task_cache["expires"] = 0.0
 
+    def finish_repair_action(action: str) -> dict:
+        job = run_action(action)
+        if job.get("status") != "running" or action_runner is not None:
+            return job
+        for _ in range(2400):
+            current = manager.get(str(job.get("id", "")))
+            if current is None or current.get("status") != "running":
+                return current or job
+            time.sleep(0.25)
+        return {**job, "status": "failed", "exit_code": None}
+
     @app.get("/api/service-identity")
     def service_identity():
         package_path = Path(__file__).resolve().parent
@@ -1185,6 +1196,86 @@ def create_app(
             "frontend_static_path": str(Path(__file__).parent / "web" / "static"),
             "bundled_module": bundled_module,
             "startup_error": bundled_module_error,
+        }
+
+    @app.post("/api/repair")
+    def diagnose_and_repair():
+        before = status()
+        config = load_config(config_path)
+        repaired: list[dict[str, str]] = []
+        manual: list[dict[str, str]] = []
+        checks: list[dict[str, str]] = []
+
+        if _runtime_available(root):
+            checks.append({"id": "runtime", "label": "浏览器运行时正常"})
+        else:
+            try:
+                job = finish_repair_action("repair-playwright")
+                if job.get("status") == "success" and _runtime_available(root):
+                    repaired.append({"id": "runtime", "label": "浏览器运行时已恢复"})
+                else:
+                    manual.append({"id": "runtime", "label": "浏览器运行时未能自动恢复，请查看运行日志"})
+            except (ActionAlreadyRunning, RuntimeError) as exc:
+                manual.append({"id": "runtime", "label": f"浏览器运行时修复未完成：{exc}"})
+
+        scheduler_issue_ids = {"scheduler_missing", "scheduler_runtime_mismatch"}
+        scheduler_needs_repair = bool(
+            scheduler_issue_ids & {item["id"] for item in before["issues"]}
+            or any(
+                row.get("drift")
+                or row.get("installed") != row.get("configured_enabled")
+                for row in before["scheduler"]
+            )
+        )
+        if scheduler_needs_repair:
+            try:
+                dashboard_scheduler_service().repair(config)
+                invalidate_task_cache()
+                repaired.append({"id": "scheduler", "label": "Scheduler 已恢复"})
+            except RuntimeError as exc:
+                manual.append({"id": "scheduler", "label": f"Scheduler 未能自动恢复：{exc}"})
+        else:
+            checks.append({"id": "scheduler", "label": "Scheduler 状态正常"})
+
+        binding_guarded = bindings_revalidation_required(config.state_file.parent)
+        profile_missing = load_account_profile(root) is None
+        if (profile_missing or binding_guarded) and before["login"]["status"] != "failed":
+            try:
+                job = finish_repair_action("refresh-account-profile")
+                if job.get("status") == "success" and load_account_profile(root) is not None:
+                    repaired.append({"id": "account_profile", "label": "账号状态已刷新"})
+                elif profile_missing:
+                    manual.append({"id": "account_profile", "label": "当前账号资料无法自动验证，请手动刷新"})
+            except (ActionAlreadyRunning, RuntimeError) as exc:
+                manual.append({"id": "account_profile", "label": f"账号资料刷新未完成：{exc}"})
+        elif before["login"]["status"] == "failed":
+            manual.append({"id": "account_profile", "label": "登录已失效，请手动扫码登录"})
+        else:
+            checks.append({"id": "account_profile", "label": "账号状态正常"})
+
+        if binding_guarded:
+            if refresh_binding_guard(load_config(config_path)):
+                repaired.append({"id": "bindings", "label": "目标稳定绑定已恢复"})
+            else:
+                manual.append({
+                    "id": "bindings",
+                    "label": "无法用稳定身份确认原目标，已保留 needs_reassociation，请手动重新关联",
+                })
+        else:
+            checks.append({"id": "bindings", "label": "目标稳定绑定正常"})
+
+        repaired_count = len(repaired)
+        manual_count = len(manual)
+        summary = f"已修复 {repaired_count} 项"
+        if manual_count:
+            summary += f"；仍需手动处理 {manual_count} 项"
+        elif repaired_count == 0:
+            summary = "诊断完成，当前无需修复"
+        return {
+            "repaired": repaired,
+            "manual": manual,
+            "checks": checks,
+            "summary": summary,
         }
 
     @app.get("/api/status")

@@ -84,6 +84,16 @@ test("keeps Test Center panels out of the normal dashboard", async () => {
   expect(apiMocks.serviceIdentity).not.toHaveBeenCalled();
 });
 
+test("starts the safe one-click diagnosis and repair action", () => {
+  const onAction = vi.fn();
+  render(<DashboardPage status={status} busy={null} onAction={onAction} onNavigate={vi.fn()} />);
+
+  fireEvent.click(screen.getByRole("button", { name: "一键诊断与修复" }));
+
+  expect(onAction).toHaveBeenCalledWith("diagnose-and-repair");
+  expect(screen.queryByRole("button", { name: "修复运行时" })).not.toBeInTheDocument();
+});
+
 function failure(
   targetId: string,
   overrides: Partial<FailureDetail> = {}

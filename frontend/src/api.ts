@@ -17,7 +17,8 @@ import type {
   ServiceIdentity,
   TodayPlan,
   FailedTargetCenter,
-  TargetEffectiveSettings
+  TargetEffectiveSettings,
+  RepairSummary
 } from "./types";
 
 type ActionJob = {
@@ -59,6 +60,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   status: () => request<DashboardStatus>("/api/status"),
+  repair: () => request<RepairSummary>("/api/repair", { method: "POST" }),
   modules: () => request<{ modules: import("./types").OptionalModuleStatus[] }>("/api/modules"),
   installTestCenter: (file?: File) => {
     if (!file) return request<import("./types").OptionalModuleStatus>("/api/modules/autody-test-center/install", { method: "POST" });

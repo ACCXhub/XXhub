@@ -11,20 +11,30 @@ def test_tray_controller_has_a_real_single_instance_windows_host_and_expected_me
     for token in [
         "System.Threading.Mutex",
         "System.Windows.Forms.NotifyIcon",
-        "打开 AutoDy 管理台",
-        "查看当前状态",
-        "打开日志",
-        "重启管理台",
-        "启用/关闭开机启动",
-        "退出托盘",
-        "退出并停止 AutoDy",
+        "AutoDy ·",
+        "打开管理台",
+        "一键诊断与修复",
+        "查看运行日志",
+        "重新启动后台服务",
+        "隐藏托盘图标",
+        "完全退出 AutoDy",
         "启动中",
         "运行正常",
-        "正在安全重试",
+        "正在执行",
+        "正在修复",
         "需要处理",
         "已停止",
     ]:
         assert token in text
+
+    for retired in [
+        "查看当前状态", "重启管理台", "启用/关闭开机启动",
+        "退出托盘", "退出并停止 AutoDy",
+    ]:
+        assert retired not in text
+
+    assert '$status.Enabled = $false' in text
+    assert 'Invoke-RestMethod -Uri "$script:Url/api/repair" -Method Post' in text
 
 
 def test_tray_falls_back_from_an_unrelated_8765_owner_and_stops_only_verified_managed_service():
@@ -208,6 +218,19 @@ def test_tray_exit_does_not_change_scheduled_tasks_or_user_data():
     assert "Stop-ManagedService" not in exit_tray
     assert "Unregister-ScheduledTask" not in text
     assert "Remove-Item" not in text
+
+
+def test_tray_restart_and_exit_labels_map_to_their_real_actions():
+    text = Path("scripts/autody-tray.ps1").read_text(encoding="utf-8-sig")
+
+    restart = text[text.index("$restart.add_Click"):text.index("$repair.add_Click")]
+    hide = text[text.index("$exitTray.add_Click"):text.index("$exitStop.add_Click")]
+    stop = text[text.index("$exitStop.add_Click"):text.index("$timer =")]
+
+    assert "Stop-ManagedService" in restart
+    assert "Start-Or-ReuseService" in restart
+    assert "Stop-ManagedService" not in hide
+    assert "Stop-ManagedService" in stop
 
 
 def test_desktop_launcher_starts_the_tray_host():

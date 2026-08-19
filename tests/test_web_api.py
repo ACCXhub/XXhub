@@ -203,6 +203,141 @@ def test_status_degrades_when_an_optional_scheduler_section_fails(
     assert response.json()["statistics"]["next_daily_send"] is None
 
 
+def test_diagnose_and_repair_uses_existing_safe_repair_primitives(
+    tmp_path: Path,
+    monkeypatch,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets = [
+        Target(name="稳定目标", stable_id="target-stable", candidate_id="candidate-stable")
+    ]
+    save_config(config_path, config)
+    mark_bindings_for_revalidation(config.state_file.parent)
+    (tmp_path / "data" / "health.json").write_text(
+        '{"status":"success"}', encoding="utf-8"
+    )
+    (tmp_path / "data" / "discovered_friends.json").write_text(
+        json.dumps({
+            "scanned_at": "2026-08-19T08:00:00",
+            "account_scope": "stable-account-scope",
+            "candidates": [{
+                "candidate_id": "candidate-stable",
+                "display_name": "稳定目标",
+                "avatar_status": "missing",
+                "discovered_at": "2026-08-19T08:00:00",
+                "match_status": "configured",
+                "presence_status": "current",
+            }],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    runtime_available = False
+    actions: list[str] = []
+    scheduler_repairs: list[bool] = []
+
+    def run_action(action: str):
+        nonlocal runtime_available
+        actions.append(action)
+        if action == "repair-playwright":
+            runtime_available = True
+        elif action == "refresh-account-profile":
+            write_verified_account(tmp_path)
+        return {"id": f"job-{action}", "action": action, "status": "success", "exit_code": 0}
+
+    class RecordingSchedulerService:
+        def __init__(self, _program_root, **_kwargs):
+            pass
+
+        def repair(self, _config):
+            scheduler_repairs.append(True)
+
+    monkeypatch.setattr(
+        "autody.web_api._runtime_available", lambda _root: runtime_available
+    )
+    monkeypatch.setattr("autody.web_api.SchedulerService", RecordingSchedulerService)
+    monkeypatch.setattr("autody.scheduler.windows_task_rows", lambda: [])
+    client = TestClient(create_app(config_path, action_runner=run_action))
+
+    response = client.post("/api/repair")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert actions == ["repair-playwright", "refresh-account-profile"]
+    assert scheduler_repairs == [True]
+    assert {item["id"] for item in payload["repaired"]} == {
+        "runtime", "scheduler", "account_profile", "bindings"
+    }
+    assert payload["manual"] == []
+    assert not (tmp_path / "data" / "account-binding-state.json").exists()
+
+
+def test_diagnose_and_repair_never_reassociates_an_ambiguous_binding(
+    tmp_path: Path,
+    monkeypatch,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets = [
+        Target(name="同名目标", stable_id="target-a", candidate_id="candidate-old")
+    ]
+    save_config(config_path, config)
+    write_verified_account(tmp_path)
+    mark_bindings_for_revalidation(config.state_file.parent)
+    (tmp_path / "data" / "health.json").write_text(
+        '{"status":"success"}', encoding="utf-8"
+    )
+    (tmp_path / "data" / "discovered_friends.json").write_text(
+        json.dumps({
+            "scanned_at": "2026-08-19T08:00:00",
+            "account_scope": "stable-account-scope",
+            "candidates": [
+                {
+                    "candidate_id": "candidate-new-a",
+                    "display_name": "同名目标",
+                    "avatar_status": "missing",
+                    "discovered_at": "2026-08-19T08:00:00",
+                    "match_status": "needs_reassociation",
+                    "presence_status": "current",
+                },
+                {
+                    "candidate_id": "candidate-new-b",
+                    "display_name": "同名目标",
+                    "avatar_status": "missing",
+                    "discovered_at": "2026-08-19T08:00:00",
+                    "match_status": "ambiguous",
+                    "presence_status": "current",
+                },
+            ],
+        }, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("autody.web_api._runtime_available", lambda _root: True)
+    monkeypatch.setattr("autody.scheduler.windows_task_rows", lambda: [])
+    monkeypatch.setattr(
+        "autody.web_api.SchedulerService",
+        type("NoopScheduler", (), {
+            "__init__": lambda self, *_args, **_kwargs: None,
+            "repair": lambda self, _config: None,
+        }),
+    )
+    client = TestClient(create_app(
+        config_path,
+        action_runner=lambda action: {
+            "id": f"job-{action}", "action": action, "status": "success", "exit_code": 0
+        },
+    ))
+
+    response = client.post("/api/repair")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert load_config(config_path).targets[0].candidate_id == "candidate-old"
+    assert (tmp_path / "data" / "account-binding-state.json").exists()
+    assert any(item["id"] == "bindings" for item in payload["manual"])
+    assert all(item["id"] != "bindings" for item in payload["repaired"])
+
+
 def test_scheduler_route_uses_sid_captured_from_normal_dashboard_process(
     tmp_path: Path,
     monkeypatch,

@@ -137,6 +137,13 @@ export interface DashboardIssue {
   action_label: string;
 }
 
+export interface RepairSummary {
+  repaired: { id: string; label: string }[];
+  manual: { id: string; label: string }[];
+  checks: { id: string; label: string }[];
+  summary: string;
+}
+
 export interface AccountProfile {
   display_name: string | null;
   avatar_url: string | null;

@@ -18,6 +18,7 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
   const [preview, setPreview] = useState<PackPreview | null>(null);
   const [result, setResult] = useState<PackImportResult | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [overwritePack, setOverwritePack] = useState<{ id: string; name: string; count: number } | null>(null);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dropIntent, setDropIntent] = useState<DropIntent | null>(null);
   const report = (error: unknown, fallback: string) => notify(error instanceof Error ? error.message : fallback);
@@ -111,6 +112,19 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
     finally { setBusy(null); }
   };
 
+  const replaceGlobalMessages = async () => {
+    if (!overwritePack) return;
+    const pack = overwritePack;
+    setOverwritePack(null);
+    setBusy(pack.id);
+    try {
+      const imported = await api.importMessagePack(pack.id, "replace");
+      setResult(imported);
+      notify(`全局文案库已覆盖，共 ${imported.total_count} 条`);
+    } catch (error) { report(error, "全局文案覆盖失败"); }
+    finally { setBusy(null); }
+  };
+
   const startDrag = (event: DragEvent<HTMLElement>, packId: string) => {
     if ((event.target as HTMLElement).closest("[data-no-pack-drag]")) {
       event.preventDefault();
@@ -189,6 +203,7 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
                 </details>
               ) : null}
               <button disabled={busy !== null} onClick={() => void importPack(pack.id)}><Download size={15} />导入全局库</button>
+              <button disabled={busy !== null} onClick={() => setOverwritePack({ id: pack.id, name: pack.name, count: pack.count })}><RefreshCw size={15} />覆盖全局文案</button>
             </div>
           </article>
           {draggingId && draggingId !== pack.id ? (
@@ -222,6 +237,16 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
       </div>
       {result ? <div className="panel import-result"><strong>全局文案库导入结果</strong><span>新增 {result.added_count} 条</span><span>重复 {result.duplicate_count} 条</span><span>共 {result.total_count} 条</span></div> : null}
       {preview ? <section className="panel pack-preview"><div className="panel-heading"><h2>{preview.pack.name} · 预览</h2><button className="text-button" onClick={() => setPreview(null)}>关闭</button></div>{preview.messages.length ? <ol>{preview.messages.map((message, index) => <li key={preview.entries[index]?.id || index}>{message}{preview.entries[index] && !preview.entries[index].native ? <small> · 来源：{preview.entries[index].origin_pack_name}</small> : null}</li>)}</ol> : <p className="empty-list-copy">此文案包当前为空。</p>}</section> : null}
+      {overwritePack ? <div className="cleanup-dialog" role="dialog" aria-modal="true" aria-label="确认覆盖全局文案">
+        <div className="panel">
+          <h2>确认覆盖全局文案</h2>
+          <p>将用「{overwritePack.name}」的 {overwritePack.count} 条文案覆盖当前全局文案。<br />原有全局文案将被替换。</p>
+          <div className="dialog-actions">
+            <button className="action-button" onClick={() => setOverwritePack(null)}>取消</button>
+            <button className="action-button danger-confirm" onClick={() => void replaceGlobalMessages()}>确认覆盖</button>
+          </div>
+        </div>
+      </div> : null}
     </section>
   );
 }

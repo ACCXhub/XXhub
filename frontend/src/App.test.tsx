@@ -15,6 +15,7 @@ const apiMocks = vi.hoisted(() => ({
     statistics: { last_completed_run: "2026-06-24T07:31:00", consecutive_successful_days: 7, success_rate_7d: 100, success_rate_30d: 98, successful_today: 9, failed_today: 0, configured_friend_count: 9, enabled_friend_count: 9, local_message_count: 60, active_message_pack_count: 5, next_health_check: null, next_daily_send: "2026-06-25T07:30:00", most_recent_issue: null }
   }),
   action: vi.fn(),
+  repair: vi.fn(),
   waitForAction: vi.fn(),
   accountProfile: vi.fn().mockResolvedValue({
     display_name: "本人", avatar_url: "/api/account-profile/avatar?v=test", avatar_version: "test",
@@ -40,7 +41,11 @@ const apiMocks = vi.hoisted(() => ({
   addCandidateToTargets: vi.fn(),
   modules: vi.fn().mockResolvedValue({ modules: [{ id: "autody-test-center", installed: false }] }),
   messagePacks: vi.fn().mockResolvedValue({
-    packs: [{ id: "daily", name: "日常问候", description: "自然短问候", version: "1.0.0", count: 50, category: "daily" }],
+    revision: 1,
+    packs: [{
+      id: "daily", name: "日常问候", description: "自然短问候", version: "1.0.0",
+      count: 50, category: "daily", direct_fused_sources: [], fused_source_count: 0
+    }],
   }),
   preflightLatest: vi.fn().mockResolvedValue({ result: { global_status: "ready", total_targets: 1, ready_count: 1, failed_count: 0, blocked_count: 0, completed_at: "2026-07-16T07:20:00", targets: [] } }),
   preflightStatus: vi.fn().mockResolvedValue({ running: false, result: { global_status: "ready", total_targets: 1, ready_count: 1, failed_count: 0, blocked_count: 0, completed_at: "2026-07-16T07:20:00", targets: [] } }),
@@ -61,6 +66,7 @@ vi.mock("./api", () => ({
   api: {
     status: apiMocks.status,
     action: apiMocks.action,
+    repair: apiMocks.repair,
     waitForAction: apiMocks.waitForAction,
     accountProfile: apiMocks.accountProfile,
     refreshAccountProfile: apiMocks.refreshAccountProfile,
@@ -147,6 +153,25 @@ test("keeps browser action buttons disabled until the action finishes", async ()
 
   finish({ status: "success" });
   await waitFor(() => expect(runButton).not.toBeDisabled());
+});
+
+test("shows the structured one-click repair summary and refreshes current state", async () => {
+  apiMocks.repair.mockResolvedValue({
+    repaired: [{ id: "scheduler", label: "Scheduler 已恢复" }],
+    checks: [{ id: "runtime", label: "浏览器运行时正常" }],
+    manual: [{ id: "bindings", label: "无法安全确认目标身份，请重新关联" }],
+    summary: "已修复 1 项；仍需手动处理 1 项"
+  });
+  const alert = vi.spyOn(window, "alert").mockImplementation(() => undefined);
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "一键诊断与修复" }));
+
+  await waitFor(() => expect(apiMocks.repair).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(apiMocks.status).toHaveBeenCalledTimes(2));
+  expect(alert).toHaveBeenCalledWith(
+    "已修复 1 项；仍需手动处理 1 项\n✓ Scheduler 已恢复\n✓ 浏览器运行时正常\n! 无法安全确认目标身份，请重新关联"
+  );
 });
 
 test("does not expose a preflight action from the normal dashboard", async () => {

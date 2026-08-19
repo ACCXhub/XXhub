@@ -30,6 +30,7 @@ $PreferredPort = 8765
 $PortStatePath = Join-Path $DataRoot "data\service-port.json"
 $script:ServicePort = $PreferredPort
 $script:Url = "http://127.0.0.1:$PreferredPort"
+$script:Repairing = $false
 $env:AUTODY_HOME = $DataRoot
 $env:AUTODY_PROGRAM_ROOT = $ProjectRoot
 $env:AUTODY_BROWSERS_PATH = $BrowserRoot
@@ -502,12 +503,13 @@ function Invoke-DashboardOpenAsync {
 }
 
 function Get-TrayState {
+    if ($script:Repairing) { return "正在修复" }
     $expected = Get-ExpectedVersions
     $snapshot = Get-ServiceSnapshot
     if ($null -eq $snapshot -or -not (Test-OwnedAutoDy $snapshot $expected.Core)) { return "已停止" }
     if (Test-Path -LiteralPath (Join-Path $DataRoot "data\notifications\need-attention.txt")) { return "需要处理" }
     $outcomes = Join-Path $DataRoot "data\history\task-outcomes.json"
-    if ((Test-Path -LiteralPath $outcomes) -and ((Get-Content -Raw -LiteralPath $outcomes -ErrorAction SilentlyContinue) -match '"outcome"\s*:\s*"retry_pending"')) { return "正在安全重试" }
+    if ((Test-Path -LiteralPath $outcomes) -and ((Get-Content -Raw -LiteralPath $outcomes -ErrorAction SilentlyContinue) -match '"outcome"\s*:\s*"retry_pending"')) { return "正在执行" }
     return "运行正常"
 }
 
@@ -549,14 +551,17 @@ $menu.AutoSize = $true
 $menu.MinimumSize = New-Object System.Drawing.Size -ArgumentList @(224, 0)
 Set-AutoDyMenuTheme -Menu $menu
 $menu.add_Opened({ Set-AutoDyMenuTheme -Menu $menu; [AutoDyMenuWindow]::ApplyRoundedCorners($menu) })
-$open = $menu.Items.Add("打开 AutoDy 管理台")
-$status = $menu.Items.Add("查看当前状态")
-$logs = $menu.Items.Add("打开日志")
-$restart = $menu.Items.Add("重启管理台")
-$startup = $menu.Items.Add("启用/关闭开机启动")
+$status = $menu.Items.Add("AutoDy · 启动中")
+$status.Enabled = $false
 [void]$menu.Items.Add("-")
-$exitTray = $menu.Items.Add("退出托盘")
-$exitStop = $menu.Items.Add("退出并停止 AutoDy")
+$open = $menu.Items.Add("打开管理台")
+$repair = $menu.Items.Add("一键诊断与修复")
+$logs = $menu.Items.Add("查看运行日志")
+[void]$menu.Items.Add("-")
+$restart = $menu.Items.Add("重新启动后台服务")
+[void]$menu.Items.Add("-")
+$exitTray = $menu.Items.Add("隐藏托盘图标")
+$exitStop = $menu.Items.Add("完全退出 AutoDy")
 $notify = New-Object System.Windows.Forms.NotifyIcon
 $iconPath = Join-Path $ProjectRoot "assets\icons\autody.ico"
 $notify.Icon = if (Test-Path -LiteralPath $iconPath) { New-Object System.Drawing.Icon -ArgumentList @($iconPath, 32, 32) } else { [Drawing.SystemIcons]::Application }
@@ -567,7 +572,7 @@ $notify.Text = "AutoDy - 启动中"
 $refresh = {
     $state = Get-TrayState
     $notify.Text = "AutoDy - $state"
-    $status.Text = "查看当前状态 ($state)"
+    $status.Text = "AutoDy · $state"
 }
 $open.add_Click({ Invoke-DashboardOpenAsync })
 $notify.add_MouseClick({
@@ -576,10 +581,26 @@ $notify.add_MouseClick({
         Invoke-DashboardOpenAsync
     }
 })
-$status.add_Click({ & $refresh; [Windows.Forms.MessageBox]::Show($notify.Text, "AutoDy 当前状态") | Out-Null })
 $logs.add_Click({ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null; Start-Process explorer.exe -ArgumentList $LogDir })
 $restart.add_Click({ try { Stop-ManagedService | Out-Null; Start-Or-ReuseService | Out-Null; & $refresh } catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, "AutoDy") | Out-Null } })
-$startup.add_Click({ [Windows.Forms.MessageBox]::Show("开机启动由安装器/任务计划管理；托盘开关不会修改每日发送计划。", "AutoDy") | Out-Null })
+$repair.add_Click({
+    $script:Repairing = $true
+    & $refresh
+    try {
+        Start-Or-ReuseService | Out-Null
+        $result = Invoke-RestMethod -Uri "$script:Url/api/repair" -Method Post -TimeoutSec 600 -ErrorAction Stop
+        $lines = @($result.summary)
+        $lines += @($result.repaired | ForEach-Object { "✓ $($_.label)" })
+        $lines += @($result.checks | ForEach-Object { "✓ $($_.label)" })
+        $lines += @($result.manual | ForEach-Object { "! $($_.label)" })
+        [Windows.Forms.MessageBox]::Show(($lines -join [Environment]::NewLine), "AutoDy 诊断与修复") | Out-Null
+    } catch {
+        [Windows.Forms.MessageBox]::Show("诊断与修复未完成，请查看运行日志。", "AutoDy") | Out-Null
+    } finally {
+        $script:Repairing = $false
+        & $refresh
+    }
+})
 $exitTray.add_Click({ $notify.Visible = $false; $context.ExitThread() })
 $exitStop.add_Click({ Stop-ManagedService | Out-Null; $notify.Visible = $false; $context.ExitThread() })
 $timer = New-Object System.Windows.Forms.Timer

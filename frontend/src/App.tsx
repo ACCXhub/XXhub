@@ -100,6 +100,18 @@ export default function App() {
   const action = async (name: string) => {
     setBusy(name);
     try {
+      if (name === "diagnose-and-repair") {
+        const repaired = await api.repair();
+        await refreshAll();
+        notify(repaired.summary);
+        window.alert([
+          repaired.summary,
+          ...repaired.repaired.map((item) => `✓ ${item.label}`),
+          ...repaired.checks.map((item) => `✓ ${item.label}`),
+          ...repaired.manual.map((item) => `! ${item.label}`)
+        ].join("\n"));
+        return;
+      }
       const job = await api.action(name);
       notify("操作已启动，可在运行日志中查看进度");
       const finished = await api.waitForAction(job.id);
