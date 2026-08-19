@@ -403,7 +403,10 @@ def _target_base_message(
     pack_root = Path(
         os.environ.get("AUTODY_PROGRAM_ROOT", config.messages_file.parent)
     ).resolve()
-    pack_messages = MessagePackService(pack_root).preview(target.message_pack).messages
+    pack_messages = MessagePackService(
+        pack_root,
+        config.messages_file.parent,
+    ).preview(target.message_pack).messages
     selected = _selection_rng(day, "message-pack", target).choice(pack_messages) if (target.message_selection or config.message_selection) == "per_friend" else pack_messages[0]
     daily["messages_by_target"][key] = selected
     return selected

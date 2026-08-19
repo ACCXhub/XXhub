@@ -2227,7 +2227,7 @@ def test_message_pack_list_preview_and_merge_import(tmp_path: Path):
     catalog = client.get("/api/message-packs")
     assert catalog.status_code == 200
     assert catalog.json()["packs"][0]["id"] == "daily"
-    assert set(catalog.json()) == {"packs"}
+    assert set(catalog.json()) == {"packs", "revision"}
 
     preview = client.get("/api/message-packs/daily")
     assert preview.status_code == 200
@@ -2241,6 +2241,125 @@ def test_message_pack_list_preview_and_merge_import(tmp_path: Path):
     assert imported.json()["total_count"] == 4
     assert imported.json()["backup_path"].endswith(".txt")
     assert "早安呀" in (tmp_path / "messages.txt").read_text(encoding="utf-8")
+
+
+def test_message_pack_management_api_creates_renames_and_reorders(tmp_path: Path):
+    client = TestClient(create_app(make_project(tmp_path)))
+    catalog = client.get("/api/message-packs").json()
+
+    created = client.post(
+        "/api/message-packs",
+        json={"expected_revision": catalog["revision"]},
+    )
+    renamed = client.patch(
+        f"/api/message-packs/{created.json()['pack']['id']}",
+        json={
+            "name": "晨间",
+            "expected_revision": created.json()["revision"],
+        },
+    )
+    ids = [pack["id"] for pack in renamed.json()["catalog"]["packs"]]
+    reordered = client.put(
+        "/api/message-packs/order",
+        json={
+            "pack_ids": list(reversed(ids)),
+            "expected_revision": renamed.json()["revision"],
+        },
+    )
+
+    assert created.status_code == 200
+    assert renamed.status_code == 200
+    assert renamed.json()["pack"]["id"] == created.json()["pack"]["id"]
+    assert renamed.json()["pack"]["name"] == "晨间"
+    assert reordered.status_code == 200
+    assert [
+        pack["id"] for pack in reordered.json()["catalog"]["packs"]
+    ] == list(reversed(ids))
+
+
+def test_message_pack_management_api_rejects_stale_revision(tmp_path: Path):
+    client = TestClient(create_app(make_project(tmp_path)))
+    revision = client.get("/api/message-packs").json()["revision"]
+    assert client.post(
+        "/api/message-packs",
+        json={"expected_revision": revision},
+    ).status_code == 200
+
+    stale = client.post(
+        "/api/message-packs",
+        json={"expected_revision": revision},
+    )
+
+    assert stale.status_code == 409
+    assert "刷新" in stale.json()["detail"]
+
+
+def test_message_pack_management_api_imports_edits_fuses_and_splits(tmp_path: Path):
+    config_path = make_project(tmp_path)
+    client = TestClient(create_app(config_path))
+    revision = client.get("/api/message-packs").json()["revision"]
+    imported = client.post(
+        "/api/message-packs/import",
+        data={"expected_revision": str(revision)},
+        files={"file": ("morning.txt", "晨间\n早安\n早安\n", "text/plain")},
+    )
+    pack_id = imported.json()["pack"]["id"]
+    added = client.post(
+        f"/api/message-packs/{pack_id}/messages",
+        json={
+            "text": "新增",
+            "expected_revision": imported.json()["revision"],
+        },
+    )
+    message_id = added.json()["entry"]["id"]
+    edited = client.patch(
+        f"/api/message-packs/{pack_id}/messages/{message_id}",
+        json={
+            "text": "已编辑",
+            "expected_revision": added.json()["revision"],
+        },
+    )
+    fused = client.post(
+        f"/api/message-packs/{pack_id}/fuse",
+        json={
+            "destination_id": "daily",
+            "expected_revision": edited.json()["revision"],
+        },
+    )
+    split = client.post(
+        "/api/message-packs/daily/split",
+        json={
+            "source_id": pack_id,
+            "expected_revision": fused.json()["revision"],
+        },
+    )
+
+    assert imported.status_code == 200
+    assert imported.json()["pack"]["count"] == 3
+    assert edited.status_code == 200
+    assert edited.json()["entry"]["text"] == "已编辑"
+    assert fused.status_code == 200
+    assert pack_id not in [pack["id"] for pack in fused.json()["catalog"]["packs"]]
+    assert split.status_code == 200
+    assert pack_id in [pack["id"] for pack in split.json()["catalog"]["packs"]]
+
+
+def test_message_pack_management_api_rejects_deleting_referenced_pack(tmp_path: Path):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets[0].message_pack = "daily"
+    save_config(config_path, config)
+    client = TestClient(create_app(config_path))
+    revision = client.get("/api/message-packs").json()["revision"]
+
+    response = client.request(
+        "DELETE",
+        "/api/message-packs/daily",
+        json={"expected_revision": revision},
+    )
+
+    assert response.status_code == 409
+    assert "目标使用" in response.json()["detail"]
 
 
 def test_installed_message_packs_come_from_program_root(

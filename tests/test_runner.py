@@ -11,6 +11,7 @@ from autody.chat import DeliveryResult, DeliveryStatus, FatalChatError
 from autody import runner as runner_module
 from autody.failures import failure_detail
 from autody.logging_setup import DailyAppendFileHandler
+from autody.message_packs import MessagePackService
 from autody.runner import (
     RunStatus,
     automatic_daily_run_gate,
@@ -732,6 +733,36 @@ def test_target_pack_uses_installed_program_root(
 
     assert result.status is RunStatus.COMPLETED
     assert chat.sent[0][1].startswith("安装内置问候")
+
+
+def test_target_pack_uses_managed_catalog_without_changing_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config, chat = make_config(tmp_path), FakeChat()
+    program_root = tmp_path / "program"
+    pack_dir = program_root / "message-packs"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "special.txt").write_text("内置原文\n", encoding="utf-8")
+    (pack_dir / "index.json").write_text(
+        '{"packs":[{"id":"special","name":"测试包","description":"","version":"1","file":"special.txt","count":1,"category":"test"}]}',
+        encoding="utf-8",
+    )
+    service = MessagePackService(program_root, tmp_path)
+    entry = service.preview("special").entries[0]
+    service.update_message(
+        "special",
+        entry.id,
+        "用户编辑后的文案",
+        service.catalog().revision,
+    )
+    config.targets[0].message_pack = "special"
+    monkeypatch.setenv("AUTODY_PROGRAM_ROOT", str(program_root))
+
+    result = run_daily(config, chat, date(2026, 7, 16))
+
+    assert result.status is RunStatus.COMPLETED
+    assert chat.sent[0][1].startswith("用户编辑后的文案")
 
 
 def test_today_message_preview_matches_production_resolution_without_mutating_state_or_history(tmp_path: Path):

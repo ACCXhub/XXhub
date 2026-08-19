@@ -16,7 +16,7 @@ import uuid
 from urllib.parse import quote
 import zipfile
 
-from fastapi import FastAPI, File, HTTPException, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -48,6 +48,7 @@ from autody.friend_discovery import is_discovery_stale, load_discovered_friends
 from autody.history import TaskHistoryStore, bootstrap_legacy_daily_history
 from autody.log_center import archive_historical_logs, archive_logs, automatic_cleanup_once_daily, cleanup_logs, log_storage_summary, log_summary, query_logs, record_cleanup_result
 from autody.message_packs import ImportMode, MessagePackError, MessagePackService
+from autody.message_pack_catalog import MessagePackConflict
 from autody.modules import (
     MODULE_ID,
     OFFICIAL_TEST_CENTER_VERSION,
@@ -154,6 +155,34 @@ class DryRunSelectRequest(BaseModel):
 
 class MessagePackImportRequest(BaseModel):
     mode: ImportMode
+
+
+class RevisionRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+
+
+class CreateMessagePackRequest(RevisionRequest):
+    name: str = Field(default="新建文案包", min_length=1, max_length=80)
+
+
+class RenameMessagePackRequest(RevisionRequest):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class ReorderMessagePacksRequest(RevisionRequest):
+    pack_ids: list[str]
+
+
+class MessagePackTextRequest(RevisionRequest):
+    text: str = Field(min_length=1, max_length=500)
+
+
+class FuseMessagePackRequest(RevisionRequest):
+    destination_id: str = Field(min_length=1)
+
+
+class SplitMessagePackRequest(RevisionRequest):
+    source_id: str = Field(min_length=1)
 
 
 class ScheduleUpdate(ScheduleSettings):
@@ -906,6 +935,27 @@ def create_app(
     manager.module_data_root = initial_config.state_file.parent / "modules" / MODULE_ID / "data"
     module_manager = ModuleManager(initial_config.state_file.parent, core_version=_application_version())
     dry_run_controller = DryRunController(config_path, module_manager.module_root / "data")
+
+    def message_pack_service() -> MessagePackService:
+        return MessagePackService(
+            program_root,
+            root,
+            now=current_time,
+        )
+
+    def message_pack_http_exception(exc: MessagePackError) -> HTTPException:
+        if isinstance(exc, MessagePackConflict):
+            return HTTPException(409, str(exc))
+        message = str(exc)
+        if message.startswith("未知文案包"):
+            return HTTPException(404, message)
+        if (
+            message.startswith("文案包目录无效")
+            or "事务日志" in message
+            or message.startswith("内置文案包索引无效")
+        ):
+            return HTTPException(503, message)
+        return HTTPException(422, message)
     try:
         bundled_module = ensure_official_module_archive(root)
         bundled_module_error = None
@@ -1379,8 +1429,8 @@ def create_app(
                 "revalidation_required" if binding_guarded else "verified"
             )
         try:
-            pack_count = len(json.loads((root / "message-packs" / "index.json").read_text(encoding="utf-8")).get("packs", []))
-        except (OSError, json.JSONDecodeError, TypeError):
+            pack_count = len(message_pack_service().list_packs().packs)
+        except MessagePackError:
             pack_count = 0
         statistics.update({
             "successful_today": len(executable_succeeded),
@@ -2075,7 +2125,7 @@ def create_app(
             if source == "local":
                 messages = read_messages(config.messages_file)
             else:
-                service = MessagePackService(program_root)
+                service = message_pack_service()
                 packs = service.list_packs().packs
                 selected = [item for item in packs if (pack_id and item.id == pack_id) or (category and item.category == category)]
                 if not selected:
@@ -2098,25 +2148,153 @@ def create_app(
 
     @app.get("/api/message-packs")
     def message_packs():
-        config = load_config(config_path)
         try:
-            return MessagePackService(program_root).list_packs()
+            return message_pack_service().list_packs()
         except MessagePackError as exc:
-            raise HTTPException(503, str(exc)) from exc
+            raise message_pack_http_exception(exc) from exc
+
+    @app.post("/api/message-packs")
+    def create_message_pack(payload: CreateMessagePackRequest):
+        try:
+            return message_pack_service().create_pack(
+                payload.expected_revision,
+                payload.name,
+            )
+        except MessagePackError as exc:
+            raise message_pack_http_exception(exc) from exc
+
+    @app.post("/api/message-packs/import")
+    async def import_message_pack_file(
+        file: UploadFile = File(...),
+        expected_revision: int = Form(..., ge=1),
+    ):
+        try:
+            return message_pack_service().import_text(
+                await file.read(),
+                file.filename or "",
+                expected_revision,
+            )
+        except MessagePackError as exc:
+            raise message_pack_http_exception(exc) from exc
+
+    @app.put("/api/message-packs/order")
+    def reorder_message_packs(payload: ReorderMessagePacksRequest):
+        try:
+            return message_pack_service().reorder_packs(
+                payload.pack_ids,
+                payload.expected_revision,
+            )
+        except MessagePackError as exc:
+            raise message_pack_http_exception(exc) from exc
 
     @app.get("/api/message-packs/{pack_id}")
     def preview_message_pack(pack_id: str):
-        config = load_config(config_path)
         try:
-            return MessagePackService(program_root).preview(pack_id)
+            return message_pack_service().preview(pack_id)
         except MessagePackError as exc:
-            raise HTTPException(404, str(exc)) from exc
+            raise message_pack_http_exception(exc) from exc
+
+    @app.patch("/api/message-packs/{pack_id}")
+    def rename_message_pack(pack_id: str, payload: RenameMessagePackRequest):
+        try:
+            return message_pack_service().rename_pack(
+                pack_id,
+                payload.name,
+                payload.expected_revision,
+            )
+        except MessagePackError as exc:
+            raise message_pack_http_exception(exc) from exc
+
+    @app.delete("/api/message-packs/{pack_id}")
+    def delete_message_pack(pack_id: str, payload: RevisionRequest):
+        config = load_config(config_path)
+        referenced = {
+            target.message_pack
+            for target in config.targets
+            if target.message_pack is not None
+        }
+        try:
+            return message_pack_service().delete_pack(
+                pack_id,
+                payload.expected_revision,
+                referenced,
+            )
+        except MessagePackError as exc:
+            raise message_pack_http_exception(exc) from exc
+
+    @app.post("/api/message-packs/{pack_id}/messages")
+    def add_message_pack_message(pack_id: str, payload: MessagePackTextRequest):
+        try:
+            return message_pack_service().add_message(
+                pack_id,
+                payload.text,
+                payload.expected_revision,
+            )
+        except MessagePackError as exc:
+            raise message_pack_http_exception(exc) from exc
+
+    @app.patch("/api/message-packs/{pack_id}/messages/{message_id}")
+    def update_message_pack_message(
+        pack_id: str,
+        message_id: str,
+        payload: MessagePackTextRequest,
+    ):
+        try:
+            return message_pack_service().update_message(
+                pack_id,
+                message_id,
+                payload.text,
+                payload.expected_revision,
+            )
+        except MessagePackError as exc:
+            raise message_pack_http_exception(exc) from exc
+
+    @app.delete("/api/message-packs/{pack_id}/messages/{message_id}")
+    def delete_message_pack_message(
+        pack_id: str,
+        message_id: str,
+        payload: RevisionRequest,
+    ):
+        try:
+            return message_pack_service().delete_message(
+                pack_id,
+                message_id,
+                payload.expected_revision,
+            )
+        except MessagePackError as exc:
+            raise message_pack_http_exception(exc) from exc
+
+    @app.post("/api/message-packs/{source_id}/fuse")
+    def fuse_message_pack(source_id: str, payload: FuseMessagePackRequest):
+        try:
+            return message_pack_service().fuse(
+                source_id,
+                payload.destination_id,
+                payload.expected_revision,
+                config_path,
+            )
+        except MessagePackError as exc:
+            raise message_pack_http_exception(exc) from exc
+
+    @app.post("/api/message-packs/{destination_id}/split")
+    def split_message_pack(
+        destination_id: str,
+        payload: SplitMessagePackRequest,
+    ):
+        try:
+            return message_pack_service().split(
+                destination_id,
+                payload.source_id,
+                payload.expected_revision,
+            )
+        except MessagePackError as exc:
+            raise message_pack_http_exception(exc) from exc
 
     @app.post("/api/message-packs/{pack_id}/import")
     def import_message_pack(pack_id: str, payload: MessagePackImportRequest):
         config = load_config(config_path)
         try:
-            return MessagePackService(program_root).import_pack(
+            return message_pack_service().import_pack(
                 pack_id,
                 config.messages_file,
                 payload.mode,
