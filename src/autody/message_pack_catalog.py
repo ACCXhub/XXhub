@@ -149,14 +149,20 @@ class MessagePackCatalogStore:
     def load_or_seed(self) -> CatalogDocument:
         try:
             with SingleInstanceLock(self.lock_path, timeout_seconds=5):
-                self.recover_pending_transaction()
-                if self.catalog_path.exists():
-                    return self._read_validated()
-                catalog = self._seed_from_builtin_index()
-                self._atomic_write(catalog)
-                return catalog
+                return self.load_locked()
         except TaskAlreadyRunning as exc:
             raise MessagePackConflict("文案包正在由另一个进程修改，请稍后重试") from exc
+
+    def load_locked(self) -> CatalogDocument:
+        self.recover_pending_transaction()
+        if self.catalog_path.exists():
+            return self._read_validated()
+        catalog = self._seed_from_builtin_index()
+        self._atomic_write(catalog)
+        return catalog
+
+    def write_locked(self, catalog: CatalogDocument) -> None:
+        self._atomic_write(catalog)
 
     def _read_validated(self) -> CatalogDocument:
         try:

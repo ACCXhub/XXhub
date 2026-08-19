@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from autody.message_packs import ImportMode, MessagePackError, MessagePackService
+from autody.message_pack_catalog import MessagePackConflict
 
 
 def make_pack_root(tmp_path: Path) -> Path:
@@ -160,3 +161,91 @@ def test_empty_completed_catalog_is_not_seeded_again(tmp_path: Path):
 
     assert restarted.list_packs().packs == []
     assert restarted.catalog().migrations.builtin_seed_v1.completed is True
+
+
+def test_create_empty_pack_and_rename_preserve_stable_id(tmp_path: Path):
+    service = MessagePackService(make_pack_root(tmp_path), tmp_path / "user-data")
+
+    created = service.create_pack(expected_revision=service.catalog().revision)
+    renamed = service.rename_pack(
+        created.pack.id,
+        "晨间",
+        expected_revision=created.revision,
+    )
+
+    assert created.pack.name == "新建文案包"
+    assert renamed.pack.id == created.pack.id
+    assert renamed.pack.name == "晨间"
+    assert service.preview(created.pack.id).messages == []
+
+
+def test_import_uses_first_valid_line_for_name_and_keeps_duplicate_entries(
+    tmp_path: Path,
+):
+    service = MessagePackService(make_pack_root(tmp_path), tmp_path / "user-data")
+    first = "甲" * 100
+
+    imported = service.import_text(
+        f"\n{first}\n早安\n早安\n".encode("utf-8"),
+        "morning.txt",
+        expected_revision=service.catalog().revision,
+    )
+    detail = service.preview(imported.pack.id)
+
+    assert imported.pack.name == "甲" * 79 + "…"
+    assert detail.messages == [first, "早安", "早安"]
+    assert len({entry.id for entry in detail.entries}) == 3
+
+
+def test_message_edit_and_delete_keep_identity_until_deletion(tmp_path: Path):
+    service = MessagePackService(make_pack_root(tmp_path), tmp_path / "user-data")
+    created = service.create_pack(expected_revision=service.catalog().revision)
+    added = service.add_message(
+        created.pack.id,
+        "早安",
+        expected_revision=created.revision,
+    )
+
+    edited = service.update_message(
+        created.pack.id,
+        added.entry.id,
+        "早呀",
+        expected_revision=added.revision,
+    )
+    deleted = service.delete_message(
+        created.pack.id,
+        added.entry.id,
+        expected_revision=edited.revision,
+    )
+
+    assert edited.entry.id == added.entry.id
+    assert edited.entry.text == "早呀"
+    assert deleted.pack.count == 0
+    assert service.preview(created.pack.id).messages == []
+
+
+def test_reorder_persists_after_service_restart(tmp_path: Path):
+    program_root = make_pack_root(tmp_path)
+    data_root = tmp_path / "user-data"
+    service = MessagePackService(program_root, data_root)
+    first = service.create_pack(service.catalog().revision, "一")
+    second = service.create_pack(first.revision, "二")
+    original = [pack.id for pack in service.list_packs().packs]
+
+    reordered = service.reorder_packs(
+        list(reversed(original)),
+        expected_revision=second.revision,
+    )
+    restarted = MessagePackService(program_root, data_root)
+
+    assert [pack.id for pack in reordered.catalog.packs] == list(reversed(original))
+    assert [pack.id for pack in restarted.list_packs().packs] == list(reversed(original))
+
+
+def test_stale_revision_does_not_overwrite_newer_catalog(tmp_path: Path):
+    service = MessagePackService(make_pack_root(tmp_path), tmp_path / "user-data")
+    revision = service.catalog().revision
+    service.create_pack(expected_revision=revision)
+
+    with pytest.raises(MessagePackConflict, match="刷新"):
+        service.create_pack(expected_revision=revision)
