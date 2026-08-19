@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 from datetime import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -127,6 +129,24 @@ class CatalogDocument(BaseModel):
         return self
 
 
+class TransactionVersion(BaseModel):
+    data_base64: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class TransactionTarget(BaseModel):
+    path: str = Field(min_length=1)
+    old: TransactionVersion
+    new: TransactionVersion
+
+
+class PendingTransaction(BaseModel):
+    schema_version: Literal[1] = 1
+    transaction_id: str = Field(min_length=1)
+    state: Literal["pending"] = "pending"
+    targets: list[TransactionTarget] = Field(min_length=1)
+
+
 class MessagePackCatalogStore:
     def __init__(
         self,
@@ -163,6 +183,17 @@ class MessagePackCatalogStore:
 
     def write_locked(self, catalog: CatalogDocument) -> None:
         self._atomic_write(catalog)
+
+    @staticmethod
+    def serialize_catalog(catalog: CatalogDocument) -> bytes:
+        return (
+            json.dumps(
+                catalog.model_dump(mode="json"),
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n"
+        ).encode("utf-8")
 
     def _read_validated(self) -> CatalogDocument:
         try:
@@ -243,25 +274,136 @@ class MessagePackCatalogStore:
         )
 
     def _atomic_write(self, catalog: CatalogDocument) -> None:
-        self.catalog_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.catalog_path.with_name(
-            f"{self.catalog_path.name}.{uuid.uuid4().hex}.tmp"
+        self._replace_target(self.catalog_path, self.serialize_catalog(catalog))
+
+    @staticmethod
+    def _version(payload: bytes) -> TransactionVersion:
+        return TransactionVersion(
+            data_base64=base64.b64encode(payload).decode("ascii"),
+            sha256=hashlib.sha256(payload).hexdigest(),
         )
+
+    @staticmethod
+    def _decode_version(version: TransactionVersion) -> bytes:
         try:
-            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-                json.dump(
-                    catalog.model_dump(mode="json"),
-                    handle,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                handle.write("\n")
+            payload = base64.b64decode(version.data_base64, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise MessagePackError("文案包事务日志包含无效数据") from exc
+        if hashlib.sha256(payload).hexdigest() != version.sha256:
+            raise MessagePackError("文案包事务日志校验失败")
+        return payload
+
+    @staticmethod
+    def _atomic_replace_bytes(path: Path, payload: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temporary.open("wb") as handle:
+                handle.write(payload)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, self.catalog_path)
+            os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
 
+    def _replace_target(self, path: Path, payload: bytes) -> None:
+        self._atomic_replace_bytes(path, payload)
+
+    def _validated_transaction(self) -> PendingTransaction:
+        try:
+            transaction = PendingTransaction.model_validate_json(
+                self.pending_path.read_bytes()
+            )
+        except (OSError, ValidationError) as exc:
+            raise MessagePackError("文案包事务日志无效") from exc
+
+        resolved_paths: list[Path] = []
+        for target in transaction.targets:
+            path = Path(target.path)
+            if not path.is_absolute():
+                raise MessagePackError("文案包事务日志包含非绝对路径")
+            resolved = path.resolve()
+            if resolved != self.data_root and self.data_root not in resolved.parents:
+                raise MessagePackError("文案包事务日志目标超出数据目录")
+            resolved_paths.append(resolved)
+            self._decode_version(target.old)
+            self._decode_version(target.new)
+        if len(resolved_paths) != len(set(resolved_paths)):
+            raise MessagePackError("文案包事务日志包含重复目标")
+        if self.catalog_path not in resolved_paths:
+            raise MessagePackError("文案包事务日志缺少目录目标")
+        return transaction
+
+    def _write_pending(self, transaction: PendingTransaction) -> None:
+        payload = (
+            json.dumps(
+                transaction.model_dump(mode="json"),
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n"
+        ).encode("utf-8")
+        self._atomic_replace_bytes(self.pending_path, payload)
+
+    def commit_external_transaction(self, changes: dict[Path, bytes]) -> None:
+        normalized: dict[Path, bytes] = {}
+        for raw_path, payload in changes.items():
+            path = raw_path.resolve()
+            if path != self.data_root and self.data_root not in path.parents:
+                raise MessagePackError("文案包事务目标必须位于数据目录")
+            if path in normalized:
+                raise MessagePackError("文案包事务包含重复目标")
+            if not path.is_file():
+                raise MessagePackError("文案包事务目标不存在")
+            normalized[path] = payload
+        if self.catalog_path not in normalized:
+            raise MessagePackError("文案包事务缺少目录变更")
+
+        transaction = PendingTransaction(
+            transaction_id=uuid.uuid4().hex,
+            targets=[
+                TransactionTarget(
+                    path=str(path),
+                    old=self._version(path.read_bytes()),
+                    new=self._version(payload),
+                )
+                for path, payload in normalized.items()
+            ],
+        )
+        self._write_pending(transaction)
+        try:
+            for path, payload in normalized.items():
+                self._replace_target(path, payload)
+        except Exception as exc:
+            try:
+                for target in transaction.targets:
+                    path = Path(target.path)
+                    old_payload = self._decode_version(target.old)
+                    self._replace_target(path, old_payload)
+                    if hashlib.sha256(path.read_bytes()).hexdigest() != target.old.sha256:
+                        raise OSError("rollback verification failed")
+                self.pending_path.unlink(missing_ok=True)
+            except Exception as rollback_exc:
+                raise MessagePackError(
+                    "文案包事务写入失败，等待下次访问恢复"
+                ) from rollback_exc
+            raise MessagePackError("文案包事务写入失败，已回滚") from exc
+        self.pending_path.unlink(missing_ok=True)
+
     def recover_pending_transaction(self) -> None:
-        if self.pending_path.exists():
-            raise MessagePackError("检测到未完成的文案包事务，当前版本无法恢复")
+        if not self.pending_path.exists():
+            return
+        transaction = self._validated_transaction()
+        for target in transaction.targets:
+            path = Path(target.path)
+            payload = self._decode_version(target.new)
+            current_hash = (
+                hashlib.sha256(path.read_bytes()).hexdigest()
+                if path.is_file()
+                else None
+            )
+            if current_hash != target.new.sha256:
+                self._replace_target(path, payload)
+            if hashlib.sha256(path.read_bytes()).hexdigest() != target.new.sha256:
+                raise MessagePackError("文案包事务恢复校验失败")
+        self.pending_path.unlink(missing_ok=True)

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -6,6 +8,7 @@ from pathlib import Path
 import shutil
 from typing import Callable, TypeVar
 
+from autody.config import load_config, serialize_config
 from autody.message_pack_catalog import (
     CatalogDocument,
     FusedSourceItem,
@@ -34,6 +37,8 @@ class MessagePack:
     file: str
     count: int
     category: str
+    direct_fused_sources: list[MessagePack] = field(default_factory=list)
+    fused_source_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -62,7 +67,7 @@ class PackPreview:
 @dataclass(frozen=True)
 class PackMutationResult:
     revision: int
-    pack: MessagePack
+    pack: MessagePack | None
     catalog: PackCatalog
 
 
@@ -128,6 +133,11 @@ class MessagePackService:
 
     def _pack_payload(self, catalog: CatalogDocument, pack_id: str) -> MessagePack:
         package = catalog.packages[pack_id]
+        direct_source_ids = [
+            item.pack_id
+            for item in package.items
+            if isinstance(item, FusedSourceItem)
+        ]
         return MessagePack(
             id=package.id,
             name=package.name,
@@ -136,7 +146,33 @@ class MessagePackService:
             file="",
             count=len(self._message_ids(catalog, pack_id)),
             category=package.category,
+            direct_fused_sources=[
+                self._pack_payload(catalog, source_id)
+                for source_id in direct_source_ids
+            ],
+            fused_source_count=len(self._descendant_pack_ids(catalog, pack_id)) - 1,
         )
+
+    def _descendant_pack_ids(
+        self,
+        catalog: CatalogDocument,
+        pack_id: str,
+    ) -> list[str]:
+        result = [pack_id]
+        for item in catalog.packages[pack_id].items:
+            if isinstance(item, FusedSourceItem):
+                result.extend(self._descendant_pack_ids(catalog, item.pack_id))
+        return result
+
+    def direct_fused_sources(self, pack_id: str) -> list[MessagePack]:
+        catalog = self.catalog()
+        if pack_id not in catalog.packages:
+            raise MessagePackError(f"未知文案包：{pack_id}")
+        return [
+            self._pack_payload(catalog, item.pack_id)
+            for item in catalog.packages[pack_id].items
+            if isinstance(item, FusedSourceItem)
+        ]
 
     def _entries(
         self,
@@ -452,24 +488,144 @@ class MessagePackService:
         pack_ids: list[str],
         expected_revision: int,
     ) -> PackMutationResult:
-        def change(catalog: CatalogDocument) -> str:
+        def change(catalog: CatalogDocument) -> None:
             if (
                 len(pack_ids) != len(set(pack_ids))
                 or set(pack_ids) != set(catalog.top_level_pack_ids)
             ):
                 raise MessagePackError("文案包排序必须包含全部顶层文案包")
             catalog.top_level_pack_ids = list(pack_ids)
-            return pack_ids[0] if pack_ids else ""
 
-        first_id, catalog = self._mutate(expected_revision, change)
-        placeholder = (
-            self._pack_payload(catalog, first_id)
-            if first_id
-            else MessagePack("", "", "", "user", "", 0, "custom")
-        )
+        _unused, catalog = self._mutate(expected_revision, change)
         return PackMutationResult(
             revision=catalog.revision,
-            pack=placeholder,
+            pack=None,
+            catalog=self._catalog_payload(catalog),
+        )
+
+    def fuse(
+        self,
+        source_id: str,
+        destination_id: str,
+        expected_revision: int,
+        config_path: Path,
+    ) -> PackMutationResult:
+        try:
+            with SingleInstanceLock(self.store.lock_path, timeout_seconds=5):
+                current = self.store.load_locked()
+                if current.revision != expected_revision:
+                    raise MessagePackConflict(
+                        "文案包已被其他页面修改，请刷新后重试"
+                    )
+                if source_id == destination_id:
+                    raise MessagePackError("不能将文案包融合到自身")
+                if source_id not in current.top_level_pack_ids:
+                    raise MessagePackError("来源文案包不是顶层文案包")
+                if destination_id not in current.top_level_pack_ids:
+                    raise MessagePackError("目标文案包不是顶层文案包")
+
+                candidate = current.model_copy(deep=True)
+                restore_index = candidate.top_level_pack_ids.index(source_id)
+                candidate.top_level_pack_ids.remove(source_id)
+                candidate.packages[destination_id].items.append(
+                    FusedSourceItem(
+                        pack_id=source_id,
+                        fused_at=self.now(),
+                        restore_index=restore_index,
+                    )
+                )
+                candidate.revision += 1
+                candidate = CatalogDocument.model_validate(
+                    candidate.model_dump(mode="json")
+                )
+
+                resolved_config_path = config_path.resolve()
+                config = load_config(resolved_config_path)
+                for target in config.targets:
+                    if target.message_pack == source_id:
+                        target.message_pack = destination_id
+                self.store.commit_external_transaction(
+                    {
+                        self.store.catalog_path: self.store.serialize_catalog(candidate),
+                        resolved_config_path: serialize_config(
+                            config,
+                            resolved_config_path.parent,
+                        ),
+                    }
+                )
+                return PackMutationResult(
+                    revision=candidate.revision,
+                    pack=self._pack_payload(candidate, destination_id),
+                    catalog=self._catalog_payload(candidate),
+                )
+        except TaskAlreadyRunning as exc:
+            raise MessagePackConflict(
+                "文案包正在由另一个进程修改，请稍后重试"
+            ) from exc
+
+    def split(
+        self,
+        destination_id: str,
+        source_id: str,
+        expected_revision: int,
+    ) -> PackMutationResult:
+        def change(catalog: CatalogDocument) -> str:
+            if destination_id not in catalog.top_level_pack_ids:
+                raise MessagePackError("只能从顶层文案包拆出来源")
+            source_item = next(
+                (
+                    item
+                    for item in catalog.packages[destination_id].items
+                    if isinstance(item, FusedSourceItem)
+                    and item.pack_id == source_id
+                ),
+                None,
+            )
+            if source_item is None:
+                raise MessagePackError("指定文案包不是当前包的直接融合来源")
+            catalog.packages[destination_id].items.remove(source_item)
+            restore_index = min(
+                source_item.restore_index,
+                len(catalog.top_level_pack_ids),
+            )
+            catalog.top_level_pack_ids.insert(restore_index, source_id)
+            return destination_id
+
+        changed_id, catalog = self._mutate(expected_revision, change)
+        return PackMutationResult(
+            revision=catalog.revision,
+            pack=self._pack_payload(catalog, changed_id),
+            catalog=self._catalog_payload(catalog),
+        )
+
+    def delete_pack(
+        self,
+        pack_id: str,
+        expected_revision: int,
+        referenced_pack_ids: set[str],
+    ) -> PackMutationResult:
+        def change(catalog: CatalogDocument) -> None:
+            if pack_id not in catalog.top_level_pack_ids:
+                raise MessagePackError("只能删除顶层文案包")
+            subtree_ids = set(self._descendant_pack_ids(catalog, pack_id))
+            if subtree_ids & referenced_pack_ids:
+                raise MessagePackConflict("该文案包仍被目标使用，无法删除")
+            message_ids = {
+                item.message_id
+                for subtree_id in subtree_ids
+                for item in catalog.packages[subtree_id].items
+                if isinstance(item, MessageItem)
+            }
+            catalog.top_level_pack_ids.remove(pack_id)
+            for message_id in message_ids:
+                del catalog.messages[message_id]
+            for subtree_id in subtree_ids:
+                del catalog.packages[subtree_id]
+
+        _unused, catalog = self._mutate(expected_revision, change)
+        return PackMutationResult(
+            revision=catalog.revision,
+            pack=None,
             catalog=self._catalog_payload(catalog),
         )
 

@@ -130,9 +130,8 @@ def load_config(path: Path) -> AppConfig:
     return config
 
 
-def save_config(path: Path, config: AppConfig) -> None:
-    path = path.resolve()
-    root = path.parent
+def serialize_config(config: AppConfig, root: Path) -> bytes:
+    root = root.resolve()
 
     def portable(value: Path) -> str:
         try:
@@ -176,12 +175,22 @@ def save_config(path: Path, config: AppConfig) -> None:
         "friend_scan_max_rounds": config.friend_scan_max_rounds,
         "avatar_capture_timeout_ms": config.avatar_capture_timeout_ms,
     }
+    return yaml.safe_dump(
+        data,
+        allow_unicode=True,
+        sort_keys=False,
+    ).encode("utf-8")
+
+
+def save_config(path: Path, config: AppConfig) -> None:
+    path = path.resolve()
     temporary = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     try:
-        temporary.write_text(
-            yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
-            encoding="utf-8",
-        )
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        with temporary.open("wb") as handle:
+            handle.write(serialize_config(config, path.parent))
+            handle.flush()
+            os.fsync(handle.fileno())
         for attempt in range(8):
             try:
                 os.replace(temporary, path)

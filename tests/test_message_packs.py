@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from autody.config import AppConfig, Target, load_config, save_config
 from autody.message_packs import ImportMode, MessagePackError, MessagePackService
 from autody.message_pack_catalog import MessagePackConflict
 
@@ -249,3 +250,207 @@ def test_stale_revision_does_not_overwrite_newer_catalog(tmp_path: Path):
 
     with pytest.raises(MessagePackConflict, match="刷新"):
         service.create_pack(expected_revision=revision)
+
+
+def make_config(path: Path, pack_id: str) -> None:
+    save_config(
+        path,
+        AppConfig(targets=[Target(name="测试目标", message_pack=pack_id)]),
+    )
+
+
+def create_pack_with_message(
+    service: MessagePackService,
+    name: str,
+    text: str,
+):
+    created = service.create_pack(service.catalog().revision, name)
+    added = service.add_message(created.pack.id, text, created.revision)
+    return created.pack, added.entry
+
+
+def test_fuse_split_keeps_current_content_and_migrates_target_once(tmp_path: Path):
+    data_root = tmp_path / "user-data"
+    service = MessagePackService(make_pack_root(tmp_path), data_root)
+    source, message = create_pack_with_message(service, "来源", "早安")
+    destination = service.create_pack(service.catalog().revision, "目标").pack
+    config_path = data_root / "config.yaml"
+    make_config(config_path, source.id)
+
+    fused = service.fuse(
+        source.id,
+        destination.id,
+        service.catalog().revision,
+        config_path,
+    )
+    edited = service.update_message(
+        destination.id,
+        message.id,
+        "早呀",
+        fused.revision,
+    )
+    split = service.split(
+        destination.id,
+        source.id,
+        edited.revision,
+    )
+
+    assert source.id not in [pack.id for pack in fused.catalog.packs]
+    assert service.preview(source.id).messages == ["早呀"]
+    assert [pack.id for pack in service.direct_fused_sources(destination.id)] == []
+    assert load_config(config_path).targets[0].message_pack == destination.id
+    assert split.revision == edited.revision + 1
+
+
+def test_nested_fusion_split_preserves_child_lineage(tmp_path: Path):
+    data_root = tmp_path / "user-data"
+    service = MessagePackService(make_pack_root(tmp_path), data_root)
+    a, _message = create_pack_with_message(service, "A", "A 文案")
+    b = service.create_pack(service.catalog().revision, "B").pack
+    c = service.create_pack(service.catalog().revision, "C").pack
+    config_path = data_root / "config.yaml"
+    make_config(config_path, a.id)
+
+    service.fuse(a.id, b.id, service.catalog().revision, config_path)
+    service.fuse(b.id, c.id, service.catalog().revision, config_path)
+    service.split(c.id, b.id, service.catalog().revision)
+
+    assert [pack.id for pack in service.direct_fused_sources(b.id)] == [a.id]
+    assert service.preview(b.id).messages == ["A 文案"]
+    assert load_config(config_path).targets[0].message_pack == c.id
+
+
+def test_message_added_after_fusion_belongs_to_destination_and_is_last(tmp_path: Path):
+    data_root = tmp_path / "user-data"
+    service = MessagePackService(make_pack_root(tmp_path), data_root)
+    source, _message = create_pack_with_message(service, "来源", "来源文案")
+    destination, _destination_message = create_pack_with_message(
+        service,
+        "目标",
+        "目标文案",
+    )
+    config_path = data_root / "config.yaml"
+    make_config(config_path, source.id)
+    fused = service.fuse(
+        source.id,
+        destination.id,
+        service.catalog().revision,
+        config_path,
+    )
+
+    added = service.add_message(destination.id, "融合后新增", fused.revision)
+    preview = service.preview(destination.id)
+
+    assert preview.messages == ["目标文案", "来源文案", "融合后新增"]
+    assert added.entry.native is True
+    assert preview.entries[-1].origin_pack_id == destination.id
+
+
+def test_delete_pack_rejects_reference_then_recursively_removes_subtree(tmp_path: Path):
+    data_root = tmp_path / "user-data"
+    service = MessagePackService(make_pack_root(tmp_path), data_root)
+    source, source_message = create_pack_with_message(service, "来源", "来源文案")
+    destination, destination_message = create_pack_with_message(
+        service,
+        "目标",
+        "目标文案",
+    )
+    config_path = data_root / "config.yaml"
+    make_config(config_path, source.id)
+    service.fuse(source.id, destination.id, service.catalog().revision, config_path)
+
+    with pytest.raises(MessagePackConflict, match="目标使用"):
+        service.delete_pack(
+            destination.id,
+            service.catalog().revision,
+            {destination.id},
+        )
+
+    deleted = service.delete_pack(
+        destination.id,
+        service.catalog().revision,
+        set(),
+    )
+
+    assert deleted.pack is None
+    assert source.id not in service.catalog().packages
+    assert destination.id not in service.catalog().packages
+    assert source_message.id not in service.catalog().messages
+    assert destination_message.id not in service.catalog().messages
+
+
+def test_pending_fusion_transaction_rolls_forward_after_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    data_root = tmp_path / "user-data"
+    service = MessagePackService(make_pack_root(tmp_path), data_root)
+    source, _message = create_pack_with_message(service, "来源", "来源文案")
+    destination = service.create_pack(service.catalog().revision, "目标").pack
+    config_path = data_root / "config.yaml"
+    make_config(config_path, source.id)
+    original_replace = service.store._replace_target
+    replacements = 0
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    def fail_after_first_replace(path: Path, payload: bytes) -> None:
+        nonlocal replacements
+        replacements += 1
+        if replacements == 2:
+            raise SimulatedCrash("simulated process exit")
+        original_replace(path, payload)
+
+    monkeypatch.setattr(service.store, "_replace_target", fail_after_first_replace)
+
+    with pytest.raises(SimulatedCrash):
+        service.fuse(
+            source.id,
+            destination.id,
+            service.catalog().revision,
+            config_path,
+        )
+
+    assert service.store.pending_path.exists()
+    recovered = MessagePackService(service.program_root, data_root)
+    assert source.id not in recovered.catalog().top_level_pack_ids
+    assert load_config(config_path).targets[0].message_pack == destination.id
+    assert not recovered.store.pending_path.exists()
+
+
+def test_fusion_write_error_rolls_back_catalog_and_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    data_root = tmp_path / "user-data"
+    service = MessagePackService(make_pack_root(tmp_path), data_root)
+    source, _message = create_pack_with_message(service, "来源", "来源文案")
+    destination = service.create_pack(service.catalog().revision, "目标").pack
+    config_path = data_root / "config.yaml"
+    make_config(config_path, source.id)
+    catalog_before = service.store.catalog_path.read_bytes()
+    config_before = config_path.read_bytes()
+    original_replace = service.store._replace_target
+    replacements = 0
+
+    def fail_after_first_replace(path: Path, payload: bytes) -> None:
+        nonlocal replacements
+        replacements += 1
+        if replacements == 2:
+            raise OSError("disk error")
+        original_replace(path, payload)
+
+    monkeypatch.setattr(service.store, "_replace_target", fail_after_first_replace)
+
+    with pytest.raises(MessagePackError, match="已回滚"):
+        service.fuse(
+            source.id,
+            destination.id,
+            service.catalog().revision,
+            config_path,
+        )
+
+    assert service.store.catalog_path.read_bytes() == catalog_before
+    assert config_path.read_bytes() == config_before
+    assert not service.store.pending_path.exists()
