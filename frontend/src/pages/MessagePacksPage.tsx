@@ -1,4 +1,5 @@
-import { ArrowDown, ArrowUp, Download, Eye, Library, Pencil, Plus, RefreshCw, Upload } from "lucide-react";
+import { Download, Eye, Library, Pencil, Plus, RefreshCw, Upload } from "lucide-react";
+import type { DragEvent } from "react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { PackCatalog, PackImportResult, PackMutationResult, PackPreview } from "../types";
@@ -7,11 +8,18 @@ const categoryLabels: Record<string, string> = {
   daily: "日常", cute: "可爱", funny: "趣味", care: "关心", festival: "节日", custom: "自定义"
 };
 
+type ReorderEdge = "top" | "right" | "bottom" | "left";
+type DropIntent =
+  | { kind: "fuse"; targetId: string }
+  | { kind: "reorder"; targetId: string; position: "before" | "after"; edge: ReorderEdge };
+
 export function MessagePacksPage({ notify }: { notify: (message: string) => void }) {
   const [catalog, setCatalog] = useState<PackCatalog | null>(null);
   const [preview, setPreview] = useState<PackPreview | null>(null);
   const [result, setResult] = useState<PackImportResult | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [dropIntent, setDropIntent] = useState<DropIntent | null>(null);
   const report = (error: unknown, fallback: string) => notify(error instanceof Error ? error.message : fallback);
   const load = () => void api.messagePacks().then(setCatalog).catch((error) => report(error, "文案包加载失败"));
   useEffect(load, []);
@@ -60,12 +68,14 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
     finally { setBusy(null); }
   };
 
-  const movePack = async (index: number, offset: -1 | 1) => {
+  const reorderPack = async (sourceId: string, targetId: string, position: "before" | "after") => {
     if (!catalog) return;
-    const destination = index + offset;
-    if (destination < 0 || destination >= catalog.packs.length) return;
-    const ids = catalog.packs.map((pack) => pack.id);
-    [ids[index], ids[destination]] = [ids[destination], ids[index]];
+    const currentIds = catalog.packs.map((pack) => pack.id);
+    const ids = currentIds.filter((id) => id !== sourceId);
+    const targetIndex = ids.indexOf(targetId);
+    if (targetIndex < 0) return;
+    ids.splice(targetIndex + (position === "after" ? 1 : 0), 0, sourceId);
+    if (ids.every((id, index) => id === currentIds[index])) return;
     setBusy("reorder");
     try { acceptMutation(await api.reorderMessagePacks(ids, catalog.revision)); }
     catch (error) { report(error, "文案包排序失败"); load(); }
@@ -76,7 +86,7 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
     if (!catalog || !destinationId) return;
     const source = catalog.packs.find((pack) => pack.id === sourceId);
     const destination = catalog.packs.find((pack) => pack.id === destinationId);
-    if (!source || !destination || !window.confirm(`将“${source.name}”融合到“${destination.name}”？`)) return;
+    if (!source || !destination || !window.confirm(`将「${source.name}」融合到「${destination.name}」？`)) return;
     setBusy(sourceId);
     try { acceptMutation(await api.fuseMessagePack(sourceId, destinationId, catalog.revision)); }
     catch (error) { report(error, "文案包融合失败"); load(); }
@@ -101,6 +111,37 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
     finally { setBusy(null); }
   };
 
+  const startDrag = (event: DragEvent<HTMLElement>, packId: string) => {
+    if ((event.target as HTMLElement).closest("[data-no-pack-drag]")) {
+      event.preventDefault();
+      return;
+    }
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("application/x-autody-pack-id", packId);
+    setDraggingId(packId);
+  };
+
+  const updateDropIntent = (event: DragEvent<HTMLElement>, intent: DropIntent) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDropIntent(intent);
+  };
+
+  const dropPack = (event: DragEvent<HTMLElement>, intent: DropIntent) => {
+    event.preventDefault();
+    const sourceId = draggingId || event.dataTransfer.getData("application/x-autody-pack-id");
+    setDraggingId(null);
+    setDropIntent(null);
+    if (!sourceId || sourceId === intent.targetId) return;
+    if (intent.kind === "fuse") void fusePack(sourceId, intent.targetId);
+    else void reorderPack(sourceId, intent.targetId, intent.position);
+  };
+
+  const finishDrag = () => {
+    setDraggingId(null);
+    setDropIntent(null);
+  };
+
   return (
     <section className="editor-page">
       <header className="page-header">
@@ -111,27 +152,73 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
           <button className="action-button" onClick={load}><RefreshCw size={17} />刷新列表</button>
         </div>
       </header>
+      <p className="pack-drag-help">拖动卡片边缘调整顺序，拖到另一张卡片中央可融合。</p>
       <div className="pack-grid">
-        {catalog?.packs.map((pack, index) => (
-          <article className="panel pack-card" key={pack.id}>
+        {catalog?.packs.map((pack) => {
+          const intent = dropIntent?.targetId === pack.id ? dropIntent : null;
+          const slotClass = [
+            "pack-card-slot",
+            intent?.kind === "fuse" ? "drop-fuse" : "",
+            intent?.kind === "reorder" ? `drop-${intent.edge}` : ""
+          ].filter(Boolean).join(" ");
+          return (
+          <div
+            className={slotClass}
+            key={pack.id}
+          >
+          <article
+            aria-label={`文案包 ${pack.name}`}
+            className={`panel pack-card${draggingId === pack.id ? " is-dragging" : ""}`}
+            draggable={busy === null}
+            onDragStart={(event) => startDrag(event, pack.id)}
+            onDragEnd={finishDrag}
+          >
             <span className="pack-icon"><Library size={22} /></span>
             <div className="pack-meta"><span>{categoryLabels[pack.category] || pack.category}</span><span>{pack.count} 条</span>{pack.fused_source_count ? <span>含 {pack.fused_source_count} 个来源</span> : null}</div>
             <h2>{pack.name}</h2><p>{pack.description || "普通用户文案包"}</p>
             {pack.direct_fused_sources.length ? <p className="pack-provenance">已融合：{pack.direct_fused_sources.map((source) => source.name).join("、")}</p> : null}
-            <div className="pack-actions">
+            <div className="pack-actions" data-no-pack-drag onDragStart={(event) => event.preventDefault()}>
               <button disabled={busy !== null} onClick={() => void showPreview(pack.id)}><Eye size={15} />预览</button>
               <button disabled={busy !== null} onClick={() => void renamePack(pack.id, pack.name)}><Pencil size={15} />重命名</button>
-              <button aria-label={`上移 ${pack.name}`} disabled={busy !== null || index === 0} onClick={() => void movePack(index, -1)}><ArrowUp size={15} />上移</button>
-              <button aria-label={`下移 ${pack.name}`} disabled={busy !== null || index === catalog.packs.length - 1} onClick={() => void movePack(index, 1)}><ArrowDown size={15} />下移</button>
-              <select aria-label={`融合 ${pack.name} 到`} disabled={busy !== null || catalog.packs.length < 2} value="" onChange={(event) => void fusePack(pack.id, event.target.value)}>
-                <option value="">融合到…</option>
-                {catalog.packs.filter((candidate) => candidate.id !== pack.id).map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
-              </select>
-              {pack.direct_fused_sources.map((source) => <button key={source.id} disabled={busy !== null} onClick={() => void splitPack(pack.id, source.id, source.name)}>拆出 {source.name}</button>)}
+              {pack.direct_fused_sources.length ? (
+                <details className="pack-split-menu">
+                  <summary>拆出已融合包</summary>
+                  <div className="pack-split-options">
+                    {pack.direct_fused_sources.map((source) => <button key={source.id} disabled={busy !== null} onClick={() => void splitPack(pack.id, source.id, source.name)}>拆出 {source.name}</button>)}
+                  </div>
+                </details>
+              ) : null}
               <button disabled={busy !== null} onClick={() => void importPack(pack.id)}><Download size={15} />导入全局库</button>
             </div>
           </article>
-        ))}
+          {draggingId && draggingId !== pack.id ? (
+            <div className="pack-drop-zones" aria-hidden="true">
+              {([
+                ["top", "before"], ["right", "after"], ["bottom", "after"], ["left", "before"]
+              ] as const).map(([edge, position]) => {
+                const reorderIntent: DropIntent = { kind: "reorder", targetId: pack.id, position, edge };
+                return <div
+                  className={`pack-drop-zone reorder-zone ${edge}`}
+                  data-drop-edge={edge}
+                  data-drop-position={position}
+                  key={edge}
+                  onDragOver={(event) => updateDropIntent(event, reorderIntent)}
+                  onDragLeave={() => { if (dropIntent?.targetId === pack.id) setDropIntent(null); }}
+                  onDrop={(event) => dropPack(event, reorderIntent)}
+                />;
+              })}
+              <div
+                className="pack-drop-zone fuse-zone"
+                data-drop-kind="fuse"
+                onDragOver={(event) => updateDropIntent(event, { kind: "fuse", targetId: pack.id })}
+                onDragLeave={() => { if (dropIntent?.targetId === pack.id) setDropIntent(null); }}
+                onDrop={(event) => dropPack(event, { kind: "fuse", targetId: pack.id })}
+              />
+            </div>
+          ) : null}
+          </div>
+          );
+        })}
       </div>
       {result ? <div className="panel import-result"><strong>全局文案库导入结果</strong><span>新增 {result.added_count} 条</span><span>重复 {result.duplicate_count} 条</span><span>共 {result.total_count} 条</span></div> : null}
       {preview ? <section className="panel pack-preview"><div className="panel-heading"><h2>{preview.pack.name} · 预览</h2><button className="text-button" onClick={() => setPreview(null)}>关闭</button></div>{preview.messages.length ? <ol>{preview.messages.map((message, index) => <li key={preview.entries[index]?.id || index}>{message}{preview.entries[index] && !preview.entries[index].native ? <small> · 来源：{preview.entries[index].origin_pack_name}</small> : null}</li>)}</ol> : <p className="empty-list-copy">此文案包当前为空。</p>}</section> : null}

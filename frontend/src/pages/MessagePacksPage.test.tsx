@@ -73,36 +73,71 @@ test("creates an empty pack and imports a txt as a new pack", async () => {
   await waitFor(() => expect(api.importMessagePackFile).toHaveBeenCalledWith(file, 8));
 });
 
-test("renames without changing id and persists full reorder payload", async () => {
-  vi.spyOn(window, "prompt").mockReturnValue("晨间");
-  vi.mocked(api.renameMessagePack).mockResolvedValue({
-    revision: 8, pack: { ...daily, name: "晨间" }, catalog: { revision: 8, packs: [{ ...daily, name: "晨间" }, other] }
-  });
+function dragPack(sourceName: string, targetName: string, intent: "after" | "fuse") {
+  const sourceCard = screen.getByRole("article", { name: `文案包 ${sourceName}` });
+  const targetCard = screen.getByRole("article", { name: `文案包 ${targetName}` });
+  const targetSlot = targetCard.parentElement as HTMLElement;
+  let draggedId = "";
+  const dataTransfer = {
+    effectAllowed: "move", dropEffect: "move",
+    setData: vi.fn((_type: string, value: string) => { draggedId = value; }),
+    getData: vi.fn(() => draggedId)
+  };
+  fireEvent.dragStart(sourceCard, { dataTransfer });
+  const dropZone = targetSlot.querySelector(intent === "fuse" ? '[data-drop-kind="fuse"]' : '[data-drop-position="after"][data-drop-edge="right"]') as HTMLElement;
+  fireEvent.dragOver(dropZone, { dataTransfer });
+  fireEvent.drop(dropZone, { dataTransfer });
+  fireEvent.dragEnd(sourceCard, { dataTransfer });
+}
+
+test("dragging a card to another card edge persists the full reordered id list", async () => {
   vi.mocked(api.reorderMessagePacks).mockResolvedValue({
     revision: 8, pack: null, catalog: { revision: 8, packs: [other, daily] }
   });
   render(<MessagePacksPage notify={vi.fn()} />);
   await screen.findAllByText("日常问候");
 
-  fireEvent.click(screen.getAllByRole("button", { name: "重命名" })[0]);
-  await waitFor(() => expect(api.renameMessagePack).toHaveBeenCalledWith("daily", "晨间", 7));
-  fireEvent.click(screen.getByRole("button", { name: "下移 晨间" }));
-  await waitFor(() => expect(api.reorderMessagePacks).toHaveBeenCalledWith(["other", "daily"], 8));
+  dragPack("日常问候", "其他", "after");
+
+  await waitFor(() => expect(api.reorderMessagePacks).toHaveBeenCalledWith(["other", "daily"], 7));
+  expect(screen.queryByRole("button", { name: /上移|下移/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole("combobox", { name: /融合/ })).not.toBeInTheDocument();
 });
 
-test("fuses by stable ids and splits a direct provenance source", async () => {
+test("dropping one card onto another card center confirms and fuses by stable ids", async () => {
   vi.spyOn(window, "confirm").mockReturnValue(true);
   vi.mocked(api.fuseMessagePack).mockResolvedValue({
     revision: 8, pack: daily, catalog: { revision: 8, packs: [daily] }
   });
+  render(<MessagePacksPage notify={vi.fn()} />);
+  await screen.findAllByText("日常问候");
+
+  dragPack("其他", "日常问候", "fuse");
+
+  expect(window.confirm).toHaveBeenCalledWith("将「其他」融合到「日常问候」？");
+  await waitFor(() => expect(api.fuseMessagePack).toHaveBeenCalledWith("other", "daily", 7));
+});
+
+test("cancelling drag-to-fuse confirmation leaves both packs unchanged", async () => {
+  vi.spyOn(window, "confirm").mockReturnValue(false);
+  render(<MessagePacksPage notify={vi.fn()} />);
+  await screen.findAllByText("日常问候");
+
+  dragPack("其他", "日常问候", "fuse");
+
+  expect(window.confirm).toHaveBeenCalledWith("将「其他」融合到「日常问候」？");
+  expect(api.fuseMessagePack).not.toHaveBeenCalled();
+});
+
+test("a package with direct fused sources exposes the split action", async () => {
+  vi.spyOn(window, "confirm").mockReturnValue(true);
   vi.mocked(api.splitMessagePack).mockResolvedValue({
     revision: 8, pack: daily, catalog: { revision: 8, packs: catalog.packs }
   });
   render(<MessagePacksPage notify={vi.fn()} />);
   await screen.findAllByText("日常问候");
 
-  fireEvent.change(screen.getByLabelText("融合 其他 到"), { target: { value: "daily" } });
-  await waitFor(() => expect(api.fuseMessagePack).toHaveBeenCalledWith("other", "daily", 7));
+  expect(screen.getByText("拆出已融合包")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "拆出 来源包" }));
-  await waitFor(() => expect(api.splitMessagePack).toHaveBeenCalledWith("daily", "source", 8));
+  await waitFor(() => expect(api.splitMessagePack).toHaveBeenCalledWith("daily", "source", 7));
 });
