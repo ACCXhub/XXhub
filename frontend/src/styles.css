@@ -189,9 +189,13 @@ input:focus, textarea:focus, select:focus { border-color: #5797ef; box-shadow: 0
 .pack-card p { min-height: 42px; margin: 0; color: #77849a; font-size: 12px; line-height: 1.65; }
 .pack-actions { display: flex; gap: 8px; margin-top: 19px; flex-wrap: wrap; }
 .pack-actions button { min-height: 34px; padding: 0 11px; display: inline-flex; align-items: center; gap: 5px; color: #28517f; border: 1px solid #dce4ee; border-radius: 7px; background: white; cursor: pointer; font-size: 11px; }
+.pack-actions select { min-height: 34px; padding: 0 9px; color: #28517f; border: 1px solid #dce4ee; border-radius: 7px; background: white; font-size: 11px; }
 .pack-actions button:hover { background: #f7faff; }
 .pack-actions button.danger-outline { color: #b54848; }
 .pack-actions button:disabled { opacity: .5; }
+.pack-provenance { min-height: 0 !important; margin-top: 8px !important; color: #5d7190 !important; }
+.file-action { cursor: pointer; }
+.file-action input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .import-result { margin-top: 14px; padding: 16px 18px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; font-size: 12px; }
 .import-result strong { color: #1769e8; }
 .import-result small { width: 100%; color: #8090a5; }

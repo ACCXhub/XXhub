@@ -10,6 +10,7 @@ import type {
   LogPage,
   PackCatalog,
   PackImportResult,
+  PackMutationResult,
   PackPreview,
   SchedulePreview,
   ScheduleSettings,
@@ -96,6 +97,37 @@ export const api = {
       body: JSON.stringify({ messages })
     }),
   messagePacks: () => request<PackCatalog>("/api/message-packs"),
+  createMessagePack: (revision: number) =>
+    request<PackMutationResult>("/api/message-packs", {
+      method: "POST",
+      body: JSON.stringify({ expected_revision: revision })
+    }),
+  importMessagePackFile: (file: File, revision: number) => {
+    const data = new FormData();
+    data.append("file", file);
+    data.append("expected_revision", String(revision));
+    return request<PackMutationResult>("/api/message-packs/import", { method: "POST", body: data });
+  },
+  renameMessagePack: (id: string, name: string, revision: number) =>
+    request<PackMutationResult>(`/api/message-packs/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name, expected_revision: revision })
+    }),
+  reorderMessagePacks: (packIds: string[], revision: number) =>
+    request<PackMutationResult>("/api/message-packs/order", {
+      method: "PUT",
+      body: JSON.stringify({ pack_ids: packIds, expected_revision: revision })
+    }),
+  fuseMessagePack: (sourceId: string, destinationId: string, revision: number) =>
+    request<PackMutationResult>(`/api/message-packs/${encodeURIComponent(sourceId)}/fuse`, {
+      method: "POST",
+      body: JSON.stringify({ destination_id: destinationId, expected_revision: revision })
+    }),
+  splitMessagePack: (destinationId: string, sourceId: string, revision: number) =>
+    request<PackMutationResult>(`/api/message-packs/${encodeURIComponent(destinationId)}/split`, {
+      method: "POST",
+      body: JSON.stringify({ source_id: sourceId, expected_revision: revision })
+    }),
   previewMessagePack: (id: string) =>
     request<PackPreview>(`/api/message-packs/${encodeURIComponent(id)}`),
   importMessagePack: (id: string, mode: "merge" | "replace" | "preview_only") =>

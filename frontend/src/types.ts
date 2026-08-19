@@ -239,10 +239,27 @@ export interface MessagePack {
   version: string;
   count: number;
   category: string;
+  direct_fused_sources: MessagePack[];
+  fused_source_count: number;
 }
 
 export interface PackCatalog {
   packs: MessagePack[];
+  revision: number;
+}
+
+export interface PackMutationResult {
+  revision: number;
+  pack: MessagePack | null;
+  catalog: PackCatalog;
+}
+
+export interface PackEntry {
+  id: string;
+  text: string;
+  origin_pack_id: string;
+  origin_pack_name: string;
+  native: boolean;
 }
 
 export interface OptionalModuleStatus {
@@ -267,6 +284,7 @@ export interface PackPreview {
   pack: MessagePack;
   messages: string[];
   duplicate_count: number;
+  entries: PackEntry[];
 }
 
 export interface PackImportResult {
