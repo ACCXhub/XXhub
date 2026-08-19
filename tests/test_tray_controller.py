@@ -240,19 +240,63 @@ def test_desktop_launcher_starts_the_tray_host():
     assert "-ProjectRoot" in text
 
 
-def test_tray_opens_dashboard_once_after_health_and_reuses_it_on_second_launch():
+def test_tray_cold_start_opens_a_local_wait_page_before_health_and_reuses_the_tab(
+    tmp_path: Path,
+):
     text = Path("scripts/autody-tray.ps1").read_text(encoding="utf-8-sig")
+    service = text[
+        text.index("function Start-Or-ReuseService"):
+        text.index("function Wait-ForExistingHealthyService")
+    ]
 
     assert "function Wait-ForExistingHealthyService" in text
     assert "function Show-ExistingDashboard" in text
     assert "function Open-VerifiedDashboard" in text
-    assert "Start-Or-ReuseService | Out-Null" in text
+    assert service.index("Start-Process -FilePath $Python") < service.index("& $OnColdStart")
+    assert service.index("& $OnColdStart") < service.index("for ($attempt = 0; $attempt -lt 40; $attempt++)")
+    assert "Start-Or-ReuseService -OnColdStart" in text
     assert "Wait-ForExistingHealthyService | Out-Null" in text
     assert text.count("Start-Process $Url") == 1
     assert "SelectionItemPattern" in text
     assert "$open.add_Click({ Invoke-DashboardOpenAsync })" in text
     startup = text[text.index("try {", text.index("$timer.add_Tick")):text.index("[Windows.Forms.Application]::Run")]
     assert "Open-VerifiedDashboard" in startup
+
+    script_path = Path("scripts/autody-tray.ps1").resolve()
+    wait_path = tmp_path / "startup-wait.html"
+    command = r"""
+    $ErrorActionPreference = "Stop"
+    . $env:AUTODY_TEST_TRAY_SCRIPT -DefineOnly -ProjectRoot $env:AUTODY_TEST_PROJECT_ROOT -DataRoot $env:AUTODY_TEST_DATA_ROOT
+    $actual = New-StartupWaitPage -DashboardUrl "http://127.0.0.1:8777" -Destination $env:AUTODY_TEST_WAIT_PAGE
+    if ($actual -ne $env:AUTODY_TEST_WAIT_PAGE) { throw "unexpected wait-page path" }
+    """
+    test_env = os.environ.copy()
+    test_env.update({
+        "AUTODY_TEST_TRAY_SCRIPT": str(script_path),
+        "AUTODY_TEST_PROJECT_ROOT": str(Path.cwd()),
+        "AUTODY_TEST_DATA_ROOT": str(tmp_path / "data"),
+        "AUTODY_TEST_WAIT_PAGE": str(wait_path),
+    })
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Sta", "-Command", command],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=test_env,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    html = wait_path.read_text(encoding="utf-8")
+    for token in [
+        "AutoDy 正在启动…",
+        "http://127.0.0.1:8777",
+        "location.replace(dashboardUrl)",
+        "setTimeout(poll, 250)",
+        "30000",
+        "重试",
+        "打开日志",
+    ]:
+        assert token in html
 
 
 def test_duplicate_tray_launch_opens_dashboard_without_starting_another_host_or_service():

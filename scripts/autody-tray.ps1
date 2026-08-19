@@ -31,6 +31,7 @@ $PortStatePath = Join-Path $DataRoot "data\service-port.json"
 $script:ServicePort = $PreferredPort
 $script:Url = "http://127.0.0.1:$PreferredPort"
 $script:Repairing = $false
+$script:StartupPageOpened = $false
 $env:AUTODY_HOME = $DataRoot
 $env:AUTODY_PROGRAM_ROOT = $ProjectRoot
 $env:AUTODY_BROWSERS_PATH = $BrowserRoot
@@ -342,7 +343,81 @@ function Stop-ManagedService {
     return $true
 }
 
+function New-StartupWaitPage {
+    param(
+        [Parameter(Mandatory = $true)][string]$DashboardUrl,
+        [string]$Destination
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Destination)) {
+        $key = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ProjectRoot)).Replace('=','').Replace('/','_').Replace('+','-')
+        $Destination = Join-Path ([IO.Path]::GetTempPath()) "AutoDy-startup-$key.html"
+    }
+    $parent = Split-Path -Parent $Destination
+    if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+
+    $logsPath = [IO.Path]::GetFullPath($LogDir).TrimEnd('\') + [IO.Path]::DirectorySeparatorChar
+    $logsUrl = (New-Object System.Uri -ArgumentList $logsPath).AbsoluteUri
+    $dashboardJson = ConvertTo-Json -Compress -InputObject $DashboardUrl
+    $logsJson = ConvertTo-Json -Compress -InputObject $logsUrl
+    $html = @'
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AutoDy 正在启动…</title>
+<style>
+html,body{height:100%;margin:0}body{display:grid;place-items:center;background:#f7f8fa;color:#222;font:15px "Segoe UI","Microsoft YaHei",sans-serif}.card{text-align:center}.spinner{width:22px;height:22px;margin:0 auto 14px;border:2px solid #d8dbe1;border-top-color:#5d6b82;border-radius:50%;animation:spin .8s linear infinite}h1{margin:0;font-size:18px;font-weight:600}.failure{display:none;max-width:360px}p{color:#626b78;line-height:1.6}.actions{display:flex;justify-content:center;gap:10px}button,a{box-sizing:border-box;padding:7px 14px;border:1px solid #cfd3da;border-radius:6px;background:#fff;color:#273142;text-decoration:none;cursor:pointer;font:inherit}@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<main class="card" id="starting"><div class="spinner"></div><h1>AutoDy 正在启动…</h1></main>
+<main class="card failure" id="failure"><h1>AutoDy 启动未完成</h1><p>后台服务暂时无法访问。你可以重试，或打开日志查看原因。</p><div class="actions"><button id="retry" type="button">重试</button><a id="logs" target="_blank" rel="noopener">打开日志</a></div></main>
+<script>
+const dashboardUrl = __DASHBOARD_URL__;
+const logsUrl = __LOGS_URL__;
+let deadline = Date.now() + 30000;
+let polling = true;
+const starting = document.getElementById("starting");
+const failure = document.getElementById("failure");
+document.getElementById("logs").href = logsUrl;
+async function poll() {
+  if (!polling) return;
+  if (Date.now() >= deadline) {
+    polling = false;
+    starting.style.display = "none";
+    failure.style.display = "block";
+    return;
+  }
+  try {
+    await fetch(dashboardUrl + "/?autody-startup=" + Date.now(), {cache: "no-store", mode: "no-cors"});
+    location.replace(dashboardUrl);
+  } catch (_error) {
+    setTimeout(poll, 250);
+  }
+}
+document.getElementById("retry").addEventListener("click", () => {
+  deadline = Date.now() + 30000;
+  polling = true;
+  failure.style.display = "none";
+  starting.style.display = "block";
+  poll();
+});
+poll();
+</script>
+</body>
+</html>
+'@
+    $html = $html.Replace("__DASHBOARD_URL__", $dashboardJson).Replace("__LOGS_URL__", $logsJson)
+    $utf8 = New-Object System.Text.UTF8Encoding -ArgumentList $false
+    [IO.File]::WriteAllText($Destination, $html, $utf8)
+    return [IO.Path]::GetFullPath($Destination)
+}
+
 function Start-Or-ReuseService {
+    param([scriptblock]$OnColdStart)
+
     if (-not (Test-Path -LiteralPath $Python) -or -not (Test-Path -LiteralPath $Config)) { throw "Current AutoDy installation is incomplete." }
     $expected = Get-ExpectedVersions
     foreach ($port in Get-ServicePortCandidates) {
@@ -357,6 +432,7 @@ function Start-Or-ReuseService {
     if ($null -eq $selectedPort) { throw "No safe AutoDy port is available from $PreferredPort through 8799." }
     Set-ServicePort $selectedPort
     $process = Start-Process -FilePath $Python -ArgumentList @("-m", "autody.cli", "ui", "--no-open", "--config", $Config, "--port", $selectedPort) -WorkingDirectory $DataRoot -WindowStyle Hidden -PassThru
+    if ($null -ne $OnColdStart) { & $OnColdStart }
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         Start-Sleep -Milliseconds 250
         $snapshot = Get-ServiceSnapshot
@@ -474,12 +550,23 @@ public static class AutoDyWindowActivation {
 function Open-VerifiedDashboard {
     param([switch]$ReuseOnly)
 
+    $script:StartupPageOpened = $false
     if ($ReuseOnly) {
         Wait-ForExistingHealthyService | Out-Null
     } else {
-        Start-Or-ReuseService | Out-Null
+        Start-Or-ReuseService -OnColdStart {
+            if (-not (Show-ExistingDashboard)) {
+                try {
+                    $waitPage = New-StartupWaitPage -DashboardUrl $script:Url
+                    Start-Process $waitPage
+                    $script:StartupPageOpened = $true
+                } catch {
+                    Write-TrayLog "Startup wait page could not be opened; the dashboard will open after readiness."
+                }
+            }
+        } | Out-Null
     }
-    if (-not (Show-ExistingDashboard)) {
+    if (-not $script:StartupPageOpened -and -not (Show-ExistingDashboard)) {
         Start-Process $Url
     }
 }
