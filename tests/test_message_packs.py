@@ -115,3 +115,48 @@ def test_preview_only_never_writes_or_backs_up(tmp_path: Path):
     assert result.backup_path is None
     assert messages.read_text(encoding="utf-8") == "原文案\n"
     assert not (tmp_path / "data/backups").exists()
+
+
+def test_first_catalog_load_seeds_builtin_ids_once(tmp_path: Path):
+    program_root = make_pack_root(tmp_path)
+    data_root = tmp_path / "user-data"
+    message_ids = iter(["message-seeded-1", "message-seeded-2"])
+    service = MessagePackService(
+        program_root,
+        data_root,
+        id_factory=lambda: next(message_ids),
+        now=lambda: datetime(2026, 8, 19, 20, 0, 0),
+    )
+
+    catalog = service.catalog()
+
+    assert catalog.top_level_pack_ids == ["sample"]
+    assert catalog.migrations.builtin_seed_v1.completed is True
+    assert service.preview("sample").messages == ["早安呀", "今天顺利"]
+    assert (data_root / "data/message-packs/catalog.json").is_file()
+
+
+def test_empty_completed_catalog_is_not_seeded_again(tmp_path: Path):
+    program_root = make_pack_root(tmp_path)
+    data_root = tmp_path / "user-data"
+    service = MessagePackService(program_root, data_root)
+    catalog_path = data_root / "data/message-packs/catalog.json"
+    service.catalog()
+    payload = json.loads(catalog_path.read_text(encoding="utf-8"))
+    payload.update(
+        {
+            "revision": payload["revision"] + 1,
+            "top_level_pack_ids": [],
+            "packages": {},
+            "messages": {},
+        }
+    )
+    catalog_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    restarted = MessagePackService(program_root, data_root)
+
+    assert restarted.list_packs().packs == []
+    assert restarted.catalog().migrations.builtin_seed_v1.completed is True

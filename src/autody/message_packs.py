@@ -1,11 +1,18 @@
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-import json
 import os
 from pathlib import Path
 import shutil
 from typing import Callable
+
+from autody.message_pack_catalog import (
+    CatalogDocument,
+    FusedSourceItem,
+    MessageItem,
+    MessagePackCatalogStore,
+    MessagePackError,
+)
 
 
 class ImportMode(str, Enum):
@@ -46,60 +53,71 @@ class ImportResult:
     mode: ImportMode
 
 
-class MessagePackError(RuntimeError):
-    pass
-
-
 class MessagePackService:
     def __init__(
         self,
         root: Path,
+        data_root: Path | None = None,
         now: Callable[[], datetime] | None = None,
+        id_factory: Callable[[], str] | None = None,
     ):
         self.root = root.resolve()
-        self.pack_dir = self.root / "message-packs"
+        self.program_root = self.root
+        self.data_root = (data_root or root).resolve()
         self.now = now or datetime.now
+        self.store = MessagePackCatalogStore(
+            self.program_root,
+            self.data_root,
+            now=self.now,
+            id_factory=id_factory,
+        )
 
-    def _parse_index(self, text: str) -> list[MessagePack]:
-        try:
-            payload = json.loads(text)
-            raw_packs = payload["packs"]
-            packs = [MessagePack(**item) for item in raw_packs]
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-            raise MessagePackError(f"文案包索引无效：{exc}") from exc
-        if len({pack.id for pack in packs}) != len(packs):
-            raise MessagePackError("文案包索引包含重复 id")
-        return packs
-
-    def _local_packs(self) -> list[MessagePack]:
-        index = self.pack_dir / "index.json"
-        if not index.exists():
-            raise MessagePackError(f"内置文案包索引不存在：{index}")
-        return self._parse_index(index.read_text(encoding="utf-8"))
+    def catalog(self) -> CatalogDocument:
+        return self.store.load_or_seed()
 
     def list_packs(self) -> PackCatalog:
-        return PackCatalog(packs=self._local_packs())
+        catalog = self.catalog()
+        return PackCatalog(
+            packs=[
+                self._pack_payload(catalog, pack_id)
+                for pack_id in catalog.top_level_pack_ids
+            ]
+        )
 
-    def _local_pack_text(self, pack: MessagePack) -> str:
-        candidate = (self.pack_dir / pack.file).resolve()
-        if self.pack_dir not in candidate.parents or not candidate.is_file():
-            raise MessagePackError(f"内置文案包文件不存在：{pack.file}")
-        return candidate.read_text(encoding="utf-8")
+    def _message_ids(self, catalog: CatalogDocument, pack_id: str) -> list[str]:
+        result: list[str] = []
+        for item in catalog.packages[pack_id].items:
+            if isinstance(item, MessageItem):
+                result.append(item.message_id)
+            elif isinstance(item, FusedSourceItem):
+                result.extend(self._message_ids(catalog, item.pack_id))
+        return result
+
+    def _pack_payload(self, catalog: CatalogDocument, pack_id: str) -> MessagePack:
+        package = catalog.packages[pack_id]
+        return MessagePack(
+            id=package.id,
+            name=package.name,
+            description=package.description,
+            version=package.version,
+            file="",
+            count=len(self._message_ids(catalog, pack_id)),
+            category=package.category,
+        )
 
     def preview(self, pack_id: str) -> PackPreview:
-        catalog = self.list_packs()
-        pack = next((item for item in catalog.packs if item.id == pack_id), None)
-        if pack is None:
+        catalog = self.catalog()
+        if pack_id not in catalog.packages:
             raise MessagePackError(f"未知文案包：{pack_id}")
-        text = self._local_pack_text(pack)
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        messages = list(dict.fromkeys(lines))
+        package = catalog.packages[pack_id]
+        pack = self._pack_payload(catalog, pack_id)
+        messages = [catalog.messages[item].text for item in self._message_ids(catalog, pack_id)]
         if not messages:
             raise MessagePackError(f"文案包为空：{pack_id}")
         return PackPreview(
             pack=pack,
             messages=messages,
-            duplicate_count=len(lines) - len(messages),
+            duplicate_count=package.seed_duplicate_count,
         )
 
     def _backup(self, messages_file: Path) -> Path | None:
