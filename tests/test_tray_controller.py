@@ -73,10 +73,56 @@ def test_tray_revalidates_a_stale_persisted_port_before_selecting_a_new_service_
         text.index("function Wait-ForExistingHealthyService")
     ]
     assert "foreach ($port in Get-ServicePortCandidates)" in start
-    assert "foreach ($port in $PreferredPort..8799)" in start
+    assert "$selectedPort = Get-AvailableServicePort" in start
     assert start.index("foreach ($port in Get-ServicePortCandidates)") < start.index(
-        "foreach ($port in $PreferredPort..8799)"
+        "$selectedPort = Get-AvailableServicePort"
     )
+
+
+def test_tray_port_selection_queries_listeners_in_bulk(tmp_path: Path):
+    script_path = Path("scripts/autody-tray.ps1").resolve()
+    command = r"""
+    $ErrorActionPreference = "Stop"
+    . $env:AUTODY_TEST_TRAY_SCRIPT -ProjectRoot $env:AUTODY_TEST_ROOT -DataRoot $env:AUTODY_TEST_DATA -DefineOnly
+    $script:ListenerQueries = 0
+    function Get-PersistedServicePort { return 8768 }
+    function Get-NetTCPConnection {
+      $script:ListenerQueries += 1
+      return @(
+        [pscustomobject]@{ LocalPort = 8765; State = "Listen" },
+        [pscustomobject]@{ LocalPort = 8768; State = "Listen" },
+        [pscustomobject]@{ LocalPort = 9000; State = "Listen" }
+      )
+    }
+    $candidates = @(Get-ServicePortCandidates)
+    $available = Get-AvailableServicePort
+    if (($candidates -join ",") -ne "8768,8765") {
+      throw "unexpected candidates: $($candidates -join ',')"
+    }
+    if ($available -ne 8766) { throw "unexpected available port: $available" }
+    if ($script:ListenerQueries -ne 2) {
+      throw "listener table was not queried once per operation: $script:ListenerQueries"
+    }
+    "ok"
+    """
+    test_env = os.environ.copy()
+    test_env.update(
+        {
+            "AUTODY_TEST_TRAY_SCRIPT": str(script_path),
+            "AUTODY_TEST_ROOT": str(Path.cwd()),
+            "AUTODY_TEST_DATA": str(tmp_path),
+        }
+    )
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", command],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=test_env,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "ok"
 
 
 def test_tray_requires_current_identity_process_and_user_scope_before_reusing_a_service():

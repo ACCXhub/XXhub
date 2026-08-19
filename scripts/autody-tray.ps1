@@ -212,14 +212,35 @@ function Save-ServicePort([int]$Port) {
     @{ port = $Port } | ConvertTo-Json | Set-Content -LiteralPath $PortStatePath -Encoding utf8
 }
 
-function Get-ServicePortCandidates {
+function Get-ListeningServicePorts {
+    try {
+        return @(
+            Get-NetTCPConnection -State Listen -ErrorAction Stop |
+                Where-Object { $_.LocalPort -ge $PreferredPort -and $_.LocalPort -le 8799 } |
+                Select-Object -ExpandProperty LocalPort -Unique
+        )
+    } catch {
+        return @()
+    }
+}
+
+function Get-ServicePortCandidates([int[]]$ListeningPorts = @(Get-ListeningServicePorts)) {
     $ports = New-Object 'System.Collections.Generic.List[int]'
     $persisted = Get-PersistedServicePort
-    if ($null -ne $persisted) { $ports.Add($persisted) }
-    foreach ($port in $PreferredPort..8799) {
+    if ($null -ne $persisted -and $ListeningPorts -contains $persisted) {
+        $ports.Add($persisted)
+    }
+    foreach ($port in @($ListeningPorts | Sort-Object)) {
         if (-not $ports.Contains($port)) { $ports.Add($port) }
     }
     return $ports
+}
+
+function Get-AvailableServicePort([int[]]$ListeningPorts = @(Get-ListeningServicePorts)) {
+    foreach ($port in $PreferredPort..8799) {
+        if ($ListeningPorts -notcontains $port) { return $port }
+    }
+    return $null
 }
 
 function Test-SystemDarkTheme {
@@ -331,10 +352,7 @@ function Start-Or-ReuseService {
         if (Test-HealthyAutoDy $snapshot $expected) { Save-ServicePort $port; return $snapshot }
         if (-not (Stop-ManagedService)) { throw "Verified old AutoDy service could not be stopped." }
     }
-    $selectedPort = $null
-    foreach ($port in $PreferredPort..8799) {
-        if ($null -eq (Get-Listener $port)) { $selectedPort = $port; break }
-    }
+    $selectedPort = Get-AvailableServicePort
     if ($null -eq $selectedPort) { throw "No safe AutoDy port is available from $PreferredPort through 8799." }
     Set-ServicePort $selectedPort
     $process = Start-Process -FilePath $Python -ArgumentList @("-m", "autody.cli", "ui", "--no-open", "--config", $Config, "--port", $selectedPort) -WorkingDirectory $DataRoot -WindowStyle Hidden -PassThru
