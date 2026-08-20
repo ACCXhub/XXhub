@@ -94,6 +94,8 @@ cd ..
 - Do not commit runtime data, `.venv`, `node_modules`, logs, caches, module registry, or private screenshots.
 - Do not publish duplicate copies of the same module unless explicitly required.
 - Leave the working tree clean after a completed release task.
+- After feature work is committed, pushed, merged when applicable, and no longer needs isolation, remove its obsolete worktree with Git, prune worktree metadata, and delete its obsolete dependency, build, test-cache, and packaging staging artifacts; retain current source, active environments, necessary release artifacts, and the installed/user-data copies.
+- Do not let finished Codex worktrees, duplicated `node_modules`, browser/runtime bundles, package staging directories, or test/build caches accumulate indefinitely.
 
 ## Documentation
 
