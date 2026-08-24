@@ -151,19 +151,12 @@ def bindings_revalidation_required(data_root: Path) -> bool:
 def complete_binding_revalidation(
     data_root: Path,
     *,
-    account_scope: str | None,
-    target_candidate_ids: list[str | None],
-    current_candidate_ids: set[str],
+    bindings_proven: bool,
 ) -> bool:
-    """Clear the logout guard only after a verified account scan resolves every target."""
+    """Clear the logout guard only after canonical binding proof succeeds."""
     if not bindings_revalidation_required(data_root):
         return True
-    if not account_scope:
-        return False
-    if any(
-        not candidate_id or candidate_id not in current_candidate_ids
-        for candidate_id in target_candidate_ids
-    ):
+    if not bindings_proven:
         return False
     _binding_state_path(data_root).unlink(missing_ok=True)
     return True

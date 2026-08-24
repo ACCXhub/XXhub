@@ -26,11 +26,11 @@ from autody.config import (
 from autody.daily_status import effective_daily_target_statuses
 from autody.account_profile import (
     bindings_revalidation_required,
-    evaluate_account_scope,
     load_account_profile,
 )
+from autody.binding_recovery import StableBindingResolution, resolve_stable_binding
 from autody.failures import FailureDetail, failure_detail
-from autody.friend_discovery import FriendCandidate, load_discovered_friends
+from autody.friend_discovery import load_discovered_friends
 from autody.history import (
     TaskHistoryStore,
     TaskRunRecord,
@@ -118,40 +118,60 @@ def _verified_conversation_ids(
     config: AppConfig,
     targets: list[Target],
 ) -> dict[str, str]:
-    """Resolve persistent bindings to current DOM identities without guessing."""
+    return {
+        target_id: resolution.conversation_id
+        for target_id, resolution in _binding_resolutions(config, targets).items()
+        if resolution.valid and resolution.conversation_id
+    }
+
+
+def _binding_resolutions(
+    config: AppConfig, targets: list[Target]
+) -> dict[str, StableBindingResolution]:
+    """Return the one canonical binding decision for every modern target."""
     data_root = config.state_file.parent
     discovered = load_discovered_friends(data_root / "discovered_friends.json")
-    if (
-        discovered is None
-        or not discovered.last_result.get("completed_bottom_reached")
-        or bindings_revalidation_required(data_root)
-    ):
-        return {}
-    account_evaluation = evaluate_account_scope(
-        load_account_profile(config.messages_file.parent),
-        binding_scope=discovered.account_scope,
-    )
-    if account_evaluation.compatible is not True:
-        return {}
-
-    current_by_candidate_id: dict[str, list[FriendCandidate]] = {}
-    for candidate in discovered.candidates:
-        if candidate.presence_status != "current":
-            continue
-        current_by_candidate_id.setdefault(candidate.candidate_id, []).append(candidate)
-
-    resolved: dict[str, str] = {}
+    profile = load_account_profile(config.messages_file.parent)
+    guarded = bindings_revalidation_required(data_root)
+    resolved: dict[str, StableBindingResolution] = {}
     for target in targets:
-        if not target.stable_id or not target.candidate_id:
+        if not target.stable_id:
             continue
-        matches = current_by_candidate_id.get(target.candidate_id, [])
-        if len(matches) != 1:
-            continue
-        candidate = matches[0]
-        conversation_id = conversation_candidate_id(candidate.identity_key)
-        if conversation_id:
-            resolved[target.stable_id] = conversation_id
+        resolved[target.stable_id] = resolve_stable_binding(
+            target,
+            discovered,
+            profile,
+            revalidation_required=guarded,
+        )
     return resolved
+
+
+def _binding_failure_detail(
+    target: Target,
+    resolution,
+    *,
+    run_id: str,
+    account_scope: str | None,
+) -> FailureDetail:
+    reason = {
+        "account_mismatch": "account_scope_mismatch",
+        "account_unverified": "login_required",
+        "binding_missing": "binding_missing",
+        "identity_ambiguous": "blocked_ambiguous_target",
+    }.get(resolution.status, "binding_stale")
+    diagnostics = {"binding_resolution": resolution.status}
+    if resolution.account_comparison:
+        diagnostics["account_comparison"] = resolution.account_comparison
+    return failure_detail(
+        reason,
+        stage="target_binding_resolved",
+        run_id=run_id,
+        target_stable_id=target_identity(target),
+        account_scope=account_scope,
+        binding_valid=False,
+        account_scope_matches=(False if reason == "account_scope_mismatch" else None),
+        diagnostic_details=diagnostics,
+    )
 
 
 def _send_target(
@@ -180,9 +200,7 @@ def _send_target(
                 target.name,
                 message,
                 selected_target_id=target.stable_id,
-                expected_conversation_id=(
-                    expected_conversation_id or target.candidate_id
-                ),
+                expected_conversation_id=expected_conversation_id,
             )
         )
     return _delivery_result(chat.send(target.name, message))
@@ -546,7 +564,12 @@ def run_daily(
         ]
     else:
         selected_targets = targets
-    conversation_ids = _verified_conversation_ids(config, selected_targets)
+    binding_resolutions = _binding_resolutions(config, selected_targets)
+    conversation_ids = {
+        target_id: resolution.conversation_id
+        for target_id, resolution in binding_resolutions.items()
+        if resolution.valid and resolution.conversation_id
+    }
     effective_before_run = effective_daily_target_statuses(
         config,
         state,
@@ -558,24 +581,6 @@ def run_daily(
         discovered = load_discovered_friends(
             config.state_file.parent / "discovered_friends.json"
         )
-        profile = load_account_profile(config.messages_file.parent)
-        current_candidate_ids = {
-            candidate.candidate_id
-            for candidate in (discovered.candidates if discovered else [])
-            if candidate.presence_status == "current"
-        }
-        guarded = bindings_revalidation_required(config.state_file.parent)
-        account_evaluation = evaluate_account_scope(
-            profile,
-            binding_scope=discovered.account_scope if discovered else None,
-        )
-        account_diagnostics = {
-            "account_comparison": account_evaluation.account_comparison,
-        }
-        if account_evaluation.run_scope_comparison:
-            account_diagnostics["run_scope_comparison"] = (
-                account_evaluation.run_scope_comparison
-            )
         stored_failures = _stored_target_failures(daily)
         for target in selected_targets:
             target_id = target_identity(target)
@@ -598,146 +603,86 @@ def run_daily(
                 daily["failures"][target.name] = detail.reason_code
                 daily["target_failures"][target_id] = detail.model_dump(mode="json")
                 continue
-            binding_valid = bool(
-                target.stable_id
-                and target.candidate_id
-                and target.candidate_id in current_candidate_ids
-                and not guarded
-            )
-            if account_evaluation.reason_code == "login_required":
-                detail = failure_detail(
-                    account_evaluation.reason_code,
-                    stage="account_verified",
-                    run_id=run_id,
-                    target_stable_id=target_id,
-                    account_scope=discovered.account_scope if discovered else None,
-                    binding_valid=binding_valid,
-                    account_scope_matches=False,
-                    diagnostic_details=account_diagnostics,
+            resolution = binding_resolutions.get(target.stable_id or "")
+            account_diagnostics = {}
+            if resolution and resolution.account_comparison:
+                account_diagnostics["account_comparison"] = (
+                    resolution.account_comparison
                 )
-            elif guarded:
-                detail = failure_detail(
-                    "binding_stale",
-                    stage="target_binding_resolved",
+            if resolution is not None and not resolution.valid:
+                detail = _binding_failure_detail(
+                    target,
+                    resolution,
                     run_id=run_id,
-                    target_stable_id=target_id,
                     account_scope=discovered.account_scope if discovered else None,
-                    binding_valid=False,
-                    account_scope_matches=(
-                        True if account_evaluation.compatible is True else None
-                    ),
-                    diagnostic_details=account_diagnostics,
                 )
-            elif account_evaluation.reason_code == "account_scope_mismatch":
-                detail = failure_detail(
-                    "account_scope_mismatch",
-                    stage="account_verified",
-                    run_id=run_id,
-                    target_stable_id=target_id,
-                    account_scope=discovered.account_scope if discovered else None,
-                    binding_valid=binding_valid,
-                    account_scope_matches=False,
-                    diagnostic_details=account_diagnostics,
+                targeted_blocking_details[target_id] = detail
+                daily["failures"][target.name] = detail.reason_code
+                daily["target_failures"][target_id] = detail.model_dump(mode="json")
+                continue
+            if previous is not None:
+                refreshed = previous.model_copy(
+                    update={
+                        "binding_valid": True,
+                        "account_scope_matches": True,
+                        "account_scope": discovered.account_scope if discovered else None,
+                        "diagnostic_details": {
+                            **previous.diagnostic_details,
+                            **account_diagnostics,
+                        },
+                    }
                 )
-            elif account_evaluation.compatible is not True:
-                detail = failure_detail(
-                    "binding_stale",
-                    stage="target_binding_resolved",
-                    run_id=run_id,
-                    target_stable_id=target_id,
-                    account_scope=discovered.account_scope if discovered else None,
-                    binding_valid=False,
-                    account_scope_matches=None,
-                    diagnostic_details=account_diagnostics,
-                )
-            elif not target.stable_id or not target.candidate_id:
-                detail = failure_detail(
-                    "binding_missing",
-                    stage="target_binding_resolved",
-                    run_id=run_id,
-                    target_stable_id=target_id,
-                    account_scope=discovered.account_scope if discovered else None,
-                    binding_valid=False,
-                    account_scope_matches=True,
-                    diagnostic_details=account_diagnostics,
-                )
-            elif not binding_valid:
-                detail = failure_detail(
-                    "binding_stale",
-                    stage="target_binding_resolved",
-                    run_id=run_id,
-                    target_stable_id=target_id,
-                    account_scope=discovered.account_scope if discovered else None,
-                    binding_valid=False,
-                    account_scope_matches=True,
-                    diagnostic_details=account_diagnostics,
-                )
-            else:
-                if previous is not None:
-                    refreshed = previous.model_copy(
-                        update={
-                            "binding_valid": True,
-                            "account_scope_matches": True,
-                            "account_scope": discovered.account_scope
-                            if discovered
-                            else None,
-                            "diagnostic_details": {
-                                **previous.diagnostic_details,
-                                **account_diagnostics,
-                            },
-                        }
+                if refreshed.safe_retry_available:
+                    daily["target_failures"][target_id] = refreshed.model_dump(
+                        mode="json"
                     )
-                    if refreshed.safe_retry_available:
-                        daily["target_failures"][target_id] = refreshed.model_dump(
-                            mode="json"
-                        )
-                        continue
-                    if (
-                        refreshed.reason_code
-                        in {"account_scope_mismatch", "login_required"}
-                        and refreshed.send_attempts == 0
-                        and not refreshed.uncertain_send
-                    ):
-                        daily["target_failures"][target_id] = failure_detail(
-                            "send_failed_before_action",
-                            stage=refreshed.stage,
-                            run_id=run_id,
-                            target_stable_id=target_id,
-                            account_scope=discovered.account_scope,
-                            binding_valid=True,
-                            account_scope_matches=True,
-                            diagnostic_details={
-                                **refreshed.diagnostic_details,
-                                **account_diagnostics,
-                            },
-                        ).model_dump(mode="json")
-                        continue
-                    detail = refreshed
-                elif str(daily.get("failures", {}).get(target.name, "")) in {
-                    "account_scope_mismatch",
-                    "login_required",
-                }:
+                    continue
+                if (
+                    refreshed.reason_code
+                    in {"account_scope_mismatch", "login_required"}
+                    and refreshed.send_attempts == 0
+                    and not refreshed.uncertain_send
+                ):
                     daily["target_failures"][target_id] = failure_detail(
                         "send_failed_before_action",
-                        stage="account_verified",
+                        stage=refreshed.stage,
                         run_id=run_id,
                         target_stable_id=target_id,
-                        account_scope=discovered.account_scope,
+                        account_scope=discovered.account_scope if discovered else None,
                         binding_valid=True,
                         account_scope_matches=True,
-                        diagnostic_details=account_diagnostics,
+                        diagnostic_details={
+                            **refreshed.diagnostic_details,
+                            **account_diagnostics,
+                        },
                     ).model_dump(mode="json")
                     continue
-                else:
-                    detail = failure_detail(
-                        "unknown_exception",
-                        stage="target_loaded",
-                        run_id=run_id,
-                        target_stable_id=target_id,
-                        binding_valid=True,
-                        account_scope_matches=True,
-                        diagnostic_details=account_diagnostics,
-                    )
+                detail = refreshed
+            elif str(daily.get("failures", {}).get(target.name, "")) in {
+                "account_scope_mismatch",
+                "login_required",
+            }:
+                daily["target_failures"][target_id] = failure_detail(
+                    "send_failed_before_action",
+                    stage="account_verified",
+                    run_id=run_id,
+                    target_stable_id=target_id,
+                    account_scope=discovered.account_scope if discovered else None,
+                    binding_valid=True,
+                    account_scope_matches=True,
+                    diagnostic_details=account_diagnostics,
+                ).model_dump(mode="json")
+                continue
+            else:
+                detail = failure_detail(
+                    "unknown_exception",
+                    stage="target_loaded",
+                    run_id=run_id,
+                    target_stable_id=target_id,
+                    binding_valid=True,
+                    account_scope_matches=True,
+                    diagnostic_details=account_diagnostics,
+                )
             targeted_blocking_details[target_id] = detail
             daily["failures"][target.name] = detail.reason_code
             daily["target_failures"][target_id] = detail.model_dump(mode="json")
@@ -790,23 +735,53 @@ def run_daily(
             binding_valid=False,
             account_scope_matches=True,
         ).model_dump(mode="json")
+    binding_blocked: dict[str, FailureDetail] = {}
+    if any(target.candidate_id for target in config.targets):
+        discovered = load_discovered_friends(
+            config.state_file.parent / "discovered_friends.json"
+        )
+        for target in selected_targets:
+            target_id = target_identity(target)
+            resolution = binding_resolutions.get(target.stable_id or "")
+            if resolution is None or resolution.valid:
+                continue
+            detail = _binding_failure_detail(
+                target,
+                resolution,
+                run_id=run_id,
+                account_scope=discovered.account_scope if discovered else None,
+            )
+            binding_blocked[target_id] = detail
+            daily["failures"][target.name] = detail.reason_code
+            daily["target_failures"][target_id] = detail.model_dump(mode="json")
     pending = [
         target for target in selected_targets
         if effective_before_run.get(target_identity(target)) != "success"
         and " ".join(target.name.split()).casefold() not in ambiguous_names
+        and target_identity(target) not in binding_blocked
     ]
     total = len(targets)
     skipped = total - len(pending)
     if not pending:
-        status = RunStatus.UNCERTAIN if ambiguous_targets else RunStatus.ALREADY_DONE
+        status = (
+            RunStatus.UNCERTAIN
+            if ambiguous_targets
+            else RunStatus.FINAL_FAILED
+            if binding_blocked
+            else RunStatus.ALREADY_DONE
+        )
         details = _stored_target_failures(daily)
         result = RunResult(
             status,
             total,
             0,
             skipped,
-            len(ambiguous_targets),
-            "blocked_ambiguous_target" if ambiguous_targets else None,
+            len(ambiguous_targets) + len(binding_blocked),
+            "blocked_ambiguous_target"
+            if ambiguous_targets
+            else next(iter(binding_blocked.values())).reason_code
+            if binding_blocked
+            else None,
             run_id=run_id,
             target_failures=details,
         )

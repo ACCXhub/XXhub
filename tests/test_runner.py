@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from autody.config import AppConfig, Target
-from autody.chat import DeliveryResult, DeliveryStatus, FatalChatError
+from autody.chat import (
+    DeliveryResult,
+    DeliveryStatus,
+    FatalChatError,
+    conversation_candidate_id,
+)
 from autody import runner as runner_module
 from autody.failures import failure_detail
 from autody.logging_setup import DailyAppendFileHandler
@@ -80,6 +85,11 @@ def write_verified_retry_scope(
             {
                 "scanned_at": "2026-07-30T07:15:00",
                 "account_scope": account_scope or "account-" + "a" * 24,
+                "last_result": {
+                    "status": "completed_bottom_reached",
+                    "completed_bottom_reached": True,
+                    "partial": False,
+                },
                 "candidates": [
                     {
                         "candidate_id": candidate_id,
@@ -88,6 +98,8 @@ def write_verified_retry_scope(
                         "discovered_at": "2026-07-30T07:15:00",
                         "match_status": "configured",
                         "presence_status": "current",
+                        "identity_key": f"row:{candidate_id}",
+                        "identity_source": "row_attribute",
                     }
                     for candidate_id in candidate_ids
                 ],
@@ -96,6 +108,16 @@ def write_verified_retry_scope(
         ),
         encoding="utf-8",
     )
+
+
+def bind_authoritatively(config: AppConfig, *, account_scope: str | None = None) -> None:
+    scope = account_scope or "account-" + "a" * 24
+    for target in config.targets:
+        if not target.candidate_id:
+            continue
+        target.binding_identity_key = f"row:{target.candidate_id}"
+        target.binding_identity_source = "row_attribute"
+        target.binding_account_scope = scope
 
 
 def test_second_run_same_day_sends_nothing(tmp_path: Path):
@@ -157,11 +179,7 @@ def test_automatic_gate_reopens_only_proven_safe_legacy_final_failure(
         )
     ]
     write_verified_retry_scope(tmp_path, ["candidate-current"])
-    discovered_path = tmp_path / "discovered_friends.json"
-    discovered = json.loads(discovered_path.read_text(encoding="utf-8"))
-    discovered["last_result"] = {"completed_bottom_reached": True}
-    discovered["candidates"][0]["identity_key"] = "avatar:" + "1" * 64
-    discovered_path.write_text(json.dumps(discovered), encoding="utf-8")
+    bind_authoritatively(config)
 
     run_id = "legacy-safe-final"
     detail = failure_detail(
@@ -224,6 +242,8 @@ def test_modern_run_excludes_enabled_records_without_an_executable_binding(
         Target(name="缺少绑定目标"),
     ]
     chat = FakeChat()
+    write_verified_retry_scope(tmp_path, ["candidate-current"])
+    bind_authoritatively(config)
 
     result = run_daily(config, chat, date(2026, 7, 30))
 
@@ -334,6 +354,8 @@ def test_runner_passes_current_stable_binding_to_navigation(tmp_path: Path):
             candidate_id="candidate-current",
         )
     ]
+    write_verified_retry_scope(tmp_path, ["candidate-current"])
+    bind_authoritatively(config)
 
     class BindingAwareChat:
         def __init__(self):
@@ -357,8 +379,87 @@ def test_runner_passes_current_stable_binding_to_navigation(tmp_path: Path):
 
     assert result.status is RunStatus.COMPLETED
     assert chat.calls == [
-        ("显示名称", "target-current", "candidate-current")
+        (
+            "显示名称",
+            "target-current",
+            conversation_candidate_id("row:candidate-current"),
+        )
     ]
+
+
+def test_runner_uses_authoritative_identity_when_candidate_cache_key_is_stale(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.min_delay_seconds = 0
+    config.max_delay_seconds = 0
+    config.targets = [
+        Target(
+            name="缓存键已变更",
+            stable_id="target-current",
+            candidate_id="candidate-stale",
+            binding_identity_key="row:candidate-current",
+            binding_identity_source="row_attribute",
+            binding_account_scope="account-" + "a" * 24,
+        )
+    ]
+    write_verified_retry_scope(tmp_path, ["candidate-current"])
+
+    class BindingAwareChat:
+        def __init__(self):
+            self.expected_conversation_ids = []
+
+        def send(self, _target, _message, *, expected_conversation_id=None, **_kwargs):
+            self.expected_conversation_ids.append(expected_conversation_id)
+            return DeliveryResult(DeliveryStatus.CONFIRMED, send_attempts=1)
+
+    chat = BindingAwareChat()
+    result = run_daily(config, chat, date(2026, 7, 30))
+
+    assert result.status is RunStatus.COMPLETED
+    assert chat.expected_conversation_ids == [
+        conversation_candidate_id("row:candidate-current")
+    ]
+
+
+def test_runner_blocks_avatar_only_candidate_before_the_send_boundary(tmp_path: Path):
+    config = make_config(tmp_path)
+    config.min_delay_seconds = 0
+    config.max_delay_seconds = 0
+    config.targets = [
+        Target(
+            name="仅头像候选",
+            stable_id="target-current",
+            candidate_id="candidate-current",
+        )
+    ]
+    write_verified_retry_scope(tmp_path, ["candidate-current"])
+    discovery_path = tmp_path / "discovered_friends.json"
+    discovery = json.loads(discovery_path.read_text(encoding="utf-8"))
+    discovery["last_result"] = {
+        "status": "completed_bottom_reached",
+        "completed_bottom_reached": True,
+        "partial": False,
+    }
+    discovery["candidates"][0].update(
+        identity_key="avatar:unproven",
+        identity_source="avatar_source",
+    )
+    discovery_path.write_text(json.dumps(discovery, ensure_ascii=False), encoding="utf-8")
+
+    class NoSendChat:
+        def __init__(self):
+            self.calls = []
+
+        def send(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return DeliveryResult(DeliveryStatus.CONFIRMED, send_attempts=1)
+
+    chat = NoSendChat()
+    result = run_daily(config, chat, date(2026, 8, 9), now=datetime(2026, 8, 9, 7, 30))
+
+    assert chat.calls == []
+    assert result.target_failures["target-current"].reason_code == "binding_missing"
 
 
 def test_runner_rejects_retired_startup_recovery_trigger(tmp_path: Path):
@@ -382,7 +483,7 @@ def test_runner_resolves_account_scoped_bindings_to_current_conversation_identit
     config.min_delay_seconds = 0
     config.max_delay_seconds = 0
     account_scope = "account-" + "a" * 24
-    identities = [f"avatar:{index:064x}" for index in range(1, 9)]
+    identities = [f"row:{index:064x}" for index in range(1, 9)]
     persistent_ids = [
         "candidate-"
         + hashlib.sha256(f"{account_scope}\0{identity}".encode()).hexdigest()[:32]
@@ -397,8 +498,13 @@ def test_runner_resolves_account_scoped_bindings_to_current_conversation_identit
             name=f"当前有效目标 {index}",
             stable_id=f"target-{index}",
             candidate_id=persistent_id,
+            binding_identity_key=identity,
+            binding_identity_source="row_attribute",
+            binding_account_scope=account_scope,
         )
-        for index, persistent_id in enumerate(persistent_ids, start=1)
+        for index, (persistent_id, identity) in enumerate(
+            zip(persistent_ids, identities, strict=True), start=1
+        )
     ] + [Target(name="缺少绑定目标", stable_id="target-missing")]
     write_verified_retry_scope(
         tmp_path,
@@ -410,13 +516,14 @@ def test_runner_resolves_account_scoped_bindings_to_current_conversation_identit
     discovered["last_result"] = {
         "status": "completed_bottom_reached",
         "completed_bottom_reached": True,
+        "partial": False,
     }
     for index, (candidate, identity) in enumerate(
         zip(discovered["candidates"], identities, strict=True),
         start=1,
     ):
         candidate["identity_key"] = identity
-        candidate["identity_source"] = "avatar_source"
+        candidate["identity_source"] = "row_attribute"
         candidate["match_status"] = "unconfigured"
         candidate["configured_target_id"] = None
     discovered_path.write_text(
@@ -490,6 +597,8 @@ def test_pre_send_failure_records_target_level_chinese_reason_and_exact_stage(
             candidate_id="candidate-current",
         )
     ]
+    write_verified_retry_scope(tmp_path, ["candidate-current"])
+    bind_authoritatively(config)
 
     class MissingConversation:
         def send(self, *_args, **_kwargs):
@@ -537,6 +646,8 @@ def test_history_uses_configured_stable_id_and_keeps_target_failure_detail(
             candidate_id="candidate-current",
         )
     ]
+    write_verified_retry_scope(tmp_path, ["candidate-current"])
+    bind_authoritatively(config)
 
     class MissingConversation:
         def send(self, *_args, **_kwargs):
@@ -860,6 +971,11 @@ def test_targeted_retry_can_reopen_safe_target_without_retrying_uncertain_peer(
         Target(name="安全失败目标", stable_id="target-b", candidate_id="candidate-b"),
         Target(name="已确认目标", stable_id="target-c", candidate_id="candidate-c"),
     ]
+    write_verified_retry_scope(
+        tmp_path,
+        ["candidate-a", "candidate-b", "candidate-c"],
+    )
+    bind_authoritatively(config)
 
     class FirstChat:
         def send(self, target, _message, **_kwargs):
@@ -881,11 +997,6 @@ def test_targeted_retry_can_reopen_safe_target_without_retrying_uncertain_peer(
 
     first = run_daily(config, FirstChat(), date(2026, 7, 30))
     assert first.status is RunStatus.UNCERTAIN
-    write_verified_retry_scope(
-        tmp_path,
-        ["candidate-a", "candidate-b", "candidate-c"],
-    )
-
     class RetryChat:
         def __init__(self):
             self.calls = []
@@ -917,6 +1028,8 @@ def test_targeted_retry_rechecks_current_binding_and_requires_reassociation(
     config.targets = [
         Target(name="目标", stable_id="target-a", candidate_id="candidate-a")
     ]
+    write_verified_retry_scope(tmp_path, ["candidate-a"])
+    bind_authoritatively(config)
 
     class FailingChat:
         def send(self, _target, _message, **_kwargs):
@@ -929,7 +1042,6 @@ def test_targeted_retry_rechecks_current_binding_and_requires_reassociation(
             )
 
     run_daily(config, FailingChat(), date(2026, 7, 30))
-    write_verified_retry_scope(tmp_path, ["candidate-a"])
     config.targets[0].candidate_id = None
 
     class ForbiddenChat:
@@ -958,6 +1070,12 @@ def test_targeted_retry_accepts_current_platform_digest_scope(
     config.targets = [
         Target(name="目标", stable_id="target-a", candidate_id="candidate-a")
     ]
+    write_verified_retry_scope(
+        tmp_path,
+        ["candidate-a"],
+        account_scope="a" * 64,
+    )
+    bind_authoritatively(config, account_scope="a" * 64)
 
     class PreSendFailure:
         def send(self, _target, _message, **_kwargs):
@@ -970,11 +1088,6 @@ def test_targeted_retry_accepts_current_platform_digest_scope(
             )
 
     run_daily(config, PreSendFailure(), date(2026, 7, 30))
-    write_verified_retry_scope(
-        tmp_path,
-        ["candidate-a"],
-        account_scope="a" * 64,
-    )
 
     class RetryChat:
         def __init__(self):
@@ -1009,6 +1122,7 @@ def test_targeted_retry_stops_before_chat_for_genuine_account_mismatch(
         ["candidate-a"],
         account_scope="account-" + "b" * 24,
     )
+    bind_authoritatively(config, account_scope="account-" + "b" * 24)
 
     class ForbiddenChat:
         def send(self, *_args, **_kwargs):

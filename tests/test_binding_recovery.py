@@ -1,6 +1,10 @@
 from types import SimpleNamespace
 
-from autody.binding_recovery import reconcile_stable_bindings, remember_binding_evidence
+from autody.binding_recovery import (
+    reconcile_stable_bindings,
+    remember_binding_evidence,
+    resolve_stable_binding,
+)
 
 
 def candidate(candidate_id, identity_key, identity_source="row_attribute", presence_status="current"):
@@ -36,6 +40,13 @@ def target(candidate_id="candidate-old", *, key=None, source=None, scope=None, s
 
 def config(*targets):
     return SimpleNamespace(targets=list(targets))
+
+
+def profile(account_scope="account-a"):
+    return SimpleNamespace(
+        account_profile_id=account_scope,
+        account_id_digest="d" * 64,
+    )
 
 
 def test_remember_binding_evidence_uses_only_authoritative_row_identity():
@@ -142,3 +153,28 @@ def test_reconcile_refuses_partial_scan_and_candidate_already_bound_elsewhere():
         discovered("account-a", [candidate("candidate-new", "row:friend-a")]),
     ) == set()
     assert recovering.candidate_id == "candidate-old"
+
+
+def test_authoritative_recovery_converges_to_one_current_conversation_locator():
+    item = target(
+        "candidate-stale",
+        key="row:friend-a",
+        source="row_attribute",
+        scope="account-a",
+    )
+    cfg = config(item)
+    result = discovered(
+        "account-a", [candidate("candidate-current", "row:friend-a")]
+    )
+
+    # The candidate ID is only a discovery-cache association.  The saved row
+    # identity must resolve the current locator before the cache key is
+    # persisted by recovery, so UI and Runner cannot disagree in that window.
+    resolution = resolve_stable_binding(item, result, profile())
+
+    assert resolution.status == "valid"
+    assert resolution.candidate_id == "candidate-current"
+    assert resolution.conversation_id is not None
+
+    assert reconcile_stable_bindings(cfg, result) == {"target-a"}
+    assert item.candidate_id == "candidate-current"

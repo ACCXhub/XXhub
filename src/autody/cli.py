@@ -29,10 +29,12 @@ from autody.account_profile import (
     AccountProfileUnavailable,
     bindings_revalidation_required,
     complete_binding_revalidation,
+    load_account_profile,
     mark_bindings_for_revalidation,
     resolve_account_profile,
 )
 from autody.binding_recovery import (
+    all_stable_bindings_proven,
     reconcile_stable_bindings,
     remember_binding_evidence,
 )
@@ -211,13 +213,14 @@ def _complete_friend_discovery(
             save_config(config_path, persisted)
     complete_binding_revalidation(
         persisted.state_file.parent,
-        account_scope=result.account_scope,
-        target_candidate_ids=[target.candidate_id for target in persisted.targets],
-        current_candidate_ids={
-            candidate.candidate_id
-            for candidate in result.candidates
-            if candidate.presence_status == "current"
-        },
+        bindings_proven=(
+            allow_recovery
+            and all_stable_bindings_proven(
+                persisted.targets,
+                result,
+                load_account_profile(persisted.messages_file.parent),
+            )
+        ),
     )
     return persisted
 

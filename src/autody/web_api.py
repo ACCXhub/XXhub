@@ -43,6 +43,7 @@ from autody.account_profile import (
     public_profile_payload,
 )
 from autody.account_profiles import AccountProfileStoreError, MultiAccountStore
+from autody.binding_recovery import all_stable_bindings_proven, resolve_stable_binding
 from autody.failures import FailureDetail, failure_detail
 from autody.friend_discovery import is_discovery_stale, load_discovered_friends
 from autody.history import TaskHistoryStore, bootstrap_legacy_daily_history
@@ -404,17 +405,15 @@ def _revalidate_failure_detail(
     )
     profile = load_account_profile(config.state_file.parent.parent)
     guarded = bindings_revalidation_required(config.state_file.parent)
-    evaluation = evaluate_account_scope(
+    resolution = resolve_stable_binding(
+        target,
+        discovered,
         profile,
-        binding_scope=discovered.account_scope if discovered else None,
-        run_scope=detail.account_scope,
+        revalidation_required=guarded,
     )
-    diagnostics = {
-        **detail.diagnostic_details,
-        "account_comparison": evaluation.account_comparison,
-    }
-    if evaluation.run_scope_comparison:
-        diagnostics["run_scope_comparison"] = evaluation.run_scope_comparison
+    diagnostics = {**detail.diagnostic_details, "binding_resolution": resolution.status}
+    if resolution.account_comparison:
+        diagnostics["account_comparison"] = resolution.account_comparison
     context = {
         "run_id": detail.run_id,
         "target_stable_id": identity,
@@ -430,7 +429,7 @@ def _revalidate_failure_detail(
                 "diagnostic_details": diagnostics,
             }
         )
-    if evaluation.reason_code == "login_required":
+    if resolution.status == "account_unverified":
         return failure_detail(
             "login_required",
             stage="account_verified",
@@ -438,15 +437,7 @@ def _revalidate_failure_detail(
             account_scope_matches=False,
             **context,
         )
-    if guarded:
-        return failure_detail(
-            "binding_stale",
-            stage="target_binding_resolved",
-            binding_valid=False,
-            account_scope_matches=True if evaluation.compatible is True else None,
-            **context,
-        )
-    if evaluation.reason_code == "account_scope_mismatch":
+    if resolution.status == "account_mismatch":
         return failure_detail(
             "account_scope_mismatch",
             stage="account_verified",
@@ -454,33 +445,22 @@ def _revalidate_failure_detail(
             account_scope_matches=False,
             **context,
         )
-    if evaluation.compatible is not True:
+    if resolution.status == "binding_missing":
         return failure_detail(
-            "binding_stale",
+            "binding_missing",
             stage="target_binding_resolved",
             binding_valid=False,
             account_scope_matches=None,
             **context,
         )
-    if not target.stable_id or not target.candidate_id:
+    if not resolution.valid:
         return failure_detail(
-            "binding_missing",
+            "blocked_ambiguous_target"
+            if resolution.status == "identity_ambiguous"
+            else "binding_stale",
             stage="target_binding_resolved",
             binding_valid=False,
-            account_scope_matches=True,
-            **context,
-        )
-    current_candidate_ids = {
-        item.candidate_id
-        for item in discovered.candidates
-        if item.presence_status == "current"
-    }
-    if target.candidate_id not in current_candidate_ids:
-        return failure_detail(
-            "binding_stale",
-            stage="target_binding_resolved",
-            binding_valid=False,
-            account_scope_matches=True,
+            account_scope_matches=None,
             **context,
         )
     if (
@@ -538,91 +518,32 @@ def _current_target_health(
     binding_guarded: bool,
     now: datetime,
 ) -> dict[str, str]:
-    if not target.stable_id or not target.candidate_id:
-        return {
-            "status": "abnormal",
-            "reason_code": "binding_missing",
-            "summary_zh": "目标缺少稳定绑定，需要重新关联",
-        }
-    if discovered is None:
-        return {
-            "status": "unknown",
-            "reason_code": "scan_unavailable",
-            "summary_zh": "当前扫描不可用",
-        }
-    if is_discovery_stale(discovered.scanned_at, now):
-        return {
-            "status": "unknown",
-            "reason_code": "scan_stale",
-            "summary_zh": "当前扫描已过期",
-        }
-    if (
-        discovered.last_result.get("partial") is True
-        or discovered.last_result.get("completed_bottom_reached") is False
-    ):
-        return {
-            "status": "unknown",
-            "reason_code": "scan_incomplete",
-            "summary_zh": "当前扫描未完成",
-        }
-    if discovered.last_result.get("status") in {
-        "failed",
-        "lock_busy",
-        "login_unavailable",
-        "page_load_failed",
-        "partial_timeout",
-        "cancelled",
-    }:
-        return {
-            "status": "unknown",
-            "reason_code": "scan_failed",
-            "summary_zh": "最近一次实时扫描失败",
-        }
-    evaluation = evaluate_account_scope(
+    resolution = resolve_stable_binding(
+        target,
+        discovered,
         profile,
-        binding_scope=discovered.account_scope,
+        revalidation_required=binding_guarded,
+        now=now,
     )
-    if evaluation.reason_code == "account_scope_mismatch":
+    if resolution.valid:
         return {
-            "status": "abnormal",
-            "reason_code": "account_scope_mismatch",
-            "summary_zh": "当前登录账号与目标所属账号不一致",
+            "status": "healthy",
+            "reason_code": "binding_valid",
+            "summary_zh": "绑定有效",
         }
-    if evaluation.reason_code == "login_required" or evaluation.compatible is None:
-        return {
-            "status": "unknown",
-            "reason_code": "account_scope_unverified",
-            "summary_zh": "当前账号范围尚未验证",
-        }
-    if binding_guarded:
-        return {
-            "status": "abnormal",
-            "reason_code": "binding_revalidation_required",
-            "summary_zh": "目标绑定待重新验证",
-        }
-    matches = [
-        candidate
-        for candidate in discovered.candidates
-        if candidate.candidate_id == target.candidate_id
-        and candidate.presence_status == "current"
-    ]
-    if len(matches) != 1:
-        return {
-            "status": "abnormal",
-            "reason_code": "binding_stale",
-            "summary_zh": "当前扫描未找到稳定绑定对应的候选",
-        }
-    if matches[0].match_status == "ambiguous":
-        return {
-            "status": "abnormal",
-            "reason_code": "identity_ambiguous",
-            "summary_zh": "当前候选身份存在歧义，未自动关联",
-        }
-    return {
-        "status": "healthy",
-        "reason_code": "binding_valid",
-        "summary_zh": "绑定有效",
-    }
+    status, reason_code, summary_zh = {
+        "binding_missing": ("abnormal", "binding_missing", "目标缺少权威稳定绑定，需要重新关联"),
+        "stale_locator": ("abnormal", "binding_stale", "当前扫描中的会话定位已失效，需要重新关联"),
+        "identity_ambiguous": ("abnormal", "identity_ambiguous", "当前候选身份存在歧义，未自动关联"),
+        "account_mismatch": ("abnormal", "account_scope_mismatch", "当前登录账号与目标所属账号不一致"),
+        "account_unverified": ("unknown", "account_scope_unverified", "当前账号范围尚未验证"),
+        "scan_unavailable": ("unknown", "scan_unavailable", "当前扫描不可用"),
+        "scan_incomplete": ("unknown", "scan_incomplete", "当前扫描未完成"),
+        "scan_failed": ("unknown", "scan_failed", "最近一次实时扫描失败"),
+        "scan_stale": ("unknown", "scan_stale", "当前扫描已过期"),
+        "revalidation_required": ("abnormal", "binding_revalidation_required", "目标绑定待重新验证"),
+    }[resolution.status]
+    return {"status": status, "reason_code": reason_code, "summary_zh": summary_zh}
 
 
 def _history_target_failures(
@@ -1017,13 +938,11 @@ def create_app(
         )
         return complete_binding_revalidation(
             config.state_file.parent,
-            account_scope=discovered.account_scope if discovered else None,
-            target_candidate_ids=[target.candidate_id for target in config.targets],
-            current_candidate_ids={
-                candidate.candidate_id
-                for candidate in (discovered.candidates if discovered else [])
-                if candidate.presence_status == "current"
-            },
+            bindings_proven=all_stable_bindings_proven(
+                config.targets,
+                discovered,
+                load_account_profile(config.messages_file.parent),
+            ),
         )
     if initial_config.log_cleanup_enabled:
         automatic_cleanup_once_daily(initial_config.state_file.parent / "logs", active_days=initial_config.active_log_retention_days, archive_days=initial_config.archive_log_retention_days)
@@ -2554,6 +2473,7 @@ def create_app(
         discovered = load_discovered_friends(
             config.state_file.parent / "discovered_friends.json"
         )
+        profile = load_account_profile(config.messages_file.parent)
         candidates_by_id = {
             candidate.candidate_id: candidate
             for candidate in (discovered.candidates if discovered else [])
@@ -2564,6 +2484,13 @@ def create_app(
                 normalized_names[" ".join(target.name.split()).casefold()] += 1
         friends = []
         for target in config.targets:
+            resolution = resolve_stable_binding(
+                target,
+                discovered,
+                profile,
+                revalidation_required=binding_guarded,
+                now=current_time(),
+            )
             identifier = _avatar_id(target.stable_id)
             candidate = candidates_by_id.get(target.candidate_id or "")
             avatar_key = (
@@ -2587,7 +2514,7 @@ def create_app(
                     "last_success_date": _last_success_date(state, target.name),
                     "ambiguous_duplicate": target.enabled and normalized_names[" ".join(target.name.split()).casefold()] > 1,
                     "binding_status": (
-                        "revalidation_required" if binding_guarded else "verified"
+                        "verified" if resolution.valid else resolution.status
                     ),
                 }
             )
@@ -2635,6 +2562,7 @@ def create_app(
         if result is None:
             raise HTTPException(409, "请先扫描好友")
         candidates = {candidate.candidate_id: candidate for candidate in result.candidates}
+        profile = load_account_profile(config.messages_file.parent)
         guarded_names = actionable_orphan_names(config, result)
         existing = {target.candidate_id for target in config.targets if target.candidate_id}
         added = skipped = 0
@@ -2646,11 +2574,24 @@ def create_app(
                 or candidate.presence_status == "stale"
                 or candidate.candidate_id in existing
                 or not _avatar_id(candidate.candidate_id)
+                or not result.account_scope
+                or not candidate.identity_key
+                or candidate.identity_source != "row_attribute"
                 or " ".join(candidate.display_name.split()).casefold() in guarded_names
             ):
                 skipped += 1
                 continue
-            target = Target(name=candidate.display_name, stable_id=f"target-{uuid.uuid4().hex}", candidate_id=candidate.candidate_id)
+            target = Target(
+                name=candidate.display_name,
+                stable_id=f"target-{uuid.uuid4().hex}",
+                candidate_id=candidate.candidate_id,
+                binding_identity_key=candidate.identity_key,
+                binding_identity_source=candidate.identity_source,
+                binding_account_scope=result.account_scope,
+            )
+            if not resolve_stable_binding(target, result, profile).proven:
+                skipped += 1
+                continue
             config.targets.append(target)
             existing.add(candidate.candidate_id)
             added += 1
@@ -2696,8 +2637,32 @@ def create_app(
         )
         if occupied is not None:
             raise HTTPException(409, "该候选好友已关联到其他续火目标")
-        target.candidate_id = candidate.candidate_id
-        target.name = candidate.display_name
+        if (
+            not discovered.account_scope
+            or not candidate.identity_key
+            or candidate.identity_source != "row_attribute"
+        ):
+            raise HTTPException(409, "当前候选缺少权威行身份，不能安全重新关联")
+        proposed = target.model_copy(
+            update={
+                "candidate_id": candidate.candidate_id,
+                "name": candidate.display_name,
+                "binding_identity_key": candidate.identity_key,
+                "binding_identity_source": candidate.identity_source,
+                "binding_account_scope": discovered.account_scope,
+            }
+        )
+        if not resolve_stable_binding(
+            proposed,
+            discovered,
+            load_account_profile(config.messages_file.parent),
+        ).proven:
+            raise HTTPException(409, "当前扫描尚不能权威证明该候选好友")
+        target.candidate_id = proposed.candidate_id
+        target.name = proposed.name
+        target.binding_identity_key = proposed.binding_identity_key
+        target.binding_identity_source = proposed.binding_identity_source
+        target.binding_account_scope = proposed.binding_account_scope
         save_config(config_path, config)
         refresh_binding_guard(config, discovered)
         ignored = ignored_orphan_target_ids()
@@ -2756,13 +2721,25 @@ def create_app(
             or " ".join(candidate.display_name.split()).casefold()
             in actionable_orphan_names(config, result)
             or not _avatar_id(candidate.candidate_id)
+            or not result.account_scope
+            or not candidate.identity_key
+            or candidate.identity_source != "row_attribute"
         ):
-            raise HTTPException(409, "该候选好友缺少可安全使用的身份标识")
+            raise HTTPException(409, "该候选好友缺少权威行身份，不能安全关联")
         target = Target(
             name=candidate.display_name,
             stable_id=f"target-{uuid.uuid4().hex}",
             candidate_id=candidate.candidate_id,
+            binding_identity_key=candidate.identity_key,
+            binding_identity_source=candidate.identity_source,
+            binding_account_scope=result.account_scope,
         )
+        if not resolve_stable_binding(
+            target,
+            result,
+            load_account_profile(config.messages_file.parent),
+        ).proven:
+            raise HTTPException(409, "当前扫描尚不能权威证明该候选好友")
         config.targets.append(target)
         save_config(config_path, config)
         refresh_binding_guard(config, result)

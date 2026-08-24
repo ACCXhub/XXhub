@@ -209,8 +209,16 @@ def test_diagnose_and_repair_uses_existing_safe_repair_primitives(
 ):
     config_path = make_project(tmp_path)
     config = load_config(config_path)
+    account_id = "account-" + "a" * 24
     config.targets = [
-        Target(name="稳定目标", stable_id="target-stable", candidate_id="candidate-stable")
+        Target(
+            name="稳定目标",
+            stable_id="target-stable",
+            candidate_id="candidate-stable",
+            binding_identity_key="row:stable-target",
+            binding_identity_source="row_attribute",
+            binding_account_scope=account_id,
+        )
     ]
     save_config(config_path, config)
     mark_bindings_for_revalidation(config.state_file.parent)
@@ -220,7 +228,12 @@ def test_diagnose_and_repair_uses_existing_safe_repair_primitives(
     (tmp_path / "data" / "discovered_friends.json").write_text(
         json.dumps({
             "scanned_at": "2026-08-19T08:00:00",
-            "account_scope": "stable-account-scope",
+            "account_scope": account_id,
+            "last_result": {
+                "status": "completed_bottom_reached",
+                "completed_bottom_reached": True,
+                "partial": False,
+            },
             "candidates": [{
                 "candidate_id": "candidate-stable",
                 "display_name": "稳定目标",
@@ -228,6 +241,8 @@ def test_diagnose_and_repair_uses_existing_safe_repair_primitives(
                 "discovered_at": "2026-08-19T08:00:00",
                 "match_status": "configured",
                 "presence_status": "current",
+                "identity_key": "row:stable-target",
+                "identity_source": "row_attribute",
             }],
         }, ensure_ascii=False),
         encoding="utf-8",
@@ -1016,21 +1031,31 @@ def test_status_exposes_target_failure_detail_in_overview_and_history(
     config = load_config(config_path)
     config.targets[0].stable_id = "target-one"
     config.targets[0].candidate_id = "candidate-one"
-    save_config(config_path, config)
     account_id = write_verified_account(tmp_path)
+    config.targets[0].binding_identity_key = "row:friend-one"
+    config.targets[0].binding_identity_source = "row_attribute"
+    config.targets[0].binding_account_scope = account_id
+    save_config(config_path, config)
     (tmp_path / "data" / "discovered_friends.json").write_text(
         json.dumps(
             {
-                "scanned_at": "2026-06-24T07:20:00",
-                "account_scope": account_id,
+                    "scanned_at": "2026-06-24T07:20:00",
+                    "account_scope": account_id,
+                    "last_result": {
+                        "status": "completed_bottom_reached",
+                        "completed_bottom_reached": True,
+                        "partial": False,
+                    },
                 "candidates": [
                     {
                         "candidate_id": "candidate-one",
                         "display_name": "候选一",
                         "avatar_status": "missing",
                         "discovered_at": "2026-06-24T07:20:00",
-                        "match_status": "configured",
-                        "presence_status": "current",
+                            "match_status": "configured",
+                            "presence_status": "current",
+                            "identity_key": "row:friend-one",
+                            "identity_source": "row_attribute",
                     }
                 ],
             },
@@ -1444,7 +1469,7 @@ def test_status_current_health_rejects_missing_binding_and_unavailable_snapshot(
     assert missing == {
         "status": "abnormal",
         "reason_code": "binding_missing",
-        "summary_zh": "目标缺少稳定绑定，需要重新关联",
+        "summary_zh": "目标缺少权威稳定绑定，需要重新关联",
     }
 
     config.targets[0].stable_id = "target-one"
@@ -1471,6 +1496,9 @@ def test_status_current_health_rejects_ambiguous_candidate_and_account_mismatch(
             name="当前绑定",
             stable_id="target-one",
             candidate_id="candidate-one",
+            binding_identity_key="row:friend-one",
+            binding_identity_source="row_attribute",
+            binding_account_scope="account-" + "a" * 24,
         )
     ]
     save_config(config_path, config)
@@ -1478,6 +1506,11 @@ def test_status_current_health_rejects_ambiguous_candidate_and_account_mismatch(
     snapshot = {
         "scanned_at": "2026-06-24T07:20:00",
         "account_scope": account_id,
+        "last_result": {
+            "status": "completed_bottom_reached",
+            "completed_bottom_reached": True,
+            "partial": False,
+        },
         "candidates": [
             {
                 "candidate_id": "candidate-one",
@@ -1486,6 +1519,18 @@ def test_status_current_health_rejects_ambiguous_candidate_and_account_mismatch(
                 "discovered_at": "2026-06-24T07:20:00",
                 "match_status": "ambiguous",
                 "presence_status": "current",
+                "identity_key": "row:friend-one",
+                "identity_source": "row_attribute",
+            },
+            {
+                "candidate_id": "candidate-duplicate",
+                "display_name": "当前绑定",
+                "avatar_status": "missing",
+                "discovered_at": "2026-06-24T07:20:00",
+                "match_status": "ambiguous",
+                "presence_status": "current",
+                "identity_key": "row:friend-one",
+                "identity_source": "row_attribute",
             }
         ],
     }
@@ -2644,11 +2689,18 @@ def test_discovered_candidate_batch_add_keeps_its_cached_avatar_and_friend_state
     tmp_path: Path,
 ):
     config = make_project(tmp_path)
+    account_id = write_verified_account(tmp_path)
     discovered = tmp_path / "data" / "discovered_friends.json"
     discovered.write_text(
         json.dumps(
             {
                 "scanned_at": "2026-07-04T12:30:00",
+                "account_scope": account_id,
+                "last_result": {
+                    "status": "completed_bottom_reached",
+                    "completed_bottom_reached": True,
+                    "partial": False,
+                },
                 "candidates": [{
                     "candidate_id": "candidate-new",
                     "display_name": "新朋友",
@@ -2656,6 +2708,8 @@ def test_discovered_candidate_batch_add_keeps_its_cached_avatar_and_friend_state
                     "avatar_status": "cached",
                     "discovered_at": "2026-07-04T12:30:00",
                     "match_status": "unconfigured",
+                    "identity_key": "row:conversation-new",
+                    "identity_source": "row_attribute",
                 }],
             },
             ensure_ascii=False,
@@ -2691,6 +2745,7 @@ def test_configured_target_resolves_its_avatar_through_linked_candidate_id(tmp_p
         json.dumps(
             {
                 "scanned_at": "2026-07-04T12:30:00",
+                "account_scope": "account-" + "a" * 24,
                 "candidates": [{
                     "candidate_id": "candidate-one",
                     "display_name": "已关联",
@@ -2720,15 +2775,23 @@ def test_candidate_add_is_idempotent_by_candidate_id_and_keeps_duplicate_names_s
     tmp_path: Path,
 ):
     config = make_project(tmp_path)
+    account_id = write_verified_account(tmp_path)
     discovered = tmp_path / "data" / "discovered_friends.json"
     discovered.write_text(
         json.dumps(
             {
                 "scanned_at": "2026-07-04T12:30:00",
+                "account_scope": account_id,
+                "last_result": {
+                    "status": "completed_bottom_reached",
+                    "completed_bottom_reached": True,
+                    "partial": False,
+                },
                 "candidates": [
                     {
                         "candidate_id": "candidate-a",
                         "identity_key": "row:conversation-a",
+                        "identity_source": "row_attribute",
                         "display_name": "同名候选",
                         "avatar_cache_key": "candidate-a",
                         "avatar_status": "cached",
@@ -2738,6 +2801,7 @@ def test_candidate_add_is_idempotent_by_candidate_id_and_keeps_duplicate_names_s
                     {
                         "candidate_id": "candidate-b",
                         "identity_key": "row:conversation-b",
+                        "identity_source": "row_attribute",
                         "display_name": "同名候选",
                         "avatar_cache_key": "candidate-b",
                         "avatar_status": "cached",
@@ -2789,6 +2853,7 @@ def test_orphan_binding_requires_explicit_candidate_relink_and_can_be_ignored(
     tmp_path: Path,
 ):
     config_path = make_project(tmp_path)
+    account_id = write_verified_account(tmp_path)
     config = load_config(config_path)
     config.targets = [
         Target(name="待关联目标", stable_id="target-one", candidate_id="candidate-old")
@@ -2799,6 +2864,12 @@ def test_orphan_binding_requires_explicit_candidate_relink_and_can_be_ignored(
             {
                 "scanned_at": "2026-07-30T08:00:00",
                 "scan_id": "scan-current",
+                "account_scope": account_id,
+                "last_result": {
+                    "status": "completed_bottom_reached",
+                    "completed_bottom_reached": True,
+                    "partial": False,
+                },
                 "candidates": [
                     {
                         "candidate_id": "candidate-current",
@@ -2807,7 +2878,8 @@ def test_orphan_binding_requires_explicit_candidate_relink_and_can_be_ignored(
                         "discovered_at": "2026-07-30T08:00:00",
                         "match_status": "unconfigured",
                         "presence_status": "current",
-                        "identity_key": "stable-current",
+                        "identity_key": "row:stable-current",
+                        "identity_source": "row_attribute",
                     }
                 ],
             },
@@ -2844,6 +2916,71 @@ def test_orphan_binding_requires_explicit_candidate_relink_and_can_be_ignored(
         "/api/friends/candidate-current/add-to-targets"
     )
     assert blocked_after_ignore.status_code == 409
+
+
+def test_authoritative_relink_immediately_converges_current_binding_health(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets = [
+        Target(
+            name="待恢复目标",
+            stable_id="target-one",
+            candidate_id="candidate-stale",
+            binding_identity_key="row:friend-one",
+            binding_identity_source="row_attribute",
+            binding_account_scope="account-" + "a" * 24,
+        )
+    ]
+    save_config(config_path, config)
+    account_id = write_verified_account(tmp_path)
+    (tmp_path / "data" / "discovered_friends.json").write_text(
+        json.dumps(
+            {
+                "scanned_at": "2026-07-30T08:00:00",
+                "account_scope": account_id,
+                "last_result": {
+                    "status": "completed_bottom_reached",
+                    "completed_bottom_reached": True,
+                    "partial": False,
+                },
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-current",
+                        "display_name": "待恢复目标",
+                        "avatar_status": "missing",
+                        "discovered_at": "2026-07-30T08:00:00",
+                        "match_status": "unconfigured",
+                        "presence_status": "current",
+                        "identity_key": "row:friend-one",
+                        "identity_source": "row_attribute",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    mark_bindings_for_revalidation(tmp_path / "data")
+    client = TestClient(
+        create_app(config_path, now_provider=lambda: datetime(2026, 7, 30, 8, 5))
+    )
+
+    relinked = client.post(
+        "/api/friends/candidate-current/relink",
+        json={"target_id": "target-one"},
+    )
+
+    assert relinked.status_code == 200
+    target = load_config(config_path).targets[0]
+    assert target.candidate_id == "candidate-current"
+    assert target.binding_identity_key == "row:friend-one"
+    assert target.binding_identity_source == "row_attribute"
+    assert target.binding_account_scope == account_id
+    assert client.get("/api/status?today=2026-06-24").json()["friends"][0][
+        "current_health"
+    ]["reason_code"] == "binding_valid"
 
 
 def test_actionable_orphan_cannot_be_bypassed_by_direct_candidate_add(tmp_path: Path):

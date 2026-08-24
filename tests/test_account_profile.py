@@ -329,15 +329,11 @@ def test_binding_guard_clears_only_after_verified_scope_resolves_every_target(
 
     unresolved = complete_binding_revalidation(
         data,
-        account_scope="account-current",
-        target_candidate_ids=["candidate-one", "candidate-two"],
-        current_candidate_ids={"candidate-one"},
+        bindings_proven=False,
     )
     resolved = complete_binding_revalidation(
         data,
-        account_scope="account-current",
-        target_candidate_ids=["candidate-one", "candidate-two"],
-        current_candidate_ids={"candidate-one", "candidate-two"},
+        bindings_proven=True,
     )
 
     assert unresolved is False
