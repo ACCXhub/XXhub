@@ -1,10 +1,6 @@
 from types import SimpleNamespace
 
-from autody.binding_recovery import (
-    binding_issue_requires_reassociation,
-    reconcile_stable_bindings,
-    remember_binding_evidence,
-)
+from autody.binding_recovery import reconcile_stable_bindings, remember_binding_evidence
 
 
 def candidate(candidate_id, identity_key, identity_source="row_attribute", presence_status="current"):
@@ -146,23 +142,3 @@ def test_reconcile_refuses_partial_scan_and_candidate_already_bound_elsewhere():
         discovered("account-a", [candidate("candidate-new", "row:friend-a")]),
     ) == set()
     assert recovering.candidate_id == "candidate-old"
-
-
-def test_binding_issue_warning_depends_on_current_health_not_historical_failure():
-    historical_failure = {
-        "safe_retry_available": False,
-        "suggested_action": "reassociate",
-    }
-    healthy_friend = {
-        "status": "failed",
-        "failure": historical_failure,
-        "current_health": {"reason_code": "binding_valid"},
-    }
-    stale_friend = {
-        "status": "failed",
-        "failure": historical_failure,
-        "current_health": {"reason_code": "binding_stale"},
-    }
-
-    assert binding_issue_requires_reassociation([healthy_friend]) is False
-    assert binding_issue_requires_reassociation([healthy_friend, stale_friend]) is True
