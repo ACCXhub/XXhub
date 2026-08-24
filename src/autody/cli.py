@@ -5,6 +5,7 @@ import os
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+import signal
 import threading
 import time
 import webbrowser
@@ -194,17 +195,20 @@ def _complete_friend_discovery(
     config_path: Path,
     loaded: AppConfig,
     result: FriendDiscoveryResult,
+    *,
+    allow_recovery: bool = True,
 ) -> AppConfig:
-    """Persist scan-owned bindings and clear the account guard from one result."""
+    """Persist scan-owned fields; recover bindings only after a fresh profile proof."""
     persisted = (
         _merge_discovered_target_bindings(config_path, loaded)
         if result.config_changed
         else loaded
     )
-    changed = bool(reconcile_stable_bindings(persisted, result))
-    changed = remember_binding_evidence(persisted, result) or changed
-    if changed:
-        save_config(config_path, persisted)
+    if allow_recovery:
+        changed = bool(reconcile_stable_bindings(persisted, result))
+        changed = remember_binding_evidence(persisted, result) or changed
+        if changed:
+            save_config(config_path, persisted)
     complete_binding_revalidation(
         persisted.state_file.parent,
         account_scope=result.account_scope,
@@ -216,6 +220,21 @@ def _complete_friend_discovery(
         },
     )
     return persisted
+
+
+def _refresh_profile_for_recovery(page, config_path: Path, loaded: AppConfig) -> bool:
+    """Refresh authoritative profile; failure keeps scanning useful but disables auto-relink."""
+    try:
+        profile = resolve_account_profile(page, _data_root(config_path))
+    except AccountProfileUnavailable as exc:
+        logging.warning("当前账号资料未验证，本次扫描不执行自动重新关联：%s", exc)
+        return False
+    except Exception:
+        logging.exception("当前账号资料刷新失败，本次扫描不执行自动重新关联。")
+        return False
+    if profile.switched:
+        mark_bindings_for_revalidation(loaded.state_file.parent)
+    return True
 
 
 def _run_friend_scan(
@@ -249,12 +268,9 @@ def _run_friend_scan(
                     home=_data_root(config_path),
                     on_stage=progress.update,
                 ) as page:
-                    try:
-                        profile = resolve_account_profile(page, _data_root(config_path))
-                    except AccountProfileUnavailable as exc:
-                        raise AuthenticationError(str(exc)) from exc
-                    if profile.switched:
-                        mark_bindings_for_revalidation(loaded.state_file.parent)
+                    profile_refreshed = _refresh_profile_for_recovery(
+                        page, config_path, loaded
+                    )
                     remaining_ms = max(1, int((overall_deadline - time.monotonic()) * 1000))
                     result = discover_friends(
                         loaded,
@@ -267,7 +283,12 @@ def _run_friend_scan(
                         avatar_timeout_ms=loaded.avatar_capture_timeout_ms,
                         progress=progress.update,
                     )
-                    _complete_friend_discovery(config_path, loaded, result)
+                    _complete_friend_discovery(
+                        config_path,
+                        loaded,
+                        result,
+                        allow_recovery=profile_refreshed,
+                    )
             finally:
                 progress.update("releasing_browser_lock")
         progress.finish(
@@ -378,7 +399,7 @@ def _sending_activity(config: AppConfig):
         path.unlink(missing_ok=True)
 
 
-def _install_service_control_middleware(dashboard_app, server) -> None:
+def _install_service_control_middleware(dashboard_app, request_shutdown) -> None:
     @dashboard_app.middleware("http")
     async def service_control(request: Request, call_next):
         if request.method == "POST" and request.url.path == "/api/service-shutdown":
@@ -386,7 +407,7 @@ def _install_service_control_middleware(dashboard_app, server) -> None:
             supplied = request.headers.get("x-autody-control-token", "")
             if not expected or not supplied or not hmac.compare_digest(expected, supplied):
                 return JSONResponse({"detail": "service control authentication failed"}, status_code=403)
-            server.should_exit = True
+            threading.Timer(0.05, request_shutdown).start()
             return JSONResponse({"stopping": True})
         return await call_next(request)
 
@@ -417,15 +438,7 @@ def login(config: Path = typer.Option(Path("config.yaml"), "--config")):
 
             def scan_after_login(page) -> None:
                 nonlocal scan_message
-                try:
-                    profile = resolve_account_profile(page, _data_root(config))
-                    if profile.switched:
-                        mark_bindings_for_revalidation(loaded.state_file.parent)
-                    logging.info("当前账号资料已验证并刷新，账号切换=%s", profile.switched)
-                except AccountProfileUnavailable as exc:
-                    logging.warning("当前账号资料未验证：%s", exc)
-                except Exception:
-                    logging.exception("当前账号资料刷新失败，但登录仍然有效。")
+                profile_refreshed = _refresh_profile_for_recovery(page, config, loaded)
                 try:
                     result = discover_friends(
                         loaded,
@@ -433,7 +446,12 @@ def login(config: Path = typer.Option(Path("config.yaml"), "--config")):
                         DOUYIN_SELECTORS,
                         loaded.state_file.parent / "discovered_friends.json",
                     )
-                    _complete_friend_discovery(config, loaded, result)
+                    _complete_friend_discovery(
+                        config,
+                        loaded,
+                        result,
+                        allow_recovery=profile_refreshed,
+                    )
                     scan_message = f"候选好友已刷新：发现 {len(result.candidates)} 个记录。"
                     logging.info(scan_message)
                 except Exception as exc:
@@ -487,7 +505,12 @@ def refresh_account_profile(config: Path = typer.Option(Path("config.yaml"), "--
                             DOUYIN_SELECTORS,
                             discovery_path,
                         )
-                        _complete_friend_discovery(config, loaded, result)
+                        _complete_friend_discovery(
+                            config,
+                            loaded,
+                            result,
+                            allow_recovery=True,
+                        )
                         logging.info(
                             "账号刷新同时完成稳定绑定校验：发现 %s 个候选。",
                             len(result.candidates),
@@ -520,14 +543,17 @@ def health_check(config: Path = typer.Option(Path("config.yaml"), "--config")):
             ) as page:
                 logging.info("登录状态和抖音聊天页正常。")
                 _write_health(loaded, "success")
+                profile_refreshed = _refresh_profile_for_recovery(page, config, loaded)
                 try:
-                    profile = resolve_account_profile(page, _data_root(config))
-                    if profile.switched:
-                        mark_bindings_for_revalidation(loaded.state_file.parent)
                     result = discover_friends(
                         loaded, page, DOUYIN_SELECTORS, discovery_path
                     )
-                    _complete_friend_discovery(config, loaded, result)
+                    _complete_friend_discovery(
+                        config,
+                        loaded,
+                        result,
+                        allow_recovery=profile_refreshed,
+                    )
                     logging.info(
                         "登录健康检查已刷新候选好友：发现 %s 个记录。",
                         len(result.candidates),
@@ -723,16 +749,11 @@ def ui(
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     typer.echo(f"AutoDy 管理台正在运行：{url}")
     dashboard_app = create_app(config)
-    server = uvicorn.Server(
-        uvicorn.Config(
-            dashboard_app,
-            host="127.0.0.1",
-            port=port,
-            log_level="warning",
-        )
+    _install_service_control_middleware(
+        dashboard_app,
+        lambda: signal.raise_signal(signal.SIGINT),
     )
-    _install_service_control_middleware(dashboard_app, server)
-    server.run()
+    uvicorn.run(dashboard_app, host="127.0.0.1", port=port, log_level="warning")
 
 
 @app.command("repair-scheduler")
