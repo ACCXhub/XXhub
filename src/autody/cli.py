@@ -28,11 +28,16 @@ from autody.account_profile import (
     mark_bindings_for_revalidation,
     resolve_account_profile,
 )
+from autody.binding_recovery import (
+    reconcile_stable_bindings,
+    remember_binding_evidence,
+)
 from autody.config import AppConfig, load_config, save_config, target_identity
 from autody.friend_discovery import (
     FriendDiscoveryResult,
     ScanProgress,
     discover_friends,
+    load_discovered_friends,
     record_discovery_failure,
 )
 from autody.locking import SingleInstanceLock, TaskAlreadyRunning
@@ -172,6 +177,16 @@ def _merge_discovered_target_bindings(
     return latest
 
 
+def _remember_cached_binding_evidence(
+    config_path: Path,
+    loaded: AppConfig,
+    discovery_path: Path,
+) -> None:
+    previous = load_discovered_friends(discovery_path)
+    if remember_binding_evidence(loaded, previous):
+        save_config(config_path, loaded)
+
+
 def _complete_friend_discovery(
     config_path: Path,
     loaded: AppConfig,
@@ -183,6 +198,10 @@ def _complete_friend_discovery(
         if result.config_changed
         else loaded
     )
+    changed = bool(reconcile_stable_bindings(persisted, result))
+    changed = remember_binding_evidence(persisted, result) or changed
+    if changed:
+        save_config(config_path, persisted)
     complete_binding_revalidation(
         persisted.state_file.parent,
         account_scope=result.account_scope,
@@ -207,6 +226,7 @@ def _run_friend_scan(
     progress = ScanProgress(discovery_path)
     overall_deadline = time.monotonic() + loaded.friend_scan_overall_timeout_ms / 1000
     result = None
+    _remember_cached_binding_evidence(config_path, loaded, discovery_path)
     try:
         progress.update("waiting_browser")
         with SingleInstanceLock(
@@ -226,6 +246,12 @@ def _run_friend_scan(
                     home=_data_root(config_path),
                     on_stage=progress.update,
                 ) as page:
+                    try:
+                        profile = resolve_account_profile(page, _data_root(config_path))
+                    except AccountProfileUnavailable as exc:
+                        raise AuthenticationError(str(exc)) from exc
+                    if profile.switched:
+                        mark_bindings_for_revalidation(loaded.state_file.parent)
                     remaining_ms = max(1, int((overall_deadline - time.monotonic()) * 1000))
                     result = discover_friends(
                         loaded,
@@ -365,6 +391,11 @@ def login(config: Path = typer.Option(Path("config.yaml"), "--config")):
         with SingleInstanceLock(loaded.lock_file):
             configure_runtime(_data_root(config))
             setup_logging(loaded)
+            _remember_cached_binding_evidence(
+                config,
+                loaded,
+                loaded.state_file.parent / "discovered_friends.json",
+            )
             typer.echo("浏览器将打开，请扫码登录；检测到聊天列表后会自动保存并关闭。")
             scan_message = "候选好友扫描未启动。"
 
@@ -444,6 +475,8 @@ def health_check(config: Path = typer.Option(Path("config.yaml"), "--config")):
         with SingleInstanceLock(loaded.lock_file):
             configure_runtime(_data_root(config))
             setup_logging(loaded)
+            discovery_path = loaded.state_file.parent / "discovered_friends.json"
+            _remember_cached_binding_evidence(config, loaded, discovery_path)
             with open_chat(
                 loaded.profile_dir,
                 loaded.page_load_timeout_ms,
@@ -453,8 +486,10 @@ def health_check(config: Path = typer.Option(Path("config.yaml"), "--config")):
             ) as page:
                 logging.info("登录状态和抖音聊天页正常。")
                 _write_health(loaded, "success")
-                discovery_path = loaded.state_file.parent / "discovered_friends.json"
                 try:
+                    profile = resolve_account_profile(page, _data_root(config))
+                    if profile.switched:
+                        mark_bindings_for_revalidation(loaded.state_file.parent)
                     result = discover_friends(
                         loaded, page, DOUYIN_SELECTORS, discovery_path
                     )
@@ -653,7 +688,19 @@ def ui(
     if not no_open:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     typer.echo(f"AutoDy 管理台正在运行：{url}")
-    uvicorn.run(create_app(config), host="127.0.0.1", port=port, log_level="warning")
+    dashboard_app = create_app(config)
+    server = uvicorn.Server(
+        uvicorn.Config(
+            dashboard_app,
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+        )
+    )
+    dashboard_app.state.request_service_shutdown = lambda: setattr(
+        server, "should_exit", True
+    )
+    server.run()
 
 
 @app.command("repair-scheduler")
