@@ -106,6 +106,13 @@
       Impersonate="yes"
       Return="check" />
     <CustomAction
+      Id="StopExistingAutoDyForRemove"
+      Directory="INSTALLFOLDER"
+      ExeCommand="&quot;[SystemFolder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]scripts\autody-tray.ps1&quot; -StopExisting"
+      Execute="deferred"
+      Impersonate="yes"
+      Return="check" />
+    <CustomAction
       Id="SetRepairInstalledAutoDyTasksData"
       Property="RepairInstalledAutoDyTasks"
       Value="&quot;[INSTALLFOLDER]runtime\python\python.exe&quot; -B -m autody.cli repair-scheduler --config &quot;[AUTODYDATAROOT]config.yaml&quot; --program-root &quot;[INSTALLFOLDER].&quot; --data-root &quot;[AUTODYDATAROOT].&quot; --task-user-id &quot;[AUTODY_INTERACTIVE_USER_SID]&quot;"
@@ -162,6 +169,10 @@
         Action="RepairInstalledAutoDyTasks"
         After="RollbackFreshInstallAutoDyTasks"
         Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom
+        Action="StopExistingAutoDyForRemove"
+        Before="SetRemoveInstalledAutoDyTasksData"
+        Condition="REMOVE~=&quot;ALL&quot;" />
       <Custom
         Action="SetRemoveInstalledAutoDyTasksData"
         Before="RemoveInstalledAutoDyTasks"
