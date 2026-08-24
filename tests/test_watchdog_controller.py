@@ -29,9 +29,10 @@ def test_watchdog_gracefully_stops_then_force_stops_only_the_verified_pid():
     stop = block(text, "function Stop-ManagedService", "function Stop-VerifiedInstalledAutoDyServices")
 
     graceful = 'Invoke-RestMethod -Uri "$script:Url/api/service-shutdown" -Method Post'
-    forced = "Stop-Process -Id $pidToStop -Force"
+    forced = "Stop-Process -Id $ManagedPid -Force"
     assert graceful in stop
     assert '"X-AutoDy-Control-Token" = $script:ServiceControlToken' in stop
+    assert "$snapshot.Pid -ne $ManagedPid" in stop
     assert "Test-OwnedAutoDyIdentity" in stop
     assert "Test-ManagedProcessStillCurrent" in stop
     assert stop.index(graceful) < stop.index(forced)
@@ -73,17 +74,19 @@ def test_controlled_stop_kills_tray_first_then_only_verified_autody_services():
     assert "Stop-ManagedService" in installed
 
 
-def test_watchdog_recovery_does_not_call_send_retry_friend_or_repair_actions():
+def test_watchdog_recovery_does_not_call_send_retry_friend_repair_or_data_writes():
     text = tray_text()
     watchdog = block(text, "function Invoke-WatchdogRecovery", "function Invoke-WatchdogTick")
 
-    assert "Start-Or-ReuseService" in watchdog
-    assert "Stop-ManagedService" in watchdog
+    assert "Start-Or-ReuseService -SkipPortPersistence -Silent" in watchdog
+    assert "Stop-ManagedService -Silent" in watchdog
     for forbidden in [
         "/api/repair",
         "run-target",
         "scan-friends",
         "refresh-friend",
         "retry_pending",
+        "Save-ServicePort",
+        "Write-TrayLog",
     ]:
         assert forbidden not in watchdog
