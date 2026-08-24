@@ -20,6 +20,7 @@ from autody.chat import (
     ChatSelectors,
     conversation_candidate_id,
     conversation_row_identity,
+    conversation_row_locator,
     opaque_conversation_identity,
 )
 from autody.account_profile import load_account_profile
@@ -33,6 +34,7 @@ AVATAR_CACHE_TTL = timedelta(days=7)
 _VIRTUAL_LIST_GROWTH_WINDOW_MS = 2_000
 _VIRTUAL_LIST_STABLE_MS = 500
 _VIRTUAL_LIST_POLL_MS = 250
+_VIRTUAL_LIST_BOTTOM_GROWTH_MS = 2_000
 logger = logging.getLogger(__name__)
 
 
@@ -54,6 +56,7 @@ class FriendCandidate:
     presence_status: str = "current"
     identity_key: str | None = None
     identity_source: str | None = None
+    conversation_id: str | None = None
 
     @property
     def name(self) -> str:
@@ -158,6 +161,7 @@ class _ScannedItem:
     avatar_hash: str | None
     identity_key: str | None
     identity_source: str | None
+    conversation_id: str | None
     row_index: int
     capture_attempted: bool = True
     avatar_capture_failed: bool = False
@@ -270,6 +274,25 @@ def _wait_for_initial_virtual_list_expansion(
             last_growth_ms = elapsed_ms
 
 
+def _wait_for_virtual_list_growth_at_bottom(
+    page,
+    scrollable,
+    *,
+    previous_maximum: int | float,
+    timeout_ms: int,
+) -> bool:
+    """Wait briefly for Douyin to append the next lazy-loaded page."""
+    elapsed_ms = 0
+    hard_limit_ms = min(timeout_ms, _VIRTUAL_LIST_BOTTOM_GROWTH_MS)
+    while elapsed_ms < hard_limit_ms:
+        wait_ms = min(_VIRTUAL_LIST_POLL_MS, hard_limit_ms - elapsed_ms)
+        page.wait_for_timeout(wait_ms)
+        elapsed_ms += wait_ms
+        if _scroll_metrics(scrollable)["maximum"] > previous_maximum:
+            return True
+    return False
+
+
 def _scan_items(
     page,
     selectors: ChatSelectors,
@@ -323,7 +346,9 @@ def _scan_items(
             # single row in one operation; never retain row locators while
             # collecting names for the rest of the viewport.
             accepted = None
-            last_snapshot: tuple[str, str | None, str | None] | None = None
+            last_snapshot: tuple[
+                str, str | None, str | None, str | None
+            ] | None = None
             for _attempt in range(2):
                 item = conversations.nth(index)
                 try:
@@ -333,7 +358,13 @@ def _scan_items(
                 if not name:
                     break
                 identity_key, identity_source = _row_identity_hint(item)
-                last_snapshot = (name, identity_key, identity_source)
+                conversation_id = conversation_row_locator(item)
+                last_snapshot = (
+                    name,
+                    identity_key,
+                    identity_source,
+                    conversation_id,
+                )
                 should_capture = capture_avatar is None or capture_avatar(identity_key)
                 if should_capture:
                     if progress:
@@ -356,11 +387,17 @@ def _scan_items(
                 except Exception:
                     verified_name = ""
                 verified_identity_key, _ = _row_identity_hint(item)
-                if name == verified_name and identity_key == verified_identity_key:
+                verified_conversation_id = conversation_row_locator(item)
+                if (
+                    name == verified_name
+                    and identity_key == verified_identity_key
+                    and conversation_id == verified_conversation_id
+                ):
                     accepted = (
                         name,
                         identity_key,
                         identity_source,
+                        conversation_id,
                         temporary,
                         avatar_hash,
                         avatar_capture_failed,
@@ -383,6 +420,7 @@ def _scan_items(
                 name,
                 identity_key,
                 identity_source,
+                conversation_id,
                 temporary,
                 avatar_hash,
                 avatar_capture_failed,
@@ -417,6 +455,7 @@ def _scan_items(
                     avatar_hash,
                     identity_key,
                     identity_source,
+                    conversation_id,
                     index,
                     should_capture,
                     avatar_capture_failed,
@@ -432,6 +471,18 @@ def _scan_items(
             break
         metrics = _scroll_metrics(scrollable)
         if metrics["before"] >= metrics["maximum"]:
+            remaining_ms = (
+                max(0, int((deadline - monotonic()) * 1000))
+                if deadline is not None
+                else _VIRTUAL_LIST_BOTTOM_GROWTH_MS
+            )
+            if _wait_for_virtual_list_growth_at_bottom(
+                page,
+                scrollable,
+                previous_maximum=metrics["maximum"],
+                timeout_ms=remaining_ms,
+            ):
+                continue
             completed_bottom_reached = True
             break
         scrollable.first.evaluate(
@@ -709,6 +760,7 @@ def discover_friends(
                     presence_status="current",
                     identity_key=item.identity_key,
                     identity_source=item.identity_source,
+                    conversation_id=item.conversation_id,
                 )
             )
 
@@ -849,6 +901,7 @@ def _candidate_from_payload(item: object, scanned_at: str) -> FriendCandidate:
         presence_status=str(item.get("presence_status", "current")),
         identity_key=(str(item["identity_key"]) if item.get("identity_key") else None),
         identity_source=(str(item["identity_source"]) if item.get("identity_source") else None),
+        conversation_id=(str(item["conversation_id"]) if item.get("conversation_id") else None),
     )
 
 

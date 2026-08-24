@@ -304,14 +304,28 @@ input:focus, textarea:focus, select:focus { border-color: #5797ef; box-shadow: 0
 .app-load-error summary { cursor: pointer; font-weight: 650; }
 .app-load-error details p { margin: 8px 0 0; font-family: ui-monospace, "Cascadia Code", monospace; }
 .issues-panel { margin-bottom: 14px; overflow: hidden; }
+.dashboard-page .page-header { min-height: 48px; margin-bottom: 14px; }
+.dashboard-page .page-header h1 { font-size: 24px; }
+.dashboard-page .status-rail { min-height: 88px; margin-bottom: 12px; }
+.dashboard-page .status-item { gap: 14px; padding: 14px 20px; }
+.dashboard-page .status-icon { width: 44px; height: 44px; }
+.dashboard-page .status-icon svg { width: 22px; height: 22px; }
+.dashboard-page .status-item small { margin-bottom: 4px; font-size: 11px; }
+.dashboard-page .status-item strong { font-size: 17px; }
+.dashboard-page .stats-grid { margin-bottom: 12px; }
+.dashboard-page .stat-card { min-height: 82px; padding: 13px 16px; }
+.issues-panel-clear .panel-heading { border-bottom: 0; }
 .issue-list { display: grid; }
-.issue-item { min-height: 64px; padding: 10px 15px; display: grid; grid-template-columns: 24px 1fr auto; gap: 12px; align-items: center; border-top: 1px solid #edf1f5; }
+.issue-item { min-height: 56px; padding: 8px 15px; display: grid; grid-template-columns: 22px 1fr auto; gap: 10px; align-items: center; border-top: 1px solid #edf1f5; }
 .issue-item:first-child { border-top: 0; }
 .issue-item > svg { color: #e09a17; }
 .issue-item.error > svg { color: #d74e4e; }
 .issue-item > div { display: grid; gap: 4px; }
 .issue-item strong { font-size: 12px; font-weight: 600; white-space: pre-wrap; }
 .issue-item small { color: #8b97a8; font-size: 10px; }
+.friends-table-wrap { max-height: 280px; overflow: auto; }
+.friends-table-wrap th { position: sticky; top: 0; z-index: 1; }
+.failure-summary { color: #b43f47; font-weight: 600; }
 .empty-state.compact { padding: 28px; }
 .module-card { display: flex; gap: 20px; justify-content: space-between; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; background: #fbfdff; }
 .module-card-main { min-width: 0; }

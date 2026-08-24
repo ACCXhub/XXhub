@@ -135,6 +135,7 @@ export interface DashboardIssue {
   explanation: string;
   action: string;
   action_label: string;
+  target_ids?: string[];
 }
 
 export interface RepairSummary {

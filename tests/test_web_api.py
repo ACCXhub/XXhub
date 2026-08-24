@@ -2063,10 +2063,98 @@ def test_status_routes_a_non_retryable_stale_binding_to_friend_management(
         "/api/status?today=2026-06-24"
     ).json()
 
-    issue = next(item for item in status["issues"] if item["id"] == "last_run_partial")
+    issue = next(
+        item
+        for item in status["issues"]
+        if item["id"] == "send_failure_reassociate"
+    )
     assert issue["action"] == "friends"
-    assert issue["action_label"] == "管理好友"
+    assert issue["action_label"] == "重新关联"
     assert "重新关联" in issue["explanation"]
+
+
+def test_status_keeps_healthy_binding_and_routes_current_failure_from_detail(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    account_id = write_verified_account(tmp_path)
+    config.targets = [
+        Target(
+            name="当前失败目标",
+            stable_id="target-current",
+            candidate_id="candidate-current",
+            binding_identity_key="row:friend-current",
+            binding_identity_source="row_attribute",
+            binding_account_scope=account_id,
+        )
+    ]
+    save_config(config_path, config)
+    (tmp_path / "data" / "discovered_friends.json").write_text(
+        json.dumps(
+            {
+                "scanned_at": "2026-06-24T07:20:00",
+                "account_scope": account_id,
+                "last_result": {
+                    "status": "completed_bottom_reached",
+                    "completed_bottom_reached": True,
+                    "partial": False,
+                },
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-current",
+                        "display_name": "当前失败目标",
+                        "avatar_status": "missing",
+                        "discovered_at": "2026-06-24T07:20:00",
+                        "match_status": "configured",
+                        "presence_status": "current",
+                        "identity_key": "row:friend-current",
+                        "identity_source": "row_attribute",
+                        "conversation_id": "candidate-conversation-current",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    state_path = tmp_path / "data" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    daily = state["daily"]["2026-06-24"]
+    daily["succeeded"] = []
+    daily["failures"] = {"当前失败目标": "conversation not found"}
+    daily["target_failures"] = {
+        "target-current": failure_detail(
+            "conversation_not_found",
+            stage="conversation_located",
+            send_attempts=0,
+            run_id="run-current",
+            target_stable_id="target-current",
+            binding_valid=True,
+            account_scope_matches=True,
+        ).model_dump(mode="json")
+    }
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    status = TestClient(
+        create_app(
+            config_path,
+            now_provider=lambda: datetime(2026, 6, 24, 8, 0, 0),
+        )
+    ).get(
+        "/api/status?today=2026-06-24"
+    ).json()
+
+    friend = status["friends"][0]
+    issue = next(
+        item
+        for item in status["issues"]
+        if item["id"] == "send_failure_retryable"
+    )
+    assert friend["current_health"]["status"] == "healthy"
+    assert friend["status"] == "failed"
+    assert issue["action"] == "retry_target"
+    assert issue["target_ids"] == ["target-current"]
 
 
 def test_current_digest_scope_restores_retry_from_legacy_mismatch_and_key(
@@ -2708,8 +2796,9 @@ def test_discovered_candidate_batch_add_keeps_its_cached_avatar_and_friend_state
                     "avatar_status": "cached",
                     "discovered_at": "2026-07-04T12:30:00",
                     "match_status": "unconfigured",
-                    "identity_key": "row:conversation-new",
-                    "identity_source": "row_attribute",
+                    "identity_key": "participant:friend-new",
+                    "identity_source": "participant_sec_user_id",
+                    "conversation_id": "candidate-conversation-new",
                 }],
             },
             ensure_ascii=False,
@@ -2790,8 +2879,9 @@ def test_candidate_add_is_idempotent_by_candidate_id_and_keeps_duplicate_names_s
                 "candidates": [
                     {
                         "candidate_id": "candidate-a",
-                        "identity_key": "row:conversation-a",
-                        "identity_source": "row_attribute",
+                        "identity_key": "participant:friend-a",
+                        "identity_source": "participant_sec_user_id",
+                        "conversation_id": "candidate-conversation-a",
                         "display_name": "同名候选",
                         "avatar_cache_key": "candidate-a",
                         "avatar_status": "cached",
@@ -2800,8 +2890,9 @@ def test_candidate_add_is_idempotent_by_candidate_id_and_keeps_duplicate_names_s
                     },
                     {
                         "candidate_id": "candidate-b",
-                        "identity_key": "row:conversation-b",
-                        "identity_source": "row_attribute",
+                        "identity_key": "participant:friend-b",
+                        "identity_source": "participant_sec_user_id",
+                        "conversation_id": "candidate-conversation-b",
                         "display_name": "同名候选",
                         "avatar_cache_key": "candidate-b",
                         "avatar_status": "cached",
@@ -2953,8 +3044,9 @@ def test_authoritative_relink_immediately_converges_current_binding_health(
                         "discovered_at": "2026-07-30T08:00:00",
                         "match_status": "unconfigured",
                         "presence_status": "current",
-                        "identity_key": "row:friend-one",
-                        "identity_source": "row_attribute",
+                        "identity_key": "participant:friend-one",
+                        "identity_source": "participant_sec_user_id",
+                        "conversation_id": "candidate-conversation-current",
                     }
                 ],
             },
@@ -2975,8 +3067,8 @@ def test_authoritative_relink_immediately_converges_current_binding_health(
     assert relinked.status_code == 200
     target = load_config(config_path).targets[0]
     assert target.candidate_id == "candidate-current"
-    assert target.binding_identity_key == "row:friend-one"
-    assert target.binding_identity_source == "row_attribute"
+    assert target.binding_identity_key == "participant:friend-one"
+    assert target.binding_identity_source == "participant_sec_user_id"
     assert target.binding_account_scope == account_id
     assert client.get("/api/status?today=2026-06-24").json()["friends"][0][
         "current_health"

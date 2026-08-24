@@ -206,6 +206,41 @@ class DelayedExpansionPage(FakePage):
         self.elapsed_ms += delay
 
 
+class LazyBottomScrollLocator(FakeScrollLocator):
+    def evaluate(self, expression, *_args):
+        if "scrollTop = 0" in expression:
+            self.page.position = 0
+            return None
+        if "before" in expression:
+            maximum = (
+                2
+                if self.page.position >= 1 and self.page.bottom_wait_ms >= 750
+                else 1
+            )
+            return {
+                "before": self.page.position,
+                "maximum": maximum,
+                "step": 1,
+            }
+        self.page.position += 1
+
+
+class LazyBottomPage(FakePage):
+    def __init__(self, selectors: ChatSelectors):
+        super().__init__(selectors)
+        self.bottom_wait_ms = 0
+
+    def locator(self, selector):
+        if selector == self.selectors.conversation_list:
+            return LazyBottomScrollLocator(self)
+        return super().locator(selector)
+
+    def wait_for_timeout(self, delay):
+        super().wait_for_timeout(delay)
+        if self.position >= 1:
+            self.bottom_wait_ms += delay
+
+
 def test_scan_friend_names_scrolls_and_deduplicates():
     selectors = ChatSelectors.test_defaults()
     page = FakePage(selectors)
@@ -271,6 +306,28 @@ def test_discovery_waits_for_delayed_virtual_list_expansion_before_scanning(
     result = discover_friends(
         AppConfig(),
         DelayedExpansionPage(selectors),
+        selectors,
+        tmp_path / "data" / "discovered_friends.json",
+    )
+
+    assert [candidate.display_name for candidate in result.candidates] == [
+        "测试好友甲",
+        "测试好友乙",
+        "测试好友丙",
+        "测试好友丁",
+    ]
+    assert result.last_result["candidates_found"] == 4
+    assert result.last_result["completed_bottom_reached"] is True
+
+
+def test_discovery_waits_for_lazy_page_growth_before_declaring_bottom(
+    tmp_path: Path,
+):
+    selectors = ChatSelectors.test_defaults()
+
+    result = discover_friends(
+        AppConfig(),
+        LazyBottomPage(selectors),
         selectors,
         tmp_path / "data" / "discovered_friends.json",
     )

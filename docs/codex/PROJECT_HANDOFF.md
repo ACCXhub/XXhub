@@ -11,6 +11,12 @@ v1.4.4 Scheduler/MSI 热修由两个生产提交组成：
 
 已验证 MSI 来自 `bb511b441b679d65685a1ef871d89da9eba349e1`，文件名为 `AutoDy-1.4.4-x64.msi`，大小 `301,540,220` bytes，SHA-256 为 `bea7a7e7495c0137d33463f504d2999dcef250e7df7766c90eb0dbcb4a1daa10`。后续文档提交不改变该二进制来源。
 
+当前 `[Unreleased]` 本地维护状态已把好友身份与会话定位收敛为两个独立概念。当前抖音 React conversation model 的 `toParticipantSecUserId` 是持久好友身份证明，conversation `id`/`shortId` 是当前会话 locator；discovery/cache 的 `candidate_id` 只负责本地候选关联。`binding_recovery.resolve_stable_binding` 是权威绑定解析入口，负责用账号范围和持久 proof 唯一匹配完整 discovery，再返回当前 locator 给 Runner 与 Chat。旧 `row_attribute` proof 仅保留兼容；没有权威 proof、账号不一致、扫描不完整或匹配不唯一时继续 fail closed。
+
+当前 Dashboard 的“需要处理”由未解决的当前 FailureDetail 生成：可安全重试时只提供目标级安全补发，绑定问题进入好友管理，账号问题进入登录，`uncertain` 只进入人工查看且不自动重试。好友表分别显示当前绑定与今日发送，健康绑定不再重复显示“绑定有效”；表格使用受限高度的内部滚动以适配 1366×768 级桌面视口。
+
+文案库的 TXT/CSV/JSON 本地预览与合并、文案包的 TXT 本地导入仍复用现有 `MessagePackService` 和对应 API/UI，消息内容不通过新增远程上传系统。日常安装仍以 MSI 维护的 `D:\AutoDy` ProgramRoot 与原交互用户 `%LocalAppData%\AutoDy` DataRoot 为准；本地维护构建只能在验证源码服务后通过既有 MSI 路径替换程序资源，不能覆盖 DataRoot 或改变 Scheduler 的 Limited Principal/roots 语义。
+
 ## 仓库结构
 
 - `src/autody`：FastAPI、本地配置、状态、历史、Scheduler、浏览器安全和模块。

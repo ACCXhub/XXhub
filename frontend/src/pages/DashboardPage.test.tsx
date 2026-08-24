@@ -19,13 +19,19 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.useRealTimers(); });
 
-test("shows current binding health without treating a historical failure as current abnormal", () => {
+test("shows healthy binding and the current send failure without duplicate health copy", () => {
   const currentStatus = {
     ...status,
     friends: [{
       target_id: "target-one", name: "当前有效目标", status: "failed" as const,
       error: "历史会话定位失败",
+      failure: failure("target-one"),
       current_health: { status: "healthy" as const, reason_code: "binding_valid", summary_zh: "绑定有效" }
+    }],
+    issues: [{
+      id: "send_failure_retryable", status: "warning" as const,
+      explanation: "当前有效目标：无法在当前会话列表中找到目标。",
+      action: "retry_target", action_label: "安全补发", target_ids: ["target-one"]
     }]
   };
 
@@ -34,8 +40,9 @@ test("shows current binding health without treating a historical failure as curr
   const panel = screen.getByText("好友状态").closest("section");
   expect(panel).not.toBeNull();
   expect(within(panel as HTMLElement).getByText("正常")).toBeInTheDocument();
-  expect(within(panel as HTMLElement).getByText("绑定有效")).toBeInTheDocument();
+  expect(within(panel as HTMLElement).queryByText("绑定有效")).not.toBeInTheDocument();
   expect(within(panel as HTMLElement).getByText("今日失败")).toBeInTheDocument();
+  expect(within(panel as HTMLElement).getByText("无法在当前会话列表中找到目标")).toBeInTheDocument();
   expect(within(panel as HTMLElement).queryByText("历史会话定位失败")).not.toBeInTheDocument();
 });
 
@@ -147,6 +154,11 @@ test("safe resend includes only unresolved current failures allowed by safety ga
         })
       }
     ],
+    issues: [{
+      id: "send_failure_retryable", status: "warning" as const,
+      explanation: "安全目标：无法在当前会话列表中找到目标。",
+      action: "retry_target", action_label: "安全补发", target_ids: ["target-safe"]
+    }],
     history: [{
       run_id: "run-mixed", date: "2026-07-16", task_type: "daily_send",
       trigger_source: "retry" as const, success_count: 1, failed_count: 2,
@@ -172,7 +184,7 @@ test("safe resend includes only unresolved current failures allowed by safety ga
 
   render(<DashboardPage status={mixed} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} onRetryTargets={retryTargets} />);
 
-  expect(screen.getByText("仅补发今日尚未成功且可安全重试的目标")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "补发" }));
+  expect(screen.getByText("安全目标：无法在当前会话列表中找到目标。")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "安全补发" }));
   expect(retryTargets).toHaveBeenCalledWith(["target-safe"]);
 });

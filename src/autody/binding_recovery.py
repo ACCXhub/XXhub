@@ -9,7 +9,9 @@ from autody.chat import conversation_candidate_id
 from autody.friend_discovery import is_discovery_stale
 
 
-AUTHORITATIVE_BINDING_IDENTITY_SOURCES = frozenset({"row_attribute"})
+AUTHORITATIVE_BINDING_IDENTITY_SOURCES = frozenset(
+    {"participant_sec_user_id", "row_attribute"}
+)
 _FAILED_DISCOVERY_STATUSES = frozenset(
     {
         "failed",
@@ -128,7 +130,12 @@ def resolve_stable_binding(
     if len(matches) > 1:
         return StableBindingResolution("identity_ambiguous")
     candidate = matches[0]
-    conversation_id = conversation_candidate_id(candidate.identity_key)
+    conversation_id = getattr(candidate, "conversation_id", None)
+    if not conversation_id:
+        # Compatibility for caches produced before locator and durable identity
+        # were modeled separately.  Current real discovery always persists the
+        # explicit conversation locator.
+        conversation_id = conversation_candidate_id(candidate.identity_key)
     if not conversation_id:
         return StableBindingResolution("stale_locator")
     if revalidation_required:

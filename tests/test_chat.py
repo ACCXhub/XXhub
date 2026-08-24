@@ -12,7 +12,10 @@ from autody.chat import (
     DOUYIN_SELECTORS,
     DeliveryStatus,
     DouyinChat,
+    conversation_candidate_id,
     conversation_row_candidate_id,
+    conversation_row_identity,
+    conversation_row_locator,
     normalize_message_text,
     open_chat,
 )
@@ -84,6 +87,37 @@ def test_stable_binding_navigation_is_used_before_composer(page, fake_chat):
     )
 
     assert result.successful
+
+
+def test_runtime_model_separates_friend_identity_from_conversation_locator(
+    page, fake_chat
+):
+    row = page.locator('[data-e2e="conversation-item"]').first
+    row.evaluate(
+        """element => {
+            for (const attribute of ['data-conversation-id', 'data-id', 'data-key']) {
+                element.removeAttribute(attribute);
+            }
+            element.__reactFiber$autody = {
+                memoizedProps: {
+                    conversation: {
+                        toParticipantSecUserId: 'durable-friend-proof',
+                        id: 'current-conversation-locator'
+                    }
+                },
+                pendingProps: null,
+                return: null
+            };
+        }"""
+    )
+
+    identity_key, identity_source = conversation_row_identity(row)
+    locator = conversation_row_locator(row)
+
+    assert identity_source == "participant_sec_user_id"
+    assert identity_key is not None
+    assert locator is not None
+    assert locator != conversation_candidate_id(identity_key)
 
 
 def test_authoritative_ids_allow_a_lagging_title(page, fake_chat):

@@ -43,7 +43,11 @@ from autody.account_profile import (
     public_profile_payload,
 )
 from autody.account_profiles import AccountProfileStoreError, MultiAccountStore
-from autody.binding_recovery import all_stable_bindings_proven, resolve_stable_binding
+from autody.binding_recovery import (
+    AUTHORITATIVE_BINDING_IDENTITY_SOURCES,
+    all_stable_bindings_proven,
+    resolve_stable_binding,
+)
 from autody.failures import FailureDetail, failure_detail
 from autody.friend_discovery import is_discovery_stale, load_discovered_friends
 from autody.history import TaskHistoryStore, bootstrap_legacy_daily_history
@@ -1373,60 +1377,76 @@ def create_app(
                 "action": "scheduler",
                 "action_label": "修复任务",
             })
-        if (
-            daily.get("message")
-            and len(executable_succeeded) < len(executable_targets)
-        ):
-            current_failures = [
-                friend["failure"]
-                for friend in friends
-                if friend["status"] == "failed" and friend["failure"] is not None
-            ]
-            requires_reassociation = bool(current_failures) and all(
-                failure.get("safe_retry_available") is False
-                and failure.get("suggested_action") == "reassociate"
-                for failure in current_failures
-            )
-            issues.append(
-                {
-                    "id": "last_run_partial",
-                    "status": "warning",
-                    "explanation": (
-                        "有失败目标的稳定绑定已过期；请先重新关联，当前不会继续自动重试。"
-                        if requires_reassociation
-                        else "最近一次发送未全部完成，再次运行只补发失败目标。"
-                    ),
-                    "action": "friends" if requires_reassociation else "run",
-                    "action_label": "管理好友" if requires_reassociation else "继续补发",
-                }
-            )
-        latest_run = history_page.items[0] if history_page.items else None
-        if latest_run and "confirmation_failed" in latest_run.confirmation_results.values():
-            issues.append({
-                "id": "message_confirmation_failure", "status": "error",
-                "explanation": "最近一次发送存在未确认消息，再次运行只处理未完成目标。",
-                "action": "run", "action_label": "继续补发",
-            })
-        notice = config.state_file.parent / "notifications" / "need-attention.txt"
-        if notice.exists():
-            failed_friends = [
-                (friend["name"], friend["failure"])
-                for friend in friends
-                if friend["failure"] is not None
-            ]
-            if failed_friends:
-                failed_name, failed_detail = failed_friends[0]
-                notification_explanation = (
-                    f"{failed_name}：{failed_detail['user_summary_zh']}。"
-                    f"建议：{failed_detail['suggested_action_zh']}。"
+        current_failure_friends = [
+            friend
+            for friend in friends
+            if friend["status"] == "failed"
+            and friend["failure"] is not None
+            and friend["failure"].get("resolved") is not True
+        ]
+        grouped_failures: dict[str, dict[str, object]] = {}
+        for friend in current_failure_friends:
+            failure = friend["failure"]
+            if failure.get("uncertain_send"):
+                kind, issue_status, action, action_label = (
+                    "uncertain", "error", "logs", "查看详情",
+                )
+            elif failure.get("safe_retry_available"):
+                kind, issue_status, action, action_label = (
+                    "retryable", "warning", "retry_target", "安全补发",
+                )
+            elif failure.get("suggested_action") == "reassociate":
+                kind, issue_status, action, action_label = (
+                    "reassociate", "warning", "friends", "重新关联",
+                )
+            elif failure.get("suggested_action") == "switch_account":
+                kind, issue_status, action, action_label = (
+                    "account", "error", "login", "切换或登录账号",
                 )
             else:
-                notification_explanation = (
-                    "最近一次后台任务未完成，请查看日志中的中文原因和处理建议。"
+                kind, issue_status, action, action_label = (
+                    "details", "warning", "logs", "查看详情",
                 )
+            group = grouped_failures.setdefault(
+                kind,
+                {
+                    "status": issue_status,
+                    "action": action,
+                    "action_label": action_label,
+                    "friends": [],
+                },
+            )
+            group["friends"].append(friend)
+
+        group_explanations = {
+            "uncertain": "位好友的发送结果尚不确定，已禁止自动重试",
+            "retryable": "位好友今日发送失败，当前满足安全补发条件",
+            "reassociate": "位好友今日发送失败，需要先重新关联",
+            "account": "位好友受当前账号状态阻止",
+            "details": "位好友今日发送失败，需要人工查看详情",
+        }
+        for kind, group in grouped_failures.items():
+            affected = group.pop("friends")
+            if len(affected) == 1:
+                friend = affected[0]
+                explanation = (
+                    f"{friend['name']}：{friend['failure']['user_summary_zh']}。"
+                )
+            else:
+                explanation = f"今日有 {len(affected)} {group_explanations[kind]}。"
+            issues.append(
+                {
+                    "id": f"send_failure_{kind}",
+                    "explanation": explanation,
+                    "target_ids": [friend["target_id"] for friend in affected],
+                    **group,
+                }
+            )
+        notice = config.state_file.parent / "notifications" / "need-attention.txt"
+        if notice.exists() and not current_failure_friends:
             issues.append({
                 "id": "notification", "status": "error",
-                "explanation": notification_explanation,
+                "explanation": "最近一次后台任务未完成，请查看当前日志中的处理建议。",
                 "action": "logs", "action_label": "查看日志",
             })
         statistics = dashboard_statistics(
@@ -2576,7 +2596,8 @@ def create_app(
                 or not _avatar_id(candidate.candidate_id)
                 or not result.account_scope
                 or not candidate.identity_key
-                or candidate.identity_source != "row_attribute"
+                or candidate.identity_source
+                not in AUTHORITATIVE_BINDING_IDENTITY_SOURCES
                 or " ".join(candidate.display_name.split()).casefold() in guarded_names
             ):
                 skipped += 1
@@ -2640,9 +2661,10 @@ def create_app(
         if (
             not discovered.account_scope
             or not candidate.identity_key
-            or candidate.identity_source != "row_attribute"
+            or candidate.identity_source
+            not in AUTHORITATIVE_BINDING_IDENTITY_SOURCES
         ):
-            raise HTTPException(409, "当前候选缺少权威行身份，不能安全重新关联")
+            raise HTTPException(409, "当前候选缺少权威好友身份，不能安全重新关联")
         proposed = target.model_copy(
             update={
                 "candidate_id": candidate.candidate_id,
@@ -2723,9 +2745,10 @@ def create_app(
             or not _avatar_id(candidate.candidate_id)
             or not result.account_scope
             or not candidate.identity_key
-            or candidate.identity_source != "row_attribute"
+            or candidate.identity_source
+            not in AUTHORITATIVE_BINDING_IDENTITY_SOURCES
         ):
-            raise HTTPException(409, "该候选好友缺少权威行身份，不能安全关联")
+            raise HTTPException(409, "该候选好友缺少权威好友身份，不能安全关联")
         target = Target(
             name=candidate.display_name,
             stable_id=f"target-{uuid.uuid4().hex}",

@@ -21,6 +21,46 @@ CONVERSATION_ID_ATTRIBUTES = (
     "data-id",
     "data-key",
 )
+_CONVERSATION_RUNTIME_FIELDS_SCRIPT = r"""
+element => {
+    const conversationFromFiber = start => {
+        let fiber = start;
+        for (let level = 0; fiber && level < 18; level += 1, fiber = fiber.return) {
+            for (const props of [fiber.memoizedProps, fiber.pendingProps]) {
+                const candidates = [
+                    props?.conversation,
+                    props?.children?.props?.conversation,
+                    props?.children?.[0]?.props?.children?.props?.conversation,
+                ];
+                const conversation = candidates.find(value => value != null);
+                if (conversation) return conversation;
+            }
+        }
+        return null;
+    };
+    const nodes = [element, ...element.querySelectorAll('*')];
+    for (const node of nodes) {
+        const fiberKey = Object.getOwnPropertyNames(node).find(
+            key => key.startsWith('__reactFiber$')
+        );
+        const conversation = fiberKey
+            ? conversationFromFiber(node[fiberKey])
+            : null;
+        if (!conversation) continue;
+        const text = value => value == null ? null : String(value);
+        return {
+            participantSecUserId: text(conversation.toParticipantSecUserId),
+            conversationId: text(conversation.id),
+            conversationShortId: text(conversation.shortId),
+        };
+    }
+    return {
+        participantSecUserId: null,
+        conversationId: null,
+        conversationShortId: null,
+    };
+}
+"""
 _VOLATILE_AVATAR_QUERY_KEYS = {
     "auth_key", "expires", "signature", "timestamp", "ts", "x-expires",
     "x-signature", "x-tos-signature", "x-bce-date", "x-bce-expire", "x-bce-signature",
@@ -145,8 +185,38 @@ def normalized_avatar_source(source: str) -> str:
         return source
 
 
+def _conversation_runtime_fields(item) -> tuple[str | None, str | None]:
+    """Read the friend proof and current locator from Douyin's row model.
+
+    Current Douyin rows expose neither value as a DOM attribute.  The React
+    conversation model keeps the participant identity and conversation locator
+    as separate fields, so keep them separate here as well and fail closed when
+    the model is unavailable.
+    """
+    try:
+        payload = item.evaluate(_CONVERSATION_RUNTIME_FIELDS_SCRIPT)
+    except Exception:
+        return None, None
+    if not isinstance(payload, dict):
+        return None, None
+    participant = payload.get("participantSecUserId")
+    conversation = payload.get("conversationId") or payload.get(
+        "conversationShortId"
+    )
+    return (
+        str(participant) if participant else None,
+        str(conversation) if conversation else None,
+    )
+
+
 def conversation_row_identity(item) -> tuple[str | None, str | None]:
-    """Return the same opaque identity used by friend discovery."""
+    """Return durable proof of which friend this conversation represents."""
+    participant, _ = _conversation_runtime_fields(item)
+    if participant:
+        return (
+            opaque_conversation_identity("participant", participant),
+            "participant_sec_user_id",
+        )
     for attribute in CONVERSATION_ID_ATTRIBUTES:
         try:
             value = item.get_attribute(attribute)
@@ -169,6 +239,26 @@ def conversation_row_identity(item) -> tuple[str | None, str | None]:
     return None, None
 
 
+def conversation_row_locator(item) -> str | None:
+    """Return the current opaque locator used to open this conversation."""
+    _, conversation = _conversation_runtime_fields(item)
+    if conversation:
+        return conversation_candidate_id(
+            opaque_conversation_identity("conversation", conversation)
+        )
+    for attribute in CONVERSATION_ID_ATTRIBUTES:
+        try:
+            value = item.get_attribute(attribute)
+        except Exception:
+            value = None
+        if value:
+            return conversation_candidate_id(
+                opaque_conversation_identity("row", str(value))
+            )
+    identity_key, _ = conversation_row_identity(item)
+    return conversation_candidate_id(identity_key)
+
+
 def conversation_candidate_id(identity_key: str | None) -> str | None:
     if not identity_key:
         return None
@@ -176,8 +266,8 @@ def conversation_candidate_id(identity_key: str | None) -> str | None:
 
 
 def conversation_row_candidate_id(item) -> str | None:
-    identity_key, _ = conversation_row_identity(item)
-    return conversation_candidate_id(identity_key)
+    """Compatibility name for the current conversation locator."""
+    return conversation_row_locator(item)
 
 
 # Centralized selectors based on the current douyin.com/chat page and the upstream
@@ -328,23 +418,7 @@ class DouyinChat:
         visible = self.page.locator(self.selectors.visible_conversation)
         visible_id = None
         if visible.count() and visible.first.is_visible():
-            for attribute in CONVERSATION_ID_ATTRIBUTES:
-                value = visible.first.get_attribute(attribute)
-                if value:
-                    visible_id = conversation_candidate_id(
-                        opaque_conversation_identity("row", str(value))
-                    )
-                    break
-            if visible_id is None:
-                avatar = visible.first.locator("img").first
-                source = avatar.get_attribute("src") if avatar.count() else None
-                if source:
-                    visible_id = conversation_candidate_id(
-                        opaque_conversation_identity(
-                            "avatar",
-                            normalized_avatar_source(str(source)),
-                        )
-                    )
+            visible_id = conversation_row_locator(visible.first)
         return visible_id, visible_name
 
     def _selected_conversation(

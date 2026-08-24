@@ -7,12 +7,19 @@ from autody.binding_recovery import (
 )
 
 
-def candidate(candidate_id, identity_key, identity_source="row_attribute", presence_status="current"):
+def candidate(
+    candidate_id,
+    identity_key,
+    identity_source="row_attribute",
+    presence_status="current",
+    conversation_id=None,
+):
     return SimpleNamespace(
         candidate_id=candidate_id,
         identity_key=identity_key,
         identity_source=identity_source,
         presence_status=presence_status,
+        conversation_id=conversation_id,
     )
 
 
@@ -178,3 +185,29 @@ def test_authoritative_recovery_converges_to_one_current_conversation_locator():
 
     assert reconcile_stable_bindings(cfg, result) == {"target-a"}
     assert item.candidate_id == "candidate-current"
+
+
+def test_participant_identity_resolves_the_separate_current_locator():
+    item = target(
+        "candidate-cache-old",
+        key="participant:friend-a",
+        source="participant_sec_user_id",
+        scope="account-a",
+    )
+    result = discovered(
+        "account-a",
+        [
+            candidate(
+                "candidate-cache-current",
+                "participant:friend-a",
+                "participant_sec_user_id",
+                conversation_id="candidate-conversation-current",
+            )
+        ],
+    )
+
+    resolution = resolve_stable_binding(item, result, profile())
+
+    assert resolution.status == "valid"
+    assert resolution.candidate_id == "candidate-cache-current"
+    assert resolution.conversation_id == "candidate-conversation-current"
