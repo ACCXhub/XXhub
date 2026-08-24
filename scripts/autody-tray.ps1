@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$ProjectRoot = (Join-Path $PSScriptRoot ".."),
     [string]$DataRoot,
     [switch]$DefineOnly,
