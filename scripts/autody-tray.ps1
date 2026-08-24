@@ -183,9 +183,13 @@ function Set-ManualStopToday {
 }
 
 function Clear-ManualStopDate {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Software\AutoDy", $true)
+    if ($null -eq $key) { return }
     try {
-        Remove-ItemProperty -LiteralPath $ManualStopRegistryPath -Name "ManualStopDate" -ErrorAction Stop
-    } catch { }
+        $key.DeleteValue("ManualStopDate", $false)
+    } finally {
+        $key.Dispose()
+    }
 }
 
 function Test-ManualStopToday {
@@ -371,7 +375,17 @@ function Test-OwnedAutoDyIdentity($Snapshot) {
 }
 
 function Test-OwnedAutoDy($Snapshot, [string]$ExpectedVersion) {
-    return (Test-OwnedAutoDyIdentity $Snapshot) -and $Snapshot.Identity.version -eq $ExpectedVersion
+    if ($null -eq $Snapshot -or $null -eq $Snapshot.Identity) { return $false }
+    try {
+        return $Snapshot.Identity.application -eq "AutoDy" -and
+            $Snapshot.Identity.version -eq $ExpectedVersion -and
+            $Snapshot.Pid -gt 0 -and
+            ([IO.Path]::GetFullPath([string]$Snapshot.ProcessPath).TrimEnd('\\') -eq [IO.Path]::GetFullPath($Python).TrimEnd('\\')) -and
+            $Snapshot.Owner -eq [Security.Principal.WindowsIdentity]::GetCurrent().Name -and
+            ([IO.Path]::GetFullPath([string]$Snapshot.Identity.project_path).TrimEnd('\\') -eq [IO.Path]::GetFullPath($DataRoot).TrimEnd('\\')) -and
+            ([IO.Path]::GetFullPath([string]$Snapshot.Identity.package_path).TrimEnd('\\') -eq [IO.Path]::GetFullPath($PackagePath).TrimEnd('\\')) -and
+            ([IO.Path]::GetFullPath([string]$Snapshot.Identity.python_executable).TrimEnd('\\') -eq [IO.Path]::GetFullPath($Python).TrimEnd('\\'))
+    } catch { return $false }
 }
 
 function Set-ManagedServiceSnapshot($Snapshot) {
@@ -418,13 +432,23 @@ function Test-HealthyAutoDy($Snapshot, $Expected) {
 }
 
 function Stop-ManagedService {
+    param([switch]$Silent)
+
     if ($null -eq $script:ManagedPid) { return $false }
-    $pidToStop = [int]$script:ManagedPid
+    $ManagedPid = [int]$script:ManagedPid
+    $pidToStop = $ManagedPid
     $snapshot = Get-ServiceSnapshot
-    if ($null -ne $snapshot -and $snapshot.Pid -eq $pidToStop -and (Test-OwnedAutoDyIdentity $snapshot)) {
-        Set-ManagedServiceSnapshot $snapshot
+    if ($null -ne $snapshot) {
+        if ($snapshot.Pid -ne $ManagedPid -or -not (Test-OwnedAutoDyIdentity $snapshot)) {
+            if (-not (Test-ManagedProcessStillCurrent)) {
+                if (-not $Silent) { Write-TrayLog "Refused to stop an unverified listener PID $ManagedPid." }
+                return $false
+            }
+        } else {
+            Set-ManagedServiceSnapshot $snapshot
+        }
     } elseif (-not (Test-ManagedProcessStillCurrent)) {
-        Write-TrayLog "Refused to stop an unverified listener PID $pidToStop."
+        if (-not $Silent) { Write-TrayLog "Refused to stop an unverified listener PID $ManagedPid." }
         return $false
     }
 
@@ -433,13 +457,13 @@ function Stop-ManagedService {
         for ($attempt = 0; $attempt -lt 20; $attempt++) {
             Start-Sleep -Milliseconds 100
             if ($null -eq (Get-ProcessIdentitySnapshot $pidToStop)) {
-                Write-TrayLog "Stopped managed AutoDy service PID $pidToStop gracefully."
+                if (-not $Silent) { Write-TrayLog "Stopped managed AutoDy service PID $pidToStop gracefully." }
                 Clear-ManagedServiceSnapshot
                 return $true
             }
         }
     } catch {
-        Write-TrayLog "Graceful service stop was unavailable for verified PID $pidToStop."
+        if (-not $Silent) { Write-TrayLog "Graceful service stop was unavailable for verified PID $pidToStop." }
     }
 
     if (-not (Test-ManagedProcessStillCurrent)) {
@@ -447,11 +471,11 @@ function Stop-ManagedService {
             Clear-ManagedServiceSnapshot
             return $true
         }
-        Write-TrayLog "Refused forced stop because verified PID identity changed."
+        if (-not $Silent) { Write-TrayLog "Refused forced stop because verified PID identity changed." }
         return $false
     }
-    Stop-Process -Id $pidToStop -Force -ErrorAction Stop
-    Write-TrayLog "Force-stopped verified AutoDy service PID $pidToStop."
+    Stop-Process -Id $ManagedPid -Force -ErrorAction Stop
+    if (-not $Silent) { Write-TrayLog "Force-stopped verified AutoDy service PID $pidToStop." }
     Clear-ManagedServiceSnapshot
     return $true
 }
@@ -541,7 +565,11 @@ poll();
 }
 
 function Start-Or-ReuseService {
-    param([scriptblock]$OnColdStart)
+    param(
+        [scriptblock]$OnColdStart,
+        [switch]$SkipPortPersistence,
+        [switch]$Silent
+    )
 
     if (-not (Test-Path -LiteralPath $Python) -or -not (Test-Path -LiteralPath $Config)) { throw "Current AutoDy installation is incomplete." }
     $expected = Get-ExpectedVersions
@@ -550,8 +578,11 @@ function Start-Or-ReuseService {
         if ($null -eq $snapshot -or -not (Test-OwnedAutoDyIdentity $snapshot)) { continue }
         Set-ServicePort $port
         Set-ManagedServiceSnapshot $snapshot
-        if (Test-HealthyAutoDy $snapshot $expected) { Save-ServicePort $port; return $snapshot }
-        if (-not (Stop-ManagedService)) { throw "Verified old AutoDy service could not be stopped." }
+        if (Test-HealthyAutoDy $snapshot $expected) {
+            if (-not $SkipPortPersistence) { Save-ServicePort $port }
+            return $snapshot
+        }
+        if (-not (Stop-ManagedService -Silent:$Silent)) { throw "Verified old AutoDy service could not be stopped." }
     }
     $selectedPort = Get-AvailableServicePort
     if ($null -eq $selectedPort) { throw "No safe AutoDy port is available from $PreferredPort through 8799." }
@@ -563,14 +594,14 @@ function Start-Or-ReuseService {
         $snapshot = Get-ServiceSnapshot
         if ($null -ne $snapshot -and (Test-HealthyAutoDy $snapshot $expected)) {
             Set-ManagedServiceSnapshot $snapshot
-            Save-ServicePort $selectedPort
+            if (-not $SkipPortPersistence) { Save-ServicePort $selectedPort }
             return $snapshot
         }
         if ($null -ne $snapshot -and (Test-OwnedAutoDy $snapshot $expected.Core) -and $null -ne $snapshot.Modules) {
             Set-ManagedServiceSnapshot $snapshot
             $module = @($snapshot.Modules.modules | Where-Object { $_.id -eq "autody-test-center" }) | Select-Object -First 1
             if ($null -ne $module -and $module.load_error) {
-                Stop-ManagedService | Out-Null
+                Stop-ManagedService -Silent:$Silent | Out-Null
                 throw "Current installation has a stale or invalid Test Center package: $($module.load_error)"
             }
         }
@@ -619,24 +650,21 @@ function Invoke-WatchdogRecovery([string]$Reason) {
         $script:WatchdogNeedsAttention = $true
         return
     }
-    Write-TrayLog "Watchdog recovery started: $Reason"
     try {
         if (Test-ManagedProcessStillCurrent) {
-            Stop-ManagedService | Out-Null
+            Stop-ManagedService -Silent | Out-Null
         } else {
             Clear-ManagedServiceSnapshot
         }
-        Start-Or-ReuseService | Out-Null
+        Start-Or-ReuseService -SkipPortPersistence -Silent | Out-Null
         $script:WatchdogFailureSince = $null
-        Write-TrayLog "Watchdog recovery restored AutoDy health."
     } catch {
-        Write-TrayLog "Watchdog recovery failed: $($_.Exception.Message)"
+        # Automatic recovery intentionally leaves user data and repair actions alone.
     } finally {
         $script:WatchdogRecoveryAttempts = @($script:WatchdogRecoveryAttempts) + @(Get-Date)
         $recent = @(Get-RecentWatchdogRecoveryAttempts)
         if ($recent.Count -ge $WatchdogRecoveryLimit) {
             $script:WatchdogNeedsAttention = $true
-            Write-TrayLog "Watchdog stopped automatic recovery after $($recent.Count) attempts in $WatchdogRecoveryWindowMinutes minutes."
         }
     }
 }
@@ -661,13 +689,12 @@ function Invoke-WatchdogTick {
         }
         if ($null -eq $script:WatchdogFailureSince) {
             $script:WatchdogFailureSince = Get-Date
-            Write-TrayLog "Watchdog observed an unhealthy AutoDy service; starting grace window."
             return
         }
         if (((Get-Date) - $script:WatchdogFailureSince).TotalSeconds -lt $WatchdogHealthGraceSeconds) { return }
         Invoke-WatchdogRecovery "health failed for at least $WatchdogHealthGraceSeconds seconds"
     } catch {
-        Write-TrayLog "Watchdog check failed safely: $($_.Exception.Message)"
+        # A watchdog probe failure is non-destructive and retried by the next timer tick.
     }
 }
 
