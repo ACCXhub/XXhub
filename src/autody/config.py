@@ -15,6 +15,9 @@ class Target(BaseModel):
     note: str = ""
     stable_id: str | None = None
     candidate_id: str | None = None
+    binding_identity_key: str | None = None
+    binding_identity_source: str | None = None
+    binding_account_scope: str | None = None
     message_pack: str | None = None
     suffix_override: str | None = None
     suffix_mode: str = Field(default="global", pattern=r"^(global|disabled|custom)$")
