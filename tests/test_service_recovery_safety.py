@@ -1,4 +1,4 @@
-from types import SimpleNamespace
+import threading
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -9,9 +9,9 @@ from autody.failures import failure_detail
 
 def test_service_shutdown_requires_the_private_tray_token(monkeypatch):
     app = FastAPI()
-    server = SimpleNamespace(should_exit=False)
+    stopped = threading.Event()
     monkeypatch.setenv("AUTODY_SERVICE_CONTROL_TOKEN", "secret-token")
-    _install_service_control_middleware(app, server)
+    _install_service_control_middleware(app, stopped.set)
     client = TestClient(app)
 
     assert client.post("/api/service-shutdown").status_code == 403
@@ -26,7 +26,7 @@ def test_service_shutdown_requires_the_private_tray_token(monkeypatch):
 
     assert response.status_code == 200
     assert response.json() == {"stopping": True}
-    assert server.should_exit is True
+    assert stopped.wait(1.0) is True
 
 
 def test_recovered_binding_changes_only_current_action_not_historical_reason():
