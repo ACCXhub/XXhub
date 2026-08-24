@@ -1,3 +1,4 @@
+import hmac
 import json
 import logging
 import os
@@ -8,6 +9,8 @@ import threading
 import time
 import webbrowser
 
+from fastapi import Request
+from fastapi.responses import JSONResponse
 import typer
 import uvicorn
 
@@ -375,6 +378,19 @@ def _sending_activity(config: AppConfig):
         path.unlink(missing_ok=True)
 
 
+def _install_service_control_middleware(dashboard_app, server) -> None:
+    @dashboard_app.middleware("http")
+    async def service_control(request: Request, call_next):
+        if request.method == "POST" and request.url.path == "/api/service-shutdown":
+            expected = os.environ.get("AUTODY_SERVICE_CONTROL_TOKEN", "")
+            supplied = request.headers.get("x-autody-control-token", "")
+            if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+                return JSONResponse({"detail": "service control authentication failed"}, status_code=403)
+            server.should_exit = True
+            return JSONResponse({"stopping": True})
+        return await call_next(request)
+
+
 @app.command("check-config")
 def check_config(config: Path = typer.Option(Path("config.yaml"), "--config")):
     loaded = load_config(config)
@@ -446,12 +462,14 @@ def login(config: Path = typer.Option(Path("config.yaml"), "--config")):
 
 @app.command("refresh-account-profile")
 def refresh_account_profile(config: Path = typer.Option(Path("config.yaml"), "--config")):
-    """Read and cache the verified current account without opening a profile page."""
+    """Refresh current account and, when guarded, its authoritative friend bindings."""
     loaded = load_config(config)
+    discovery_path = loaded.state_file.parent / "discovered_friends.json"
     try:
         with SingleInstanceLock(loaded.lock_file):
             configure_runtime(_data_root(config))
             setup_logging(loaded)
+            _remember_cached_binding_evidence(config, loaded, discovery_path)
             with open_chat(
                 loaded.profile_dir,
                 timeout_ms=loaded.page_load_timeout_ms,
@@ -459,8 +477,24 @@ def refresh_account_profile(config: Path = typer.Option(Path("config.yaml"), "--
                 home=_data_root(config),
             ) as page:
                 profile = resolve_account_profile(page, _data_root(config))
-            if profile.switched:
-                mark_bindings_for_revalidation(loaded.state_file.parent)
+                if profile.switched:
+                    mark_bindings_for_revalidation(loaded.state_file.parent)
+                if bindings_revalidation_required(loaded.state_file.parent):
+                    try:
+                        result = discover_friends(
+                            loaded,
+                            page,
+                            DOUYIN_SELECTORS,
+                            discovery_path,
+                        )
+                        _complete_friend_discovery(config, loaded, result)
+                        logging.info(
+                            "账号刷新同时完成稳定绑定校验：发现 %s 个候选。",
+                            len(result.candidates),
+                        )
+                    except Exception as exc:
+                        record_discovery_failure(discovery_path, str(exc))
+                        logging.warning("账号已刷新，但稳定绑定自动恢复未完成：%s", exc)
             typer.echo("检测到登录账号已切换，账号资料已更新。" if profile.switched else "当前账号资料已刷新。")
     except AccountProfileUnavailable as exc:
         typer.echo(f"当前账号资料未验证：{exc}")
@@ -697,9 +731,7 @@ def ui(
             log_level="warning",
         )
     )
-    dashboard_app.state.request_service_shutdown = lambda: setattr(
-        server, "should_exit", True
-    )
+    _install_service_control_middleware(dashboard_app, server)
     server.run()
 
 
