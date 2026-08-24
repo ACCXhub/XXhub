@@ -145,12 +145,18 @@ def test_tray_requires_current_identity_process_and_user_scope_before_reusing_a_
       $env:AUTODY_TEST_TRAY_SCRIPT, [ref]$tokens, [ref]$errors
     )
     if ($errors.Count) { throw ($errors.Message -join "; ") }
+    $imageFunction = $ast.Find({
+      param($node)
+      $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq "Get-ExpectedPythonProcessPath"
+    }, $true)
     $function = $ast.Find({
       param($node)
       $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
         $node.Name -eq "Test-OwnedAutoDy"
     }, $true)
-    if ($null -eq $function) { throw "ownership function missing" }
+    if ($null -eq $imageFunction -or $null -eq $function) { throw "ownership functions missing" }
+    Invoke-Expression $imageFunction.Extent.Text
     Invoke-Expression $function.Extent.Text
     $DataRoot = "C:\\AutoDyData"
     $PackagePath = "C:\\AutoDy\\runtime\\python\\Lib\\site-packages\\autody"
@@ -200,6 +206,51 @@ def test_tray_requires_current_identity_process_and_user_scope_before_reusing_a_
     """
     test_env = os.environ.copy()
     test_env["AUTODY_TEST_TRAY_SCRIPT"] = str(script_path)
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", command],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=test_env,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_tray_accepts_a_source_venv_service_using_its_actual_process_image(tmp_path: Path):
+    script_path = Path("scripts/autody-tray.ps1").resolve()
+    command = r'''
+    $ErrorActionPreference = "Stop"
+    . $env:AUTODY_TEST_TRAY_SCRIPT -DefineOnly -ProjectRoot $env:AUTODY_TEST_ROOT -DataRoot $env:AUTODY_TEST_DATA
+    $actualImage = (& $Python -c "import sys; print(getattr(sys, '_base_executable', sys.executable))").Trim()
+    $expectedImage = Get-ExpectedPythonProcessPath
+    if ([IO.Path]::GetFullPath($expectedImage) -ne [IO.Path]::GetFullPath($actualImage)) {
+      throw "expected process image did not match the venv child process"
+    }
+    $identity = [pscustomobject]@{
+      application = "AutoDy"
+      project_path = $DataRoot
+      package_path = $PackagePath
+      python_executable = $Python
+    }
+    $snapshot = [pscustomobject]@{
+      Pid = 4242
+      ProcessPath = $actualImage
+      Owner = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+      Identity = $identity
+    }
+    if (-not (Test-OwnedAutoDyIdentity $snapshot)) {
+      throw "source venv service was rejected despite matching identity and actual image"
+    }
+    '''
+    test_env = os.environ.copy()
+    test_env.update(
+        {
+            "AUTODY_TEST_TRAY_SCRIPT": str(script_path),
+            "AUTODY_TEST_ROOT": str(Path.cwd()),
+            "AUTODY_TEST_DATA": str(tmp_path / "data"),
+        }
+    )
     completed = subprocess.run(
         ["powershell.exe", "-NoProfile", "-Command", command],
         capture_output=True,

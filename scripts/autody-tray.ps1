@@ -42,6 +42,7 @@ $script:WatchdogFailureSince = $null
 $script:WatchdogRecoveryAttempts = @()
 $script:ManagedPid = $null
 $script:ManagedProcessIdentity = $null
+$script:ExpectedPythonProcessPath = $null
 $script:ServiceControlToken = [Guid]::NewGuid().ToString("N")
 $env:AUTODY_HOME = $DataRoot
 $env:AUTODY_PROGRAM_ROOT = $ProjectRoot
@@ -341,6 +342,19 @@ function Get-ProcessIdentitySnapshot([int]$ProcessId) {
     }
 }
 
+function Get-ExpectedPythonProcessPath {
+    if ($script:ExpectedPythonProcessPath) { return $script:ExpectedPythonProcessPath }
+    $expected = [IO.Path]::GetFullPath($Python)
+    try {
+        $actual = @(& $Python -c "import sys; print(getattr(sys, '_base_executable', sys.executable))")
+        if ($LASTEXITCODE -eq 0 -and $actual.Count -eq 1 -and (Test-Path -LiteralPath $actual[0].Trim() -PathType Leaf)) {
+            $expected = [IO.Path]::GetFullPath($actual[0].Trim())
+        }
+    } catch { }
+    $script:ExpectedPythonProcessPath = $expected
+    return $script:ExpectedPythonProcessPath
+}
+
 function Get-ServiceSnapshot([int]$Port = $script:ServicePort) {
     $listener = Get-Listener $Port
     if ($null -eq $listener) { return $null }
@@ -366,7 +380,7 @@ function Test-OwnedAutoDyIdentity($Snapshot) {
     try {
         return $Snapshot.Identity.application -eq "AutoDy" -and
             $Snapshot.Pid -gt 0 -and
-            ([IO.Path]::GetFullPath([string]$Snapshot.ProcessPath).TrimEnd('\\') -eq [IO.Path]::GetFullPath($Python).TrimEnd('\\')) -and
+            ([IO.Path]::GetFullPath([string]$Snapshot.ProcessPath).TrimEnd('\\') -eq (Get-ExpectedPythonProcessPath).TrimEnd('\\')) -and
             $Snapshot.Owner -eq [Security.Principal.WindowsIdentity]::GetCurrent().Name -and
             ([IO.Path]::GetFullPath([string]$Snapshot.Identity.project_path).TrimEnd('\\') -eq [IO.Path]::GetFullPath($DataRoot).TrimEnd('\\')) -and
             ([IO.Path]::GetFullPath([string]$Snapshot.Identity.package_path).TrimEnd('\\') -eq [IO.Path]::GetFullPath($PackagePath).TrimEnd('\\')) -and
@@ -380,7 +394,7 @@ function Test-OwnedAutoDy($Snapshot, [string]$ExpectedVersion) {
         return $Snapshot.Identity.application -eq "AutoDy" -and
             $Snapshot.Identity.version -eq $ExpectedVersion -and
             $Snapshot.Pid -gt 0 -and
-            ([IO.Path]::GetFullPath([string]$Snapshot.ProcessPath).TrimEnd('\\') -eq [IO.Path]::GetFullPath($Python).TrimEnd('\\')) -and
+            ([IO.Path]::GetFullPath([string]$Snapshot.ProcessPath).TrimEnd('\\') -eq (Get-ExpectedPythonProcessPath).TrimEnd('\\')) -and
             $Snapshot.Owner -eq [Security.Principal.WindowsIdentity]::GetCurrent().Name -and
             ([IO.Path]::GetFullPath([string]$Snapshot.Identity.project_path).TrimEnd('\\') -eq [IO.Path]::GetFullPath($DataRoot).TrimEnd('\\')) -and
             ([IO.Path]::GetFullPath([string]$Snapshot.Identity.package_path).TrimEnd('\\') -eq [IO.Path]::GetFullPath($PackagePath).TrimEnd('\\')) -and
