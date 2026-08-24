@@ -24,6 +24,9 @@ _STAGE_LABELS = {
     "history_written": "运行历史写入",
 }
 
+_RECOVERED_REASSOCIATION_REASONS = frozenset(
+    {"binding_stale", "binding_missing", "blocked_ambiguous_target"}
+)
 
 _REASONS: dict[str, dict[str, Any]] = {
     "conversation_not_found": {
@@ -245,16 +248,32 @@ class FailureDetail(BaseModel):
     account_scope_matches: bool | None = None
     diagnostic_details: dict[str, Any] = Field(default_factory=dict)
 
-    @computed_field
-    @property
-    def safe_retry_available(self) -> bool:
+    def _reassociation_resolved(self) -> bool:
         return (
-            self.retryable
+            self.reason_code in _RECOVERED_REASSOCIATION_REASONS
             and self.send_attempts == 0
             and not self.uncertain_send
             and self.binding_valid is True
             and self.account_scope_matches is True
         )
+
+    @computed_field
+    @property
+    def safe_retry_available(self) -> bool:
+        return (
+            (self.retryable or self._reassociation_resolved())
+            and self.send_attempts == 0
+            and not self.uncertain_send
+            and self.binding_valid is True
+            and self.account_scope_matches is True
+        )
+
+    def model_dump(self, *args, **kwargs) -> dict[str, Any]:
+        payload = super().model_dump(*args, **kwargs)
+        if self._reassociation_resolved():
+            payload["suggested_action"] = "retry"
+            payload["suggested_action_zh"] = "仅重试此目标"
+        return payload
 
 
 def failure_detail(
