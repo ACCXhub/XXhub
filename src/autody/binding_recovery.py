@@ -4,14 +4,6 @@ from collections import defaultdict
 
 
 AUTHORITATIVE_BINDING_IDENTITY_SOURCES = frozenset({"row_attribute"})
-_BINDING_REASSOCIATION_REASONS = frozenset(
-    {
-        "binding_missing",
-        "binding_stale",
-        "binding_revalidation_required",
-        "identity_ambiguous",
-    }
-)
 _FAILED_DISCOVERY_STATUSES = frozenset(
     {
         "failed",
@@ -121,13 +113,3 @@ def reconcile_stable_bindings(config, discovered) -> set[str]:
         occupied[candidate.candidate_id] = target
         recovered.add(stable_id)
     return recovered
-
-
-def binding_issue_requires_reassociation(friends: list[dict]) -> bool:
-    """Use current authoritative health, never historical failure wording."""
-    return any(
-        friend.get("status") == "failed"
-        and (friend.get("current_health") or {}).get("reason_code")
-        in _BINDING_REASSOCIATION_REASONS
-        for friend in friends
-    )
