@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$ProjectRoot = (Join-Path $PSScriptRoot ".."),
     [string]$DataRoot,
     [switch]$DefineOnly,
@@ -6,8 +6,8 @@
     [switch]$OpenDashboardOnly
 )
 
-# A small first-party Windows Forms host.  It supervises the dashboard only;
-# scheduled send/health tasks keep their independent Task Scheduler ownership.
+# A small first-party Windows Forms host. Scheduled send/health tasks keep their
+# independent Task Scheduler ownership; this host only supervises the dashboard.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProjectRoot = (Resolve-Path -LiteralPath $ProjectRoot).Path
@@ -28,15 +28,27 @@ $PackagePath = if ($IsPackaged) {
 }
 $PreferredPort = 8765
 $PortStatePath = Join-Path $DataRoot "data\service-port.json"
+$ManualStopRegistryPath = "HKCU:\Software\AutoDy"
+$WatchdogHealthGraceSeconds = 20
+$WatchdogRecoveryWindowMinutes = 10
+$WatchdogRecoveryLimit = 3
 $script:ServicePort = $PreferredPort
 $script:Url = "http://127.0.0.1:$PreferredPort"
 $script:Repairing = $false
 $script:StartupPageOpened = $false
+$script:WatchdogSuppressed = $false
+$script:WatchdogNeedsAttention = $false
+$script:WatchdogFailureSince = $null
+$script:WatchdogRecoveryAttempts = @()
+$script:ManagedPid = $null
+$script:ManagedProcessIdentity = $null
+$script:ServiceControlToken = [Guid]::NewGuid().ToString("N")
 $env:AUTODY_HOME = $DataRoot
 $env:AUTODY_PROGRAM_ROOT = $ProjectRoot
 $env:AUTODY_BROWSERS_PATH = $BrowserRoot
 $env:PLAYWRIGHT_BROWSERS_PATH = $BrowserRoot
 $env:PLAYWRIGHT_SKIP_BROWSER_GC = "1"
+$env:AUTODY_SERVICE_CONTROL_TOKEN = $script:ServiceControlToken
 $LogDir = Join-Path $DataRoot "data\logs"
 $TrayLog = Join-Path $LogDir "tray.log"
 
@@ -63,7 +75,7 @@ if ($IsPackaged) {
     }
 }
 
- $script:TrayRendererInitialized = $false
+$script:TrayRendererInitialized = $false
 function Initialize-TrayRenderer {
     if ($script:TrayRendererInitialized) { return }
     try {
@@ -155,6 +167,29 @@ public static class AutoDyMenuWindow {
 function Write-TrayLog([string]$Message) {
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
     "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message" | Add-Content -LiteralPath $TrayLog -Encoding UTF8
+}
+
+function Get-ManualStopDate {
+    try {
+        return [string](Get-ItemPropertyValue -LiteralPath $ManualStopRegistryPath -Name "ManualStopDate" -ErrorAction Stop)
+    } catch {
+        return $null
+    }
+}
+
+function Set-ManualStopToday {
+    New-Item -Path $ManualStopRegistryPath -Force | Out-Null
+    Set-ItemProperty -LiteralPath $ManualStopRegistryPath -Name "ManualStopDate" -Value (Get-Date -Format "yyyy-MM-dd") -Type String
+}
+
+function Clear-ManualStopDate {
+    try {
+        Remove-ItemProperty -LiteralPath $ManualStopRegistryPath -Name "ManualStopDate" -ErrorAction Stop
+    } catch { }
+}
+
+function Test-ManualStopToday {
+    return (Get-ManualStopDate) -eq (Get-Date -Format "yyyy-MM-dd")
 }
 
 function Test-ExactTrayHostCommandLine(
@@ -277,41 +312,95 @@ function Get-Listener([int]$Port = $script:ServicePort) {
     try { return Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop | Select-Object -First 1 } catch { return $null }
 }
 
-function Get-ServiceSnapshot([int]$Port = $script:ServicePort) {
-    $listener = Get-Listener $Port
-    if ($null -eq $listener) { return $null }
+function Get-ProcessOwner($Process) {
     try {
-        $url = "http://127.0.0.1:$Port"
-        $identity = Invoke-RestMethod -Uri "$url/api/service-identity" -TimeoutSec 2 -ErrorAction Stop
-        $modules = Invoke-RestMethod -Uri "$url/api/modules" -TimeoutSec 2 -ErrorAction Stop
-        $process = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f $listener.OwningProcess) -ErrorAction Stop
-        $ownerResult = Invoke-CimMethod -InputObject $process -MethodName GetOwner -ErrorAction Stop
-        $owner = if ($ownerResult.ReturnValue -eq 0 -and $ownerResult.User) {
-            if ($ownerResult.Domain) { "$($ownerResult.Domain)\$($ownerResult.User)" } else { [string]$ownerResult.User }
-        } else { $null }
+        $ownerResult = Invoke-CimMethod -InputObject $Process -MethodName GetOwner -ErrorAction Stop
+        if ($ownerResult.ReturnValue -eq 0 -and $ownerResult.User) {
+            if ($ownerResult.Domain) { return "$($ownerResult.Domain)\$($ownerResult.User)" }
+            return [string]$ownerResult.User
+        }
+    } catch { }
+    return $null
+}
+
+function Get-ProcessIdentitySnapshot([int]$ProcessId) {
+    try {
+        $process = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f $ProcessId) -ErrorAction Stop
         return [pscustomobject]@{
-            Pid = [int]$listener.OwningProcess
+            Pid = [int]$process.ProcessId
             ProcessPath = [string]$process.ExecutablePath
-            Owner = $owner
-            Identity = $identity
-            Modules = $modules
+            Owner = Get-ProcessOwner $process
+            CreationDate = [string]$process.CreationDate
         }
     } catch {
-        return [pscustomobject]@{ Pid = [int]$listener.OwningProcess; ProcessPath = $null; Owner = $null; Identity = $null; Modules = $null }
+        return $null
     }
 }
 
-function Test-OwnedAutoDy($Snapshot, [string]$ExpectedVersion) {
+function Get-ServiceSnapshot([int]$Port = $script:ServicePort) {
+    $listener = Get-Listener $Port
+    if ($null -eq $listener) { return $null }
+    $process = Get-ProcessIdentitySnapshot ([int]$listener.OwningProcess)
+    if ($null -eq $process) { return $null }
+    $url = "http://127.0.0.1:$Port"
+    $identity = $null
+    $modules = $null
+    try { $identity = Invoke-RestMethod -Uri "$url/api/service-identity" -TimeoutSec 2 -ErrorAction Stop } catch { }
+    try { $modules = Invoke-RestMethod -Uri "$url/api/modules" -TimeoutSec 2 -ErrorAction Stop } catch { }
+    return [pscustomobject]@{
+        Pid = $process.Pid
+        ProcessPath = $process.ProcessPath
+        Owner = $process.Owner
+        CreationDate = $process.CreationDate
+        Identity = $identity
+        Modules = $modules
+    }
+}
+
+function Test-OwnedAutoDyIdentity($Snapshot) {
     if ($null -eq $Snapshot -or $null -eq $Snapshot.Identity) { return $false }
     try {
         return $Snapshot.Identity.application -eq "AutoDy" -and
-            $Snapshot.Identity.version -eq $ExpectedVersion -and
             $Snapshot.Pid -gt 0 -and
             ([IO.Path]::GetFullPath([string]$Snapshot.ProcessPath).TrimEnd('\\') -eq [IO.Path]::GetFullPath($Python).TrimEnd('\\')) -and
             $Snapshot.Owner -eq [Security.Principal.WindowsIdentity]::GetCurrent().Name -and
             ([IO.Path]::GetFullPath([string]$Snapshot.Identity.project_path).TrimEnd('\\') -eq [IO.Path]::GetFullPath($DataRoot).TrimEnd('\\')) -and
             ([IO.Path]::GetFullPath([string]$Snapshot.Identity.package_path).TrimEnd('\\') -eq [IO.Path]::GetFullPath($PackagePath).TrimEnd('\\')) -and
             ([IO.Path]::GetFullPath([string]$Snapshot.Identity.python_executable).TrimEnd('\\') -eq [IO.Path]::GetFullPath($Python).TrimEnd('\\'))
+    } catch { return $false }
+}
+
+function Test-OwnedAutoDy($Snapshot, [string]$ExpectedVersion) {
+    return (Test-OwnedAutoDyIdentity $Snapshot) -and $Snapshot.Identity.version -eq $ExpectedVersion
+}
+
+function Set-ManagedServiceSnapshot($Snapshot) {
+    if ($null -eq $Snapshot -or -not (Test-OwnedAutoDyIdentity $Snapshot)) {
+        throw "Cannot manage an unverified AutoDy service."
+    }
+    $script:ManagedPid = [int]$Snapshot.Pid
+    $script:ManagedProcessIdentity = [pscustomobject]@{
+        Pid = [int]$Snapshot.Pid
+        ProcessPath = [string]$Snapshot.ProcessPath
+        Owner = [string]$Snapshot.Owner
+        CreationDate = [string]$Snapshot.CreationDate
+    }
+}
+
+function Clear-ManagedServiceSnapshot {
+    $script:ManagedPid = $null
+    $script:ManagedProcessIdentity = $null
+}
+
+function Test-ManagedProcessStillCurrent {
+    if ($null -eq $script:ManagedPid -or $null -eq $script:ManagedProcessIdentity) { return $false }
+    $current = Get-ProcessIdentitySnapshot ([int]$script:ManagedPid)
+    if ($null -eq $current) { return $false }
+    try {
+        return $current.Pid -eq $script:ManagedProcessIdentity.Pid -and
+            ([IO.Path]::GetFullPath([string]$current.ProcessPath).TrimEnd('\\') -eq [IO.Path]::GetFullPath([string]$script:ManagedProcessIdentity.ProcessPath).TrimEnd('\\')) -and
+            $current.Owner -eq $script:ManagedProcessIdentity.Owner -and
+            $current.CreationDate -eq $script:ManagedProcessIdentity.CreationDate
     } catch { return $false }
 }
 
@@ -328,19 +417,55 @@ function Test-HealthyAutoDy($Snapshot, $Expected) {
         $module.bundled_package.required_autody_version -eq ">=1.3.0,<2.0.0" -and $module.bundled_available
 }
 
-$ManagedPid = $null
 function Stop-ManagedService {
-    if ($null -eq $ManagedPid) { return $false }
-    $expected = Get-ExpectedVersions
+    if ($null -eq $script:ManagedPid) { return $false }
+    $pidToStop = [int]$script:ManagedPid
     $snapshot = Get-ServiceSnapshot
-    if ($null -eq $snapshot -or $snapshot.Pid -ne $ManagedPid -or -not (Test-OwnedAutoDy $snapshot $expected.Core)) {
-        Write-TrayLog "Refused to stop an unverified listener."
+    if ($null -ne $snapshot -and $snapshot.Pid -eq $pidToStop -and (Test-OwnedAutoDyIdentity $snapshot)) {
+        Set-ManagedServiceSnapshot $snapshot
+    } elseif (-not (Test-ManagedProcessStillCurrent)) {
+        Write-TrayLog "Refused to stop an unverified listener PID $pidToStop."
         return $false
     }
-    Stop-Process -Id $ManagedPid -Force -ErrorAction Stop
-    Write-TrayLog "Stopped managed AutoDy service PID $ManagedPid."
-    $script:ManagedPid = $null
+
+    try {
+        Invoke-RestMethod -Uri "$script:Url/api/service-shutdown" -Method Post -Headers @{ "X-AutoDy-Control-Token" = $script:ServiceControlToken } -TimeoutSec 2 -ErrorAction Stop | Out-Null
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            Start-Sleep -Milliseconds 100
+            if ($null -eq (Get-ProcessIdentitySnapshot $pidToStop)) {
+                Write-TrayLog "Stopped managed AutoDy service PID $pidToStop gracefully."
+                Clear-ManagedServiceSnapshot
+                return $true
+            }
+        }
+    } catch {
+        Write-TrayLog "Graceful service stop was unavailable for verified PID $pidToStop."
+    }
+
+    if (-not (Test-ManagedProcessStillCurrent)) {
+        if ($null -eq (Get-ProcessIdentitySnapshot $pidToStop)) {
+            Clear-ManagedServiceSnapshot
+            return $true
+        }
+        Write-TrayLog "Refused forced stop because verified PID identity changed."
+        return $false
+    }
+    Stop-Process -Id $pidToStop -Force -ErrorAction Stop
+    Write-TrayLog "Force-stopped verified AutoDy service PID $pidToStop."
+    Clear-ManagedServiceSnapshot
     return $true
+}
+
+function Stop-VerifiedInstalledAutoDyServices {
+    $stopped = 0
+    foreach ($port in Get-ServicePortCandidates) {
+        $snapshot = Get-ServiceSnapshot $port
+        if ($null -eq $snapshot -or -not (Test-OwnedAutoDyIdentity $snapshot)) { continue }
+        Set-ServicePort $port
+        Set-ManagedServiceSnapshot $snapshot
+        if (Stop-ManagedService) { $stopped += 1 }
+    }
+    return $stopped
 }
 
 function New-StartupWaitPage {
@@ -422,27 +547,27 @@ function Start-Or-ReuseService {
     $expected = Get-ExpectedVersions
     foreach ($port in Get-ServicePortCandidates) {
         $snapshot = Get-ServiceSnapshot $port
-        if ($null -eq $snapshot -or -not (Test-OwnedAutoDy $snapshot $expected.Core)) { continue }
+        if ($null -eq $snapshot -or -not (Test-OwnedAutoDyIdentity $snapshot)) { continue }
         Set-ServicePort $port
-        $script:ManagedPid = $snapshot.Pid
+        Set-ManagedServiceSnapshot $snapshot
         if (Test-HealthyAutoDy $snapshot $expected) { Save-ServicePort $port; return $snapshot }
         if (-not (Stop-ManagedService)) { throw "Verified old AutoDy service could not be stopped." }
     }
     $selectedPort = Get-AvailableServicePort
     if ($null -eq $selectedPort) { throw "No safe AutoDy port is available from $PreferredPort through 8799." }
     Set-ServicePort $selectedPort
-    $process = Start-Process -FilePath $Python -ArgumentList @("-m", "autody.cli", "ui", "--no-open", "--config", $Config, "--port", $selectedPort) -WorkingDirectory $DataRoot -WindowStyle Hidden -PassThru
+    Start-Process -FilePath $Python -ArgumentList @("-m", "autody.cli", "ui", "--no-open", "--config", $Config, "--port", $selectedPort) -WorkingDirectory $DataRoot -WindowStyle Hidden | Out-Null
     if ($null -ne $OnColdStart) { & $OnColdStart }
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         Start-Sleep -Milliseconds 250
         $snapshot = Get-ServiceSnapshot
         if ($null -ne $snapshot -and (Test-HealthyAutoDy $snapshot $expected)) {
-            $script:ManagedPid = $snapshot.Pid
+            Set-ManagedServiceSnapshot $snapshot
             Save-ServicePort $selectedPort
             return $snapshot
         }
         if ($null -ne $snapshot -and (Test-OwnedAutoDy $snapshot $expected.Core) -and $null -ne $snapshot.Modules) {
-            $script:ManagedPid = $snapshot.Pid
+            Set-ManagedServiceSnapshot $snapshot
             $module = @($snapshot.Modules.modules | Where-Object { $_.id -eq "autody-test-center" }) | Select-Object -First 1
             if ($null -ne $module -and $module.load_error) {
                 Stop-ManagedService | Out-Null
@@ -463,7 +588,7 @@ function Wait-ForExistingHealthyService {
             $snapshot = Get-ServiceSnapshot $port
             if ($null -ne $snapshot -and (Test-OwnedAutoDy $snapshot $expected.Core) -and (Test-HealthyAutoDy $snapshot $expected)) {
                 Set-ServicePort $port
-                $script:ManagedPid = $snapshot.Pid
+                Set-ManagedServiceSnapshot $snapshot
                 Save-ServicePort $port
                 return $snapshot
             }
@@ -471,6 +596,79 @@ function Wait-ForExistingHealthyService {
         Start-Sleep -Milliseconds 250
     }
     throw "The existing AutoDy service did not become healthy within 10 seconds."
+}
+
+function Reset-WatchdogRecoveryState {
+    $script:WatchdogNeedsAttention = $false
+    $script:WatchdogFailureSince = $null
+    $script:WatchdogRecoveryAttempts = @()
+}
+
+function Get-RecentWatchdogRecoveryAttempts {
+    $cutoff = (Get-Date).AddMinutes(-$WatchdogRecoveryWindowMinutes)
+    $script:WatchdogRecoveryAttempts = @(
+        $script:WatchdogRecoveryAttempts | Where-Object { $_ -ge $cutoff }
+    )
+    return @($script:WatchdogRecoveryAttempts)
+}
+
+function Invoke-WatchdogRecovery([string]$Reason) {
+    if ($script:WatchdogNeedsAttention -or $script:WatchdogSuppressed -or (Test-ManualStopToday)) { return }
+    $recent = @(Get-RecentWatchdogRecoveryAttempts)
+    if ($recent.Count -ge $WatchdogRecoveryLimit) {
+        $script:WatchdogNeedsAttention = $true
+        return
+    }
+    Write-TrayLog "Watchdog recovery started: $Reason"
+    try {
+        if (Test-ManagedProcessStillCurrent) {
+            Stop-ManagedService | Out-Null
+        } else {
+            Clear-ManagedServiceSnapshot
+        }
+        Start-Or-ReuseService | Out-Null
+        $script:WatchdogFailureSince = $null
+        Write-TrayLog "Watchdog recovery restored AutoDy health."
+    } catch {
+        Write-TrayLog "Watchdog recovery failed: $($_.Exception.Message)"
+    } finally {
+        $script:WatchdogRecoveryAttempts = @($script:WatchdogRecoveryAttempts) + @(Get-Date)
+        $recent = @(Get-RecentWatchdogRecoveryAttempts)
+        if ($recent.Count -ge $WatchdogRecoveryLimit) {
+            $script:WatchdogNeedsAttention = $true
+            Write-TrayLog "Watchdog stopped automatic recovery after $($recent.Count) attempts in $WatchdogRecoveryWindowMinutes minutes."
+        }
+    }
+}
+
+function Invoke-WatchdogTick {
+    if ($script:WatchdogSuppressed -or $script:Repairing -or $script:WatchdogNeedsAttention -or (Test-ManualStopToday)) { return }
+    try {
+        $expected = Get-ExpectedVersions
+        $snapshot = Get-ServiceSnapshot
+        if ($null -ne $snapshot -and (Test-HealthyAutoDy $snapshot $expected)) {
+            Set-ManagedServiceSnapshot $snapshot
+            $script:WatchdogFailureSince = $null
+            return
+        }
+        if ($null -ne $snapshot -and (Test-OwnedAutoDyIdentity $snapshot)) {
+            Set-ManagedServiceSnapshot $snapshot
+        }
+        if (-not (Test-ManagedProcessStillCurrent)) {
+            Clear-ManagedServiceSnapshot
+            Invoke-WatchdogRecovery "managed process exited"
+            return
+        }
+        if ($null -eq $script:WatchdogFailureSince) {
+            $script:WatchdogFailureSince = Get-Date
+            Write-TrayLog "Watchdog observed an unhealthy AutoDy service; starting grace window."
+            return
+        }
+        if (((Get-Date) - $script:WatchdogFailureSince).TotalSeconds -lt $WatchdogHealthGraceSeconds) { return }
+        Invoke-WatchdogRecovery "health failed for at least $WatchdogHealthGraceSeconds seconds"
+    } catch {
+        Write-TrayLog "Watchdog check failed safely: $($_.Exception.Message)"
+    }
 }
 
 function Invoke-OptionalDashboardActivation {
@@ -591,6 +789,7 @@ function Invoke-DashboardOpenAsync {
 
 function Get-TrayState {
     if ($script:Repairing) { return "正在修复" }
+    if ($script:WatchdogNeedsAttention) { return "需要处理" }
     $expected = Get-ExpectedVersions
     $snapshot = Get-ServiceSnapshot
     if ($null -eq $snapshot -or -not (Test-OwnedAutoDy $snapshot $expected.Core)) { return "已停止" }
@@ -602,6 +801,7 @@ function Get-TrayState {
 
 if ($StopExisting) {
     Stop-ExistingAutoDyTrayHosts | Out-Null
+    Stop-VerifiedInstalledAutoDyServices | Out-Null
     return
 }
 if ($DefineOnly) { return }
@@ -610,10 +810,14 @@ if ($OpenDashboardOnly) {
         Open-VerifiedDashboard
     } catch {
         Write-TrayLog "Dashboard activation failed; the normal browser fallback did not complete."
+        Add-Type -AssemblyName System.Windows.Forms
         [Windows.Forms.MessageBox]::Show("无法打开 AutoDy 管理台，请稍后重试。", "AutoDy") | Out-Null
     }
     return
 }
+
+# A normal user launch explicitly resumes AutoDy for today.
+Clear-ManualStopDate
 
 $createdNew = $false
 $Mutex = New-Object System.Threading.Mutex($true, "Local\AutoDyTray-$([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ProjectRoot)).Replace('=','').Replace('/','_').Replace('+','-'))", [ref]$createdNew)
@@ -669,9 +873,22 @@ $notify.add_MouseClick({
     }
 })
 $logs.add_Click({ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null; Start-Process explorer.exe -ArgumentList $LogDir })
-$restart.add_Click({ try { Stop-ManagedService | Out-Null; Start-Or-ReuseService | Out-Null; & $refresh } catch { [Windows.Forms.MessageBox]::Show($_.Exception.Message, "AutoDy") | Out-Null } })
+$restart.add_Click({
+    $script:WatchdogSuppressed = $true
+    try {
+        Stop-ManagedService | Out-Null
+        Start-Or-ReuseService | Out-Null
+        $script:WatchdogFailureSince = $null
+    } catch {
+        [Windows.Forms.MessageBox]::Show($_.Exception.Message, "AutoDy") | Out-Null
+    } finally {
+        $script:WatchdogSuppressed = $false
+        & $refresh
+    }
+})
 $repair.add_Click({
     $script:Repairing = $true
+    $script:WatchdogSuppressed = $true
     & $refresh
     try {
         Start-Or-ReuseService | Out-Null
@@ -680,19 +897,28 @@ $repair.add_Click({
         $lines += @($result.repaired | ForEach-Object { "✓ $($_.label)" })
         $lines += @($result.checks | ForEach-Object { "✓ $($_.label)" })
         $lines += @($result.manual | ForEach-Object { "! $($_.label)" })
+        if (@($result.manual).Count -eq 0) { Reset-WatchdogRecoveryState }
         [Windows.Forms.MessageBox]::Show(($lines -join [Environment]::NewLine), "AutoDy 诊断与修复") | Out-Null
     } catch {
         [Windows.Forms.MessageBox]::Show("诊断与修复未完成，请查看运行日志。", "AutoDy") | Out-Null
     } finally {
+        $script:WatchdogSuppressed = $false
         $script:Repairing = $false
         & $refresh
     }
 })
 $exitTray.add_Click({ $notify.Visible = $false; $context.ExitThread() })
-$exitStop.add_Click({ Stop-ManagedService | Out-Null; $notify.Visible = $false; $context.ExitThread() })
+$exitStop.add_Click({
+    Set-ManualStopToday
+    $script:WatchdogSuppressed = $true
+    try { Stop-ManagedService | Out-Null } finally {
+        $notify.Visible = $false
+        $context.ExitThread()
+    }
+})
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 5000
-$timer.add_Tick($refresh)
+$timer.add_Tick({ Invoke-WatchdogTick; & $refresh })
 try {
     Open-VerifiedDashboard
     & $refresh
