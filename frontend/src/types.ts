@@ -3,6 +3,8 @@ export type FriendStatus = "success" | "failed" | "pending";
 export interface Friend {
   target_id?: string;
   name: string;
+  avatar_url?: string;
+  avatar_status?: "cached" | "missing";
   status: FriendStatus;
   error?: string | null;
   failure?: FailureDetail | null;
@@ -184,6 +186,7 @@ export interface AppConfig {
     text: string;
     style: MessageSuffixStyle;
   };
+  default_message_pack: string | null;
   daily_send_time: string;
   daily_health_check_time: string;
   weekly_health_check_enabled: boolean;

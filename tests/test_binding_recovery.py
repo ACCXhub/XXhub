@@ -1,3 +1,4 @@
+from datetime import datetime
 from types import SimpleNamespace
 
 from autody.binding_recovery import (
@@ -32,6 +33,8 @@ def discovered(account_scope, candidates, *, complete=True):
             "completed_bottom_reached": complete,
             "partial": not complete,
         },
+        scanned_at="2026-08-25T08:00:00",
+        target_refresh={},
     )
 
 
@@ -211,3 +214,45 @@ def test_participant_identity_resolves_the_separate_current_locator():
     assert resolution.status == "valid"
     assert resolution.candidate_id == "candidate-cache-current"
     assert resolution.conversation_id == "candidate-conversation-current"
+
+
+def test_targeted_refresh_proves_one_stale_binding_without_claiming_full_scan():
+    item = target(
+        "candidate-cache-old",
+        key="participant:friend-a",
+        source="participant_sec_user_id",
+        scope="account-a",
+    )
+    result = discovered(
+        "account-a",
+        [
+            candidate(
+                "candidate-cache-current",
+                "participant:friend-a",
+                "participant_sec_user_id",
+                conversation_id="conversation-current",
+            )
+        ],
+        complete=False,
+    )
+    result.target_refresh = {
+        "status": "completed",
+        "completed_at": "2026-08-25T08:00:00",
+        "account_scope": "account-a",
+        "requested_target_ids": ["target-a"],
+        "found_target_ids": ["target-a"],
+        "missing_target_ids": [],
+        "unresolved_target_ids": [],
+        "partial": False,
+    }
+
+    resolution = resolve_stable_binding(
+        item,
+        result,
+        profile(),
+        now=datetime(2026, 8, 25, 8, 0, 5),
+    )
+
+    assert resolution.status == "valid"
+    assert resolution.candidate_id == "candidate-cache-current"
+    assert reconcile_stable_bindings(config(item), result) == {"target-a"}

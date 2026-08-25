@@ -217,8 +217,9 @@ class MessagePackService:
             entries=entries,
         )
 
-    def preview(self, pack_id: str) -> PackPreview:
-        return self._preview_payload(self.catalog(), pack_id)
+    def preview(self, pack_id: str, *, persist_catalog: bool = True) -> PackPreview:
+        catalog = self.catalog() if persist_catalog else self.store.load_read_only()
+        return self._preview_payload(catalog, pack_id)
 
     def _next_id(self, catalog: CatalogDocument) -> str:
         candidate = self.store.id_factory()

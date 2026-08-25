@@ -20,14 +20,15 @@ message_suffix:
   enabled: true
   text: "gpt小助手"
   style: dash
+default_message_pack: daily-greeting
 daily_send_time: "07:30"
 daily_health_check_time: "07:20"
 weekly_health_check_enabled: true
 weekly_health_check_weekday: Sunday
 weekly_health_check_time: "20:00"
 recovery_deadline: "23:59"
-min_delay_seconds: 1
-max_delay_seconds: 3
+min_delay_seconds: 0
+max_delay_seconds: 0
 page_load_timeout_ms: 30000
 friend_search_timeout_ms: 30000
 confirmation_timeout_ms: 12000

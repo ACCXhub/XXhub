@@ -22,6 +22,9 @@ def test_loads_valid_config(tmp_path: Path):
     assert config.message_suffix.enabled is True
     assert config.message_suffix.text == "gpt小助手"
     assert config.message_suffix.style is MessageSuffixStyle.DASH
+    assert config.default_message_pack == "daily-greeting"
+    assert config.min_delay_seconds == 0
+    assert config.max_delay_seconds == 0
 
 
 def test_allows_empty_targets_for_first_run_and_discovery(tmp_path: Path):

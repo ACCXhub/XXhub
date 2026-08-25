@@ -63,6 +63,27 @@ def _complete_authoritative_scan(discovered) -> bool:
     return last_result.get("status") not in _FAILED_DISCOVERY_STATUSES
 
 
+def _target_refresh_status(target, discovered, now: datetime | None) -> str | None:
+    refresh = getattr(discovered, "target_refresh", {}) or {}
+    target_id = getattr(target, "stable_id", None)
+    if not target_id or target_id not in refresh.get("requested_target_ids", []):
+        return None
+    if refresh.get("account_scope") != getattr(discovered, "account_scope", None):
+        return "scan_failed"
+    completed_at = refresh.get("completed_at")
+    if now is not None and is_discovery_stale(completed_at, now):
+        return "scan_stale"
+    if target_id in refresh.get("unresolved_target_ids", []):
+        return "binding_missing"
+    if target_id in refresh.get("found_target_ids", []):
+        return "found"
+    if target_id in refresh.get("missing_target_ids", []):
+        return "stale_locator"
+    if refresh.get("partial") is True:
+        return "scan_incomplete"
+    return "scan_incomplete"
+
+
 def resolve_stable_binding(
     target,
     discovered,
@@ -76,15 +97,19 @@ def resolve_stable_binding(
         return StableBindingResolution("binding_missing")
     if discovered is None:
         return StableBindingResolution("scan_unavailable")
-    last_result = getattr(discovered, "last_result", {}) or {}
-    if last_result.get("status") in _FAILED_DISCOVERY_STATUSES:
-        return StableBindingResolution("scan_failed")
-    if not _complete_authoritative_scan(discovered):
-        return StableBindingResolution("scan_incomplete")
-    if now is not None and is_discovery_stale(
-        getattr(discovered, "scanned_at", None), now
-    ):
-        return StableBindingResolution("scan_stale")
+    target_refresh_status = _target_refresh_status(target, discovered, now)
+    if target_refresh_status != "found":
+        last_result = getattr(discovered, "last_result", {}) or {}
+        if target_refresh_status is not None:
+            return StableBindingResolution(target_refresh_status)
+        if last_result.get("status") in _FAILED_DISCOVERY_STATUSES:
+            return StableBindingResolution("scan_failed")
+        if not _complete_authoritative_scan(discovered):
+            return StableBindingResolution("scan_incomplete")
+        if now is not None and is_discovery_stale(
+            getattr(discovered, "scanned_at", None), now
+        ):
+            return StableBindingResolution("scan_stale")
 
     evaluation = evaluate_account_scope(
         profile,
@@ -193,7 +218,9 @@ def remember_binding_evidence(config, discovered) -> bool:
 
 def reconcile_stable_bindings(config, discovered) -> set[str]:
     """Recover stale candidate IDs only from unique same-account row identities."""
-    if not _complete_authoritative_scan(discovered):
+    if not _complete_authoritative_scan(discovered) and not getattr(
+        discovered, "target_refresh", {}
+    ):
         return set()
     account_scope = discovered.account_scope
     by_identity: dict[str, list] = defaultdict(list)
@@ -218,6 +245,9 @@ def reconcile_stable_bindings(config, discovered) -> set[str]:
             or binding_scope != account_scope
         ):
             continue
+        if not _complete_authoritative_scan(discovered):
+            if _target_refresh_status(target, discovered, datetime.now()) != "found":
+                continue
         matches = by_identity.get(identity_key, [])
         if len(matches) != 1:
             continue

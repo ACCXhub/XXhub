@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
@@ -123,9 +124,12 @@ def test_health_check_reports_success(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr("autody.cli.open_chat", lambda *args, **kwargs: Context())
     monkeypatch.setattr(
-        "autody.cli.discover_friends",
+        "autody.cli.refresh_configured_targets",
         lambda *_args, **_kwargs: FriendDiscoveryResult(
-            "2026-07-05T08:00:00", [], tmp_path / "data" / "discovered_friends.json"
+            "2026-07-05T08:00:00",
+            [],
+            tmp_path / "data" / "discovered_friends.json",
+            target_refresh={"found_target_ids": []},
         ),
     )
     monkeypatch.setattr(
@@ -169,13 +173,57 @@ def test_health_check_refreshes_fresh_candidate_snapshot_without_sending(
 
     def discover(_loaded, page, *_args, **_kwargs):
         calls.append(page)
-        return FriendDiscoveryResult("2026-07-05T08:00:00", [], tmp_path / "data" / "discovered_friends.json")
+        return FriendDiscoveryResult(
+            "2026-07-05T08:00:00",
+            [],
+            tmp_path / "data" / "discovered_friends.json",
+            target_refresh={"found_target_ids": []},
+        )
 
     monkeypatch.setattr("autody.cli.open_chat", lambda *_args, **_kwargs: Context())
-    monkeypatch.setattr("autody.cli.discover_friends", discover)
+    monkeypatch.setattr("autody.cli.refresh_configured_targets", discover)
     monkeypatch.setattr("autody.cli.DouyinChat", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("health refresh must not send")))
 
     result = runner.invoke(app, ["health-check", "--config", str(config)])
+
+    assert result.exit_code == 0
+    assert len(calls) == 1
+
+
+def test_manual_account_refresh_always_runs_complete_friend_discovery(
+    tmp_path: Path,
+    monkeypatch,
+):
+    (tmp_path / "messages.txt").write_text("早安\n", encoding="utf-8")
+    config = tmp_path / "config.yaml"
+    config.write_text("targets: []\nmessages_file: messages.txt\n", encoding="utf-8")
+    calls = []
+
+    class Context:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return False
+
+    def discover(_loaded, page, *_args, **_kwargs):
+        calls.append(page)
+        return FriendDiscoveryResult(
+            "2026-08-25T08:00:00",
+            [],
+            tmp_path / "data" / "discovered_friends.json",
+            last_result={"completed_bottom_reached": True},
+        )
+
+    monkeypatch.setattr("autody.cli.open_chat", lambda *_args, **_kwargs: Context())
+    monkeypatch.setattr(
+        "autody.cli.resolve_account_profile",
+        lambda *_args, **_kwargs: SimpleNamespace(switched=False),
+    )
+    monkeypatch.setattr("autody.cli.discover_friends", discover)
+    monkeypatch.setattr("autody.cli._complete_friend_discovery", lambda *_args, **_kwargs: None)
+
+    result = runner.invoke(app, ["refresh-account-profile", "--config", str(config)])
 
     assert result.exit_code == 0
     assert len(calls) == 1

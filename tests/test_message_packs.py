@@ -57,6 +57,20 @@ def test_preview_deduplicates_pack_lines(tmp_path: Path):
     assert preview.duplicate_count == 1
 
 
+def test_read_only_preview_does_not_seed_user_catalog(tmp_path: Path):
+    program_parent = tmp_path / "program"
+    program_parent.mkdir()
+    program_root = make_pack_root(program_parent)
+    data_root = tmp_path / "user-data"
+    service = MessagePackService(program_root, data_root)
+
+    preview = service.preview("sample", persist_catalog=False)
+
+    assert preview.messages == ["早安呀", "今天顺利"]
+    assert not (data_root / "data" / "message-packs" / "catalog.json").exists()
+    assert not (data_root / "data" / "locks" / "message-packs.lock").exists()
+
+
 def test_merge_import_deduplicates_and_creates_backup(tmp_path: Path):
     service = MessagePackService(
         make_pack_root(tmp_path),

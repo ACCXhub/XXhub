@@ -129,7 +129,8 @@ td { height: 43px; padding: 0 14px; border-top: 1px solid #edf1f5; color: #26344
 .quick-panel strong { color: #1d2a40; font-size: 13px; }
 .quick-panel small { color: #8a96a9; font-size: 11px; }
 .blue-text { color: #1d70ed; } .green-text { color: #16ad5a; } .purple-text { color: #7b55dc; }
-.friends-panel td:first-child { font-weight: 600; display: flex; align-items: center; gap: 9px; }
+.friends-panel td:first-child { font-weight: 600; }
+.friend-name-cell { display: inline-flex; align-items: center; gap: 9px; }
 .avatar { width: 25px; height: 25px; display: grid; place-items: center; border-radius: 50%; color: #24528e; background: #e6f0fc; font-size: 11px; }
 .muted { color: #8793a5; }
 
@@ -314,6 +315,8 @@ input:focus, textarea:focus, select:focus { border-color: #5797ef; box-shadow: 0
 .dashboard-page .status-item strong { font-size: 17px; }
 .dashboard-page .stats-grid { margin-bottom: 12px; }
 .dashboard-page .stat-card { min-height: 82px; padding: 13px 16px; }
+.dashboard-page .friends-panel { margin-bottom: 12px; }
+.dashboard-page .friends-panel .friend-avatar { width: 28px; height: 28px; font-size: 11px; }
 .issues-panel-clear .panel-heading { border-bottom: 0; }
 .issue-list { display: grid; }
 .issue-item { min-height: 56px; padding: 8px 15px; display: grid; grid-template-columns: 22px 1fr auto; gap: 10px; align-items: center; border-top: 1px solid #edf1f5; }

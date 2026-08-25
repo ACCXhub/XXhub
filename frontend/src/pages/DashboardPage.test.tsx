@@ -46,6 +46,26 @@ test("shows healthy binding and the current send failure without duplicate healt
   expect(within(panel as HTMLElement).queryByText("历史会话定位失败")).not.toBeInTheDocument();
 });
 
+test("uses resolved avatar metadata and keeps operational sections in priority order", () => {
+  const currentStatus = {
+    ...status,
+    friends: [{
+      target_id: "target-one", name: "当前好友", avatar_url: "/api/avatars/candidate-current?v=1",
+      status: "pending" as const,
+      current_health: { status: "healthy" as const, reason_code: "binding_valid", summary_zh: "绑定有效" }
+    }]
+  };
+
+  render(<DashboardPage status={currentStatus} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} />);
+
+  expect(screen.getByRole("img", { name: "当前好友 的头像" })).toHaveAttribute(
+    "src", "/api/avatars/candidate-current?v=1"
+  );
+  const labels = Array.from(document.querySelectorAll(".dashboard-page > section"))
+    .map((node) => node.getAttribute("aria-label") || node.querySelector("h2")?.textContent);
+  expect(labels).toEqual(["核心状态", "需要处理", "好友状态", "运行统计"]);
+});
+
 test("removes run-by-run history and retry-count noise from the dashboard", () => {
   render(<DashboardPage status={status} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} />);
 

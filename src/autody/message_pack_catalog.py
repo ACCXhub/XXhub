@@ -173,6 +173,14 @@ class MessagePackCatalogStore:
         except TaskAlreadyRunning as exc:
             raise MessagePackConflict("文案包正在由另一个进程修改，请稍后重试") from exc
 
+    def load_read_only(self) -> CatalogDocument:
+        """Read the effective catalog without locks, recovery, or seed writes."""
+        if self.pending_path.exists():
+            raise MessagePackConflict("文案包存在待恢复事务，请先打开文案包页面")
+        if self.catalog_path.exists():
+            return self._read_validated()
+        return self._seed_from_builtin_index()
+
     def load_locked(self) -> CatalogDocument:
         self.recover_pending_transaction()
         if self.catalog_path.exists():

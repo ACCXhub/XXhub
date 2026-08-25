@@ -182,7 +182,7 @@
         Before="RemoveFiles"
         Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
-    <Feature Id="MainFeature" Title="AutoDy" Level="1">
+    <Feature Id="MainFeature" Title="AutoDy" Level="1" AllowAdvertise="no">
       <ComponentGroupRef Id="PayloadComponents" />
       <ComponentRef Id="DataRootComponent" />
       <ComponentRef Id="ShortcutComponent" />

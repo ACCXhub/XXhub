@@ -535,16 +535,27 @@ html,body{height:100%;margin:0}body{display:grid;place-items:center;background:#
 </style>
 </head>
 <body>
-<main class="card" id="starting"><div class="spinner"></div><h1>AutoDy 正在启动…</h1></main>
-<main class="card failure" id="failure"><h1>AutoDy 启动未完成</h1><p>后台服务暂时无法访问。你可以重试，或打开日志查看原因。</p><div class="actions"><button id="retry" type="button">重试</button><a id="logs" target="_blank" rel="noopener">打开日志</a></div></main>
+<main class="card" id="starting"><div class="spinner"></div><h1 id="startup-message">AutoDy 正在启动…</h1></main>
+<main class="card failure" id="failure"><h1>AutoDy 启动未完成</h1><p>后台服务或目标资料刷新暂时未完成。你可以重试，或打开日志查看原因。</p><div class="actions"><button id="retry" type="button">重试</button><a id="logs" target="_blank" rel="noopener">打开日志</a></div></main>
 <script>
 const dashboardUrl = __DASHBOARD_URL__;
 const logsUrl = __LOGS_URL__;
-let deadline = Date.now() + 30000;
+let deadline = Date.now() + 90000;
 let polling = true;
 const starting = document.getElementById("starting");
 const failure = document.getElementById("failure");
+const startupMessage = document.getElementById("startup-message");
 document.getElementById("logs").href = logsUrl;
+window.autodyStartupReady = payload => {
+  if (!polling) return;
+  if (payload && payload.message) startupMessage.textContent = payload.message;
+  if (payload && payload.ready) {
+    polling = false;
+    location.replace(dashboardUrl);
+    return;
+  }
+  setTimeout(poll, 250);
+};
 async function poll() {
   if (!polling) return;
   if (Date.now() >= deadline) {
@@ -553,15 +564,15 @@ async function poll() {
     failure.style.display = "block";
     return;
   }
-  try {
-    await fetch(dashboardUrl + "/?autody-startup=" + Date.now(), {cache: "no-store", mode: "no-cors"});
-    location.replace(dashboardUrl);
-  } catch (_error) {
-    setTimeout(poll, 250);
-  }
+  const probe = document.createElement("script");
+  probe.async = true;
+  probe.src = dashboardUrl + "/api/startup-readiness.js?autody-startup=" + Date.now();
+  probe.onerror = () => { probe.remove(); setTimeout(poll, 250); };
+  probe.onload = () => probe.remove();
+  document.head.appendChild(probe);
 }
 document.getElementById("retry").addEventListener("click", () => {
-  deadline = Date.now() + 30000;
+  deadline = Date.now() + 90000;
   polling = true;
   failure.style.display = "none";
   starting.style.display = "block";

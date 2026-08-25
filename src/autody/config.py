@@ -60,14 +60,15 @@ class AppConfig(BaseModel):
     timeout_ms: int = Field(default=30_000, ge=5_000, le=120_000)
     headless: bool = True
     message_suffix: MessageSuffixConfig = Field(default_factory=MessageSuffixConfig)
+    default_message_pack: str | None = "daily-greeting"
     daily_send_time: str = Field(default="07:30", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     daily_health_check_time: str = Field(default="07:20", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     weekly_health_check_enabled: bool = True
     weekly_health_check_weekday: str = Field(default="Sunday", pattern=r"^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)$")
     weekly_health_check_time: str = Field(default="20:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     recovery_deadline: str = Field(default="23:59", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
-    min_delay_seconds: float = Field(default=1.0, ge=0.0, le=60.0)
-    max_delay_seconds: float = Field(default=3.0, ge=0.0, le=60.0)
+    min_delay_seconds: float = Field(default=0.0, ge=0.0, le=60.0)
+    max_delay_seconds: float = Field(default=0.0, ge=0.0, le=60.0)
     page_load_timeout_ms: int = Field(default=30_000, ge=5_000, le=120_000)
     friend_search_timeout_ms: int = Field(default=30_000, ge=5_000, le=120_000)
     confirmation_timeout_ms: int = Field(default=12_000, ge=2_000, le=60_000)
@@ -153,6 +154,7 @@ def serialize_config(config: AppConfig, root: Path) -> bytes:
         "timeout_ms": config.timeout_ms,
         "headless": config.headless,
         "message_suffix": config.message_suffix.model_dump(mode="json"),
+        "default_message_pack": config.default_message_pack,
         "daily_send_time": config.daily_send_time,
         "daily_health_check_time": config.daily_health_check_time,
         "weekly_health_check_enabled": config.weekly_health_check_enabled,

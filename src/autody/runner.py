@@ -410,8 +410,15 @@ def _target_base_message(
     daily: dict,
     messages: list[str],
     day: date,
+    *,
+    persist_catalog: bool = True,
 ) -> str:
-    if not target.message_pack:
+    pack_id = (
+        target.message_pack
+        if target.message_pack is not None
+        else config.default_message_pack
+    )
+    if not pack_id:
         return daily["message"]
     target_id = target_identity(target)
     key = f"pack:{target_id}"
@@ -424,7 +431,7 @@ def _target_base_message(
     pack_messages = MessagePackService(
         pack_root,
         config.messages_file.parent,
-    ).preview(target.message_pack).messages
+    ).preview(pack_id, persist_catalog=persist_catalog).messages
     selected = _selection_rng(day, "message-pack", target).choice(pack_messages) if (target.message_selection or config.message_selection) == "per_friend" else pack_messages[0]
     daily["messages_by_target"][key] = selected
     return selected
@@ -436,9 +443,18 @@ def _resolve_target_message(
     day: date,
     daily: dict,
     messages: list[str],
+    *,
+    persist_catalog: bool = True,
 ) -> str:
-    if target.message_pack:
-        base = _target_base_message(target, config, daily, messages, day)
+    if target.message_pack is not None or config.default_message_pack:
+        base = _target_base_message(
+            target,
+            config,
+            daily,
+            messages,
+            day,
+            persist_catalog=persist_catalog,
+        )
     elif (target.message_selection or config.message_selection) == "per_friend":
         target_id = target_identity(target)
         key = f"target:{target_id}"
@@ -474,7 +490,16 @@ def preview_today_target_message(
     if not daily.get("message"):
         daily["message"] = MessageRotation(_selection_rng(day, "daily")).peek(messages, state.rotation)
     daily.setdefault("messages_by_target", {})
-    return TodayTargetMessage(_resolve_target_message(target, config, day, daily, messages))
+    return TodayTargetMessage(
+        _resolve_target_message(
+            target,
+            config,
+            day,
+            daily,
+            messages,
+            persist_catalog=False,
+        )
+    )
 
 
 def _record_history(
@@ -895,7 +920,7 @@ def run_daily(
         remaining = target.delay_offset_minutes * 60 - (time.monotonic() - run_started)
         if remaining > 0:
             time.sleep(remaining)
-        if target.message_pack:
+        if target.message_pack is not None or config.default_message_pack:
             try:
                 target_message = _resolve_target_message(target, config, today, daily, messages)
             except MessagePackError as exc:

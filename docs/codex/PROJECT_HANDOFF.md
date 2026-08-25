@@ -15,6 +15,27 @@ v1.4.4 Scheduler/MSI 热修由两个生产提交组成：
 
 当前 Dashboard 的“需要处理”由未解决的当前 FailureDetail 生成：可安全重试时只提供目标级安全补发，绑定问题进入好友管理，账号问题进入登录，`uncertain` 只进入人工查看且不自动重试。好友表分别显示当前绑定与今日发送，健康绑定不再重复显示“绑定有效”；表格使用受限高度的内部滚动以适配 1366×768 级桌面视口。
 
+普通 Dashboard 启动现在由 `/api/startup-readiness` 驱动，只对已启用续火 Target 执行 targeted refresh。结果写回同一个 `discovered_friends.json` 的 `target_refresh` 证据，不冒充完整扫描或改写完整扫描的 `scanned_at`；权威 proof 唯一匹配时可安全更新当前 candidate/locator。显式“刷新当前账号资料”仍负责完整账号资料和全好友 discovery。Dashboard 与好友管理都从 `resolve_stable_binding` 返回的当前 candidate 读取显示名称和本地头像。
+
+旧 Target 迁移不得用唯一显示名建立权威 proof。允许的自动连续性只有同账号下已有权威 identity，或旧 candidate 与当前 candidate 唯一相同的 conversation locator；否则保留 Target 但清空新 proof、设置 revalidation guard，并要求在好友管理中显式重新关联。当前本机 10 个 legacy Target 因找不到独立于名称的连续性证据，已仅回退 `binding_identity_key`、`binding_identity_source`、`binding_account_scope`，其他用户配置保持不变。
+
+targeted refresh 不等待完整 discovery 的初始虚拟列表稳定窗口，并只在目标头像缓存缺失或超过 7 天时重新抓取；仍会在列表底部等待真实 lazy-load 增长。本机隔离剖析以 9 个配置目标、19 行为样本，完整浏览器启动、账号校验、目标刷新和关闭由约 11.1 秒降至约 6.5 秒，其中约 4.3 秒为真实聊天页启动/加载。
+
+当前默认文案包由 `AppConfig.default_message_pack` 的稳定 ID `daily-greeting` 表示，单 Target 的显式 pack 选择仍优先；只读预览不会为缺失 catalog 创建文件或锁。新配置及缺失旧字段的好友间最小/最大延迟默认均为 0 秒，已有显式用户值继续保留。
+
+当前存储/映射所有权如下：
+
+| 持久对象 | 稳定键 | 引用关系 | 运行期/当前数据与更新者 |
+| --- | --- | --- | --- |
+| Target | `stable_id` | `candidate_id` 仅关联当前缓存；binding 三字段引用权威好友 proof | 配置/API 显式管理 |
+| 好友 binding proof | `binding_account_scope + binding_identity_source + binding_identity_key` | 归属于一个 Target | 显式关联或有 locator/identity 连续性的 discovery 更新 |
+| 好友缓存项 | `candidate_id` | 反向标记 `configured_target_id` 仅供当前缓存展示 | discovery/targeted refresh 更新名称、头像和当前性 |
+| Conversation locator | 当前 candidate 的 `conversation_id` | resolver 由 proof 找到 candidate 后返回 | 每次 discovery/targeted refresh 更新，不作为永久好友 proof |
+| Failure/history | Target `stable_id` | 关联当日状态和运行记录 | Runner/失败存储更新；显示名不参与 join |
+| 默认文案包 | pack `id` | `default_message_pack` 或 Target 显式 `message_pack` | 文案包 catalog/API 更新，内容不复制进配置 |
+
+WiX `MainFeature` 禁止 Advertise，普通安装、升级和修复必须把主 payload 注册为 Local 并实际更新 ProgramRoot；不得把 `ADDLOCAL=MainFeature` 作为正式安装依赖。最终安装验收仍需同时证明 DataRoot 保留、三项 Scheduler 契约和桌面入口到当前安装 payload 的身份链。
+
 文案库的 TXT/CSV/JSON 本地预览与合并、文案包的 TXT 本地导入仍复用现有 `MessagePackService` 和对应 API/UI，消息内容不通过新增远程上传系统。日常安装仍以 MSI 维护的 `D:\AutoDy` ProgramRoot 与原交互用户 `%LocalAppData%\AutoDy` DataRoot 为准；本地维护构建只能在验证源码服务后通过既有 MSI 路径替换程序资源，不能覆盖 DataRoot 或改变 Scheduler 的 Limited Principal/roots 语义。
 
 ## 仓库结构

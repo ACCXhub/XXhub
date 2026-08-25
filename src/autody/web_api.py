@@ -116,14 +116,15 @@ class ConfigUpdate(BaseModel):
     timeout_ms: int = Field(ge=5_000, le=120_000)
     headless: bool
     message_suffix: MessageSuffixConfig = Field(default_factory=MessageSuffixConfig)
+    default_message_pack: str | None = "daily-greeting"
     daily_send_time: str = Field(default="07:30", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     daily_health_check_time: str = Field(default="07:20", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     weekly_health_check_enabled: bool = True
     weekly_health_check_weekday: str = Field(default="Sunday", pattern=r"^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)$")
     weekly_health_check_time: str = Field(default="20:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     recovery_deadline: str = Field(default="23:59", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
-    min_delay_seconds: float = Field(default=1.0, ge=0, le=60)
-    max_delay_seconds: float = Field(default=3.0, ge=0, le=60)
+    min_delay_seconds: float = Field(default=0.0, ge=0, le=60)
+    max_delay_seconds: float = Field(default=0.0, ge=0, le=60)
     page_load_timeout_ms: int = Field(default=30_000, ge=5_000, le=120_000)
     friend_search_timeout_ms: int = Field(default=30_000, ge=5_000, le=120_000)
     confirmation_timeout_ms: int = Field(default=12_000, ge=2_000, le=60_000)
@@ -286,7 +287,11 @@ def _effective_target_settings(target: Target, config: AppConfig, override: dict
     else:
         suffix = "全局后缀" if config.message_suffix.enabled else "未设置后缀"
     return {
-        "message_source": override.get("message_pack") or "全局本地文案库",
+        "message_source": (
+            override.get("message_pack")
+            or config.default_message_pack
+            or "全局本地文案库"
+        ),
         "message_source_origin": "override" if override.get("message_pack") else "global",
         "suffix": suffix,
         "suffix_origin": "override" if suffix_mode != "global" else "global",
@@ -521,8 +526,9 @@ def _current_target_health(
     profile,
     binding_guarded: bool,
     now: datetime,
+    resolution=None,
 ) -> dict[str, str]:
-    resolution = resolve_stable_binding(
+    resolution = resolution or resolve_stable_binding(
         target,
         discovered,
         profile,
@@ -768,6 +774,7 @@ def _config_payload(config: AppConfig) -> dict:
         "timeout_ms": config.timeout_ms,
         "headless": config.headless,
         "message_suffix": config.message_suffix.model_dump(mode="json"),
+        "default_message_pack": config.default_message_pack,
         "daily_send_time": config.daily_send_time,
         "daily_health_check_time": config.daily_health_check_time,
         "weekly_health_check_enabled": config.weekly_health_check_enabled,
@@ -844,6 +851,7 @@ def create_app(
     action_runner=None,
     now_provider=None,
     account_logout_runner=None,
+    startup_refresh_enabled: bool = False,
 ) -> FastAPI:
     config_path = config_path.resolve()
     root = config_path.parent
@@ -853,6 +861,7 @@ def create_app(
     account_store = MultiAccountStore(root, config_path)
     run_action = action_runner or manager.start
     current_time = now_provider or datetime.now
+    startup_job: dict | None = None
     app = FastAPI(title="AutoDy", docs_url=None, redoc_url=None)
     # Log maintenance is deliberately best-effort and limited by its local date
     # marker; it must never prevent the dashboard from starting.
@@ -1121,6 +1130,66 @@ def create_app(
             "startup_error": bundled_module_error,
         }
 
+    def startup_readiness_payload() -> dict:
+        nonlocal startup_job
+        config = load_config(config_path)
+        if not startup_refresh_enabled or not any(
+            target.enabled for target in config.targets
+        ):
+            return {
+                "ready": True,
+                "successful": True,
+                "status": "not_required",
+                "message": "启动准备完成",
+                "progress": None,
+            }
+        if startup_job is None:
+            try:
+                startup_job = run_action("startup-refresh")
+            except ActionAlreadyRunning:
+                return {
+                    "ready": False,
+                    "successful": False,
+                    "status": "waiting_for_browser",
+                    "message": "正在等待浏览器任务",
+                    "progress": None,
+                }
+        current = startup_job
+        if action_runner is None and current.get("id"):
+            current = manager.get(str(current["id"])) or current
+            startup_job = current
+        progress_path = config.state_file.parent / "friend_scan_progress.json"
+        try:
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            progress = None
+        terminal = current.get("status") in {"success", "failed"}
+        message = (
+            str(progress.get("message"))
+            if isinstance(progress, dict) and progress.get("message")
+            else "正在准备续火目标"
+        )
+        return {
+            "ready": terminal,
+            "successful": current.get("status") == "success",
+            "status": current.get("status", "running"),
+            "message": message,
+            "progress": progress,
+        }
+
+    @app.get("/api/startup-readiness")
+    def startup_readiness():
+        return startup_readiness_payload()
+
+    @app.get("/api/startup-readiness.js")
+    def startup_readiness_script():
+        payload = json.dumps(startup_readiness_payload(), ensure_ascii=False)
+        return Response(
+            f"window.autodyStartupReady({payload});",
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-store"},
+        )
+
     @app.post("/api/repair")
     def diagnose_and_repair():
         before = status()
@@ -1236,6 +1305,11 @@ def create_app(
         profile = load_account_profile(config.state_file.parent.parent)
         binding_guarded = bindings_revalidation_required(config.state_file.parent)
         friends = []
+        candidates_by_id = {
+            candidate.candidate_id: candidate
+            for candidate in (discovered.candidates if discovered else [])
+        }
+        cache_dir = config.state_file.parent / "avatar-cache"
         for target in config.targets:
             target_id = target_identity(target)
             effective_status = effective_statuses.get(target_id)
@@ -1245,10 +1319,36 @@ def create_app(
                 else None
             )
             friend_status = effective_status or "pending"
+            resolution = resolve_stable_binding(
+                target,
+                discovered,
+                profile,
+                revalidation_required=binding_guarded,
+                now=current_time(),
+            )
+            candidate = candidates_by_id.get(
+                resolution.candidate_id or target.candidate_id or ""
+            )
+            avatar_key = (
+                candidate.avatar_cache_key or candidate.candidate_id
+                if candidate and candidate.avatar_status == "cached"
+                else None
+            )
+            avatar_status = (
+                "cached"
+                if avatar_key and _avatar_path(cache_dir, avatar_key).is_file()
+                else "missing"
+            )
             friends.append(
                 {
                     "target_id": target_id,
-                    "name": target.name,
+                    "name": candidate.display_name if candidate else target.name,
+                    "avatar_url": (
+                        _avatar_url(avatar_key, candidate.avatar_updated_at)
+                        if avatar_status == "cached" and candidate
+                        else ""
+                    ),
+                    "avatar_status": avatar_status,
                     "status": friend_status,
                     "error": (
                         detail.user_summary_zh
@@ -1266,9 +1366,21 @@ def create_app(
                         profile=profile,
                         binding_guarded=binding_guarded,
                         now=current_time(),
+                        resolution=resolution,
                     ),
                 }
             )
+        friends.sort(
+            key=lambda friend: (
+                0
+                if friend["status"] == "failed"
+                else 1
+                if friend["current_health"]["status"] != "healthy"
+                else 2
+                if friend["status"] == "pending"
+                else 3
+            )
+        )
         records = list(reversed(history_page.items))
         history_failure_views = _history_failure_views(
             config,
@@ -2027,6 +2139,23 @@ def create_app(
         if payload.archive_log_retention_days < payload.active_log_retention_days:
             raise HTTPException(422, "归档日志保留天数不能小于活跃日志保留天数")
         config = load_config(config_path)
+        requested_default_pack = (
+            payload.default_message_pack
+            if "default_message_pack" in payload.model_fields_set
+            else config.default_message_pack
+        )
+        if (
+            "default_message_pack" in payload.model_fields_set
+            and requested_default_pack is not None
+        ):
+            try:
+                pack_ids = {
+                    pack.id for pack in message_pack_service().list_packs().packs
+                }
+            except MessagePackError as exc:
+                raise message_pack_http_exception(exc) from exc
+            if requested_default_pack not in pack_ids:
+                raise HTTPException(422, "默认文案包不存在")
         existing: dict[str, list[Target]] = defaultdict(list)
         for target in config.targets:
             existing[target.name].append(target)
@@ -2036,6 +2165,11 @@ def create_app(
         ]
         for field_name, value in payload.model_dump().items():
             if field_name != "targets":
+                if (
+                    field_name == "default_message_pack"
+                    and field_name not in payload.model_fields_set
+                ):
+                    continue
                 if field_name == "message_suffix":
                     value = MessageSuffixConfig.model_validate(value)
                 setattr(config, field_name, value)
@@ -2243,6 +2377,8 @@ def create_app(
             for target in config.targets
             if target.message_pack is not None
         }
+        if config.default_message_pack is not None:
+            referenced.add(config.default_message_pack)
         try:
             return message_pack_service().delete_pack(
                 pack_id,
@@ -2512,7 +2648,9 @@ def create_app(
                 now=current_time(),
             )
             identifier = _avatar_id(target.stable_id)
-            candidate = candidates_by_id.get(target.candidate_id or "")
+            candidate = candidates_by_id.get(
+                resolution.candidate_id or target.candidate_id or ""
+            )
             avatar_key = (
                 candidate.avatar_cache_key or candidate.candidate_id
                 if candidate and candidate.avatar_status == "cached"
@@ -2523,7 +2661,7 @@ def create_app(
                 {
                     "id": identifier,
                     "target_id": identifier,
-                    "display_name": target.name,
+                    "display_name": candidate.display_name if candidate else target.name,
                     "enabled": target.enabled,
                     "note": target.note,
                     "avatar_url": _avatar_url(avatar_key, candidate.avatar_updated_at if candidate else None) if avatar_status == "cached" else "",

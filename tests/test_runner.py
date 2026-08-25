@@ -48,6 +48,7 @@ def make_config(tmp_path: Path):
         lock_file=tmp_path / "run.lock",
         artifact_dir=tmp_path / "artifacts",
         retry_count=1,
+        default_message_pack=None,
     )
 
 
@@ -844,6 +845,30 @@ def test_target_pack_uses_installed_program_root(
 
     assert result.status is RunStatus.COMPLETED
     assert chat.sent[0][1].startswith("安装内置问候")
+
+
+def test_default_message_pack_uses_the_canonical_stable_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    config, chat = make_config(tmp_path), FakeChat()
+    program_root = tmp_path / "program"
+    pack_dir = program_root / "message-packs"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "daily-greeting.txt").write_text("默认晨间问候\n", encoding="utf-8")
+    (pack_dir / "index.json").write_text(
+        '{"packs":[{"id":"daily-greeting","name":"日常问候","description":"","version":"1","file":"daily-greeting.txt","count":1,"category":"daily"}]}',
+        encoding="utf-8",
+    )
+    config.default_message_pack = "daily-greeting"
+    monkeypatch.setenv("AUTODY_PROGRAM_ROOT", str(program_root))
+
+    result = run_daily(config, chat, date(2026, 7, 15))
+
+    assert result.status is RunStatus.COMPLETED
+    assert [message for _target, message in chat.sent] == [
+        "默认晨间问候 —— gpt小助手",
+        "默认晨间问候 —— gpt小助手",
+    ]
 
 
 def test_target_pack_uses_managed_catalog_without_changing_selection(

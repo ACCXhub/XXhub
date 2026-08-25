@@ -31,10 +31,10 @@ from autody.failures import failure_detail
 _SAFE_LOCAL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$")
 DISCOVERY_CACHE_TTL = timedelta(hours=24)
 AVATAR_CACHE_TTL = timedelta(days=7)
-_VIRTUAL_LIST_GROWTH_WINDOW_MS = 2_000
-_VIRTUAL_LIST_STABLE_MS = 500
+_VIRTUAL_LIST_GROWTH_WINDOW_MS = 4_000
+_VIRTUAL_LIST_STABLE_MS = 750
 _VIRTUAL_LIST_POLL_MS = 250
-_VIRTUAL_LIST_BOTTOM_GROWTH_MS = 2_000
+_VIRTUAL_LIST_BOTTOM_GROWTH_MS = 3_000
 logger = logging.getLogger(__name__)
 
 
@@ -77,6 +77,7 @@ class FriendDiscoveryResult:
     scan_id: str | None = None
     last_result: dict[str, object] = field(default_factory=dict)
     account_scope: str | None = None
+    target_refresh: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -306,6 +307,7 @@ def _scan_items(
     initial_virtual_list_timeout_ms: int = (
         _VIRTUAL_LIST_GROWTH_WINDOW_MS + _VIRTUAL_LIST_STABLE_MS
     ),
+    stop_after_identities: set[str] | None = None,
 ) -> tuple[list[_ScannedItem], bool, bool]:
     """Read visible conversation rows while keeping avatar failures non-fatal."""
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -464,6 +466,9 @@ def _scan_items(
             )
 
         if partial_timeout:
+            break
+
+        if stop_after_identities and stop_after_identities.issubset(seen):
             break
 
         if not scrollable.count():
@@ -634,7 +639,6 @@ def discover_friends(
     )
     scanned_at = scanned_now.isoformat(timespec="seconds")
     scan_id = _new_local_id("scan")
-    scanned_name_counts = Counter(item.name for item in scanned)
     targets_by_id = {
         target.stable_id: target
         for target in config.targets
@@ -650,23 +654,27 @@ def discover_friends(
         for candidate in (previous.candidates if previous else [])
         if candidate.identity_key
     }
-    legacy_by_name: dict[str, list[FriendCandidate]] = defaultdict(list)
+    previous_by_conversation: dict[str, list[FriendCandidate]] = defaultdict(list)
     for candidate in (previous.candidates if previous else []):
-        if not candidate.identity_key:
-            legacy_by_name[candidate.display_name].append(candidate)
+        if candidate.conversation_id:
+            previous_by_conversation[candidate.conversation_id].append(candidate)
     config_changed = False
     candidates: list[FriendCandidate] = []
     seen_previous_ids: set[str] = set()
-    bound_target_ids: set[str] = set()
     avatars_updated = avatars_reused = avatars_failed = configured_matched = new_candidates = 0
 
     try:
         for item in scanned:
             prior = previous_by_identity.get(item.identity_key)
-            if prior is None and scanned_name_counts[item.name] == 1:
-                legacy_matches = legacy_by_name.get(item.name, [])
-                if len(legacy_matches) == 1 and legacy_matches[0].candidate_id not in seen_previous_ids:
-                    prior = legacy_matches[0]
+            if prior is None and item.conversation_id:
+                locator_matches = previous_by_conversation.get(
+                    item.conversation_id, []
+                )
+                if (
+                    len(locator_matches) == 1
+                    and locator_matches[0].candidate_id not in seen_previous_ids
+                ):
+                    prior = locator_matches[0]
             candidate_id = (
                 prior.candidate_id
                 if prior and _SAFE_LOCAL_ID.fullmatch(prior.candidate_id)
@@ -688,21 +696,6 @@ def discover_friends(
                 targets_by_candidate_id[candidate_id] = legacy_target
                 target = legacy_target
                 config_changed = True
-            if target is None and scanned_name_counts[item.name] == 1:
-                name_matches = [
-                    candidate_target
-                    for candidate_target in config.targets
-                    if candidate_target.name == item.name
-                    and candidate_target.candidate_id is None
-                    and candidate_target.stable_id not in bound_target_ids
-                ]
-                if len(name_matches) == 1:
-                    target = name_matches[0]
-                    config_changed = _ensure_target_id(target) or config_changed
-                    target.candidate_id = candidate_id
-                    targets_by_candidate_id[candidate_id] = target
-                    bound_target_ids.add(target.stable_id or candidate_id)
-                    config_changed = True
             configured_target_id = target.stable_id if target else None
             configured_enabled = target.enabled if target else None
             # Cache ownership belongs to the candidate row, never to a
@@ -828,11 +821,213 @@ def discover_friends(
             "scan_id": scan_id,
             "last_result": last_result,
             "account_scope": account_scope,
+            "target_refresh": {},
             "candidates": [asdict(candidate) for candidate in candidates],
         },
     )
     return FriendDiscoveryResult(
-        scanned_at, candidates, output_path, config_changed, scan_id, last_result, account_scope
+        scanned_at,
+        candidates,
+        output_path,
+        config_changed,
+        scan_id,
+        last_result,
+        account_scope,
+        {},
+    )
+
+
+def refresh_configured_targets(
+    config: AppConfig,
+    page,
+    selectors: ChatSelectors,
+    output_path: Path,
+    now: Callable[[], datetime] | None = None,
+    avatar_cache_dir: Path | None = None,
+    overall_timeout_ms: int = 30_000,
+    max_scrolls: int = 20,
+    avatar_timeout_ms: int = 2_000,
+    monotonic: Callable[[], float] = time.monotonic,
+    progress: Callable[[str, int, int | None], None] | None = None,
+) -> FriendDiscoveryResult:
+    """Refresh only configured targets without claiming a full account scan.
+
+    The full-cache ``scanned_at`` and ``last_result`` remain owned by
+    :func:`discover_friends`.  This operation stores per-target freshness in
+    the same cache document and only updates candidates proven by a target's
+    persistent account-scoped identity.
+    """
+    previous = load_discovered_friends(output_path)
+    profile = load_account_profile(output_path.parent.parent)
+    account_scope = profile.account_profile_id if profile else None
+    refreshed_now = (now or datetime.now)()
+    refreshed_at = refreshed_now.isoformat(timespec="seconds")
+    cache_dir = avatar_cache_dir or output_path.parent / "avatar-cache"
+    authoritative_sources = {"participant_sec_user_id", "row_attribute"}
+    requested_targets = [target for target in config.targets if target.enabled]
+    eligible_candidates = [
+        target
+        for target in requested_targets
+        if target.stable_id
+        and target.binding_identity_key
+        and target.binding_identity_source in authoritative_sources
+        and target.binding_account_scope == account_scope
+    ]
+    identity_counts = Counter(
+        target.binding_identity_key for target in eligible_candidates
+    )
+    eligible = {
+        target.binding_identity_key: target
+        for target in eligible_candidates
+        if identity_counts[target.binding_identity_key] == 1
+    }
+    requested_ids = [target.stable_id for target in requested_targets if target.stable_id]
+    unresolved_ids = [
+        target.stable_id
+        for target in requested_targets
+        if target.stable_id
+        and eligible.get(target.binding_identity_key) is not target
+    ]
+    started = monotonic()
+    scanned: list[_ScannedItem] = []
+    partial_timeout = False
+    completed_bottom_reached = False
+    if eligible:
+        fresh_avatar_identities = _fresh_avatar_identities(
+            previous,
+            cache_dir,
+            refreshed_now,
+        )
+        scanned, partial_timeout, completed_bottom_reached = _scan_items(
+            page,
+            selectors,
+            cache_dir,
+            max_scrolls=max_scrolls,
+            capture_avatar=lambda identity: (
+                identity in eligible and identity not in fresh_avatar_identities
+            ),
+            avatar_timeout_ms=avatar_timeout_ms,
+            deadline=started + overall_timeout_ms / 1000,
+            monotonic=monotonic,
+            progress=progress,
+            # Targeted refresh can inspect the current rows immediately.  If
+            # the list is still growing, the normal bottom-growth wait keeps
+            # scrolling until the proven identities appear.
+            initial_virtual_list_timeout_ms=0,
+            stop_after_identities=set(eligible),
+        )
+
+    candidates = list(previous.candidates if previous else [])
+    by_identity = {
+        candidate.identity_key: index
+        for index, candidate in enumerate(candidates)
+        if candidate.identity_key
+    }
+    found_ids: list[str] = []
+    try:
+        for item in scanned:
+            target = eligible.get(item.identity_key)
+            if target is None or not target.stable_id or item.association_uncertain:
+                continue
+            prior_index = by_identity.get(item.identity_key)
+            prior = candidates[prior_index] if prior_index is not None else None
+            candidate_id = (
+                prior.candidate_id
+                if prior is not None
+                else _candidate_id(f"{account_scope}\0{item.identity_key}")
+            )
+            avatar_cache_path, avatar_status, avatar_updated = _publish_avatar(
+                item.temporary_avatar,
+                cache_dir,
+                candidate_id,
+                datetime.fromisoformat(refreshed_at),
+            )
+            if avatar_cache_path is None and prior is not None:
+                avatar_cache_path = prior.avatar_cache_path
+                avatar_status = prior.avatar_status
+            updated = FriendCandidate(
+                candidate_id=candidate_id,
+                display_name=item.name,
+                avatar_cache_path=avatar_cache_path,
+                avatar_status=avatar_status,
+                discovered_at=prior.discovered_at if prior else refreshed_at,
+                match_status="configured",
+                configured_target_id=target.stable_id,
+                configured_enabled=target.enabled,
+                avatar_cache_key=candidate_id,
+                avatar_updated_at=(
+                    refreshed_at
+                    if avatar_updated
+                    else (prior.avatar_updated_at if prior else None)
+                ),
+                first_discovered_at=(
+                    prior.first_discovered_at if prior else refreshed_at
+                ),
+                last_seen_at=refreshed_at,
+                last_scan_id=prior.last_scan_id if prior else None,
+                presence_status="current",
+                identity_key=item.identity_key,
+                identity_source=item.identity_source,
+                conversation_id=item.conversation_id,
+            )
+            if prior_index is None:
+                by_identity[item.identity_key] = len(candidates)
+                candidates.append(updated)
+            else:
+                candidates[prior_index] = updated
+            found_ids.append(target.stable_id)
+    finally:
+        _discard_temporary(scanned)
+
+    eligible_ids = {
+        target.stable_id
+        for target in eligible.values()
+        if target.stable_id
+    }
+    missing_ids = sorted(eligible_ids - set(found_ids))
+    refresh_status = (
+        "completed"
+        if len(found_ids) == len(eligible)
+        else "partial_timeout"
+        if partial_timeout
+        else "completed_with_missing"
+        if completed_bottom_reached
+        else "partial_scroll_limit"
+    )
+    target_refresh: dict[str, object] = {
+        "status": refresh_status,
+        "completed_at": refreshed_at,
+        "account_scope": account_scope,
+        "requested_target_ids": requested_ids,
+        "found_target_ids": sorted(found_ids),
+        "missing_target_ids": missing_ids,
+        "unresolved_target_ids": sorted(unresolved_ids),
+        "rows_examined": len(scanned),
+        "completed_bottom_reached": completed_bottom_reached,
+        "partial": partial_timeout,
+    }
+    if progress:
+        progress("writing_cache", len(found_ids), len(requested_ids))
+    _write_discovery_payload(
+        output_path,
+        {
+            "version": 3,
+            "scanned_at": previous.scanned_at if previous else None,
+            "scan_id": previous.scan_id if previous else None,
+            "last_result": previous.last_result if previous else {},
+            "account_scope": account_scope,
+            "target_refresh": target_refresh,
+            "candidates": [asdict(candidate) for candidate in candidates],
+        },
+    )
+    return FriendDiscoveryResult(
+        previous.scanned_at if previous else None,
+        candidates,
+        output_path,
+        scan_id=previous.scan_id if previous else None,
+        last_result=previous.last_result if previous else {},
+        account_scope=account_scope,
+        target_refresh=target_refresh,
     )
 
 
@@ -921,6 +1116,11 @@ def load_discovered_friends(path: Path) -> FriendDiscoveryResult | None:
             scan_id=str(payload["scan_id"]) if payload.get("scan_id") else None,
             last_result=last_result if isinstance(last_result, dict) else {},
             account_scope=str(payload["account_scope"]) if payload.get("account_scope") else None,
+            target_refresh=(
+                payload.get("target_refresh", {})
+                if isinstance(payload.get("target_refresh", {}), dict)
+                else {}
+            ),
         )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None
@@ -991,6 +1191,7 @@ def record_discovery_failure(
             "scan_id": scan_id,
             "last_result": last_result,
             "account_scope": previous.account_scope if previous else None,
+            "target_refresh": previous.target_refresh if previous else {},
             "candidates": [asdict(candidate) for candidate in candidates],
         },
     )
@@ -1001,4 +1202,48 @@ def record_discovery_failure(
         scan_id=scan_id,
         last_result=last_result,
         account_scope=previous.account_scope if previous else None,
+        target_refresh=previous.target_refresh if previous else {},
+    )
+
+
+def record_target_refresh_failure(
+    path: Path,
+    error: Exception,
+    now: Callable[[], datetime] | None = None,
+) -> FriendDiscoveryResult:
+    """Record startup refresh failure without invalidating full-scan evidence."""
+    previous = load_discovered_friends(path)
+    finished_at = (now or datetime.now)().isoformat(timespec="seconds")
+    target_refresh: dict[str, object] = {
+        "status": "failed",
+        "completed_at": finished_at,
+        "account_scope": previous.account_scope if previous else None,
+        "requested_target_ids": [],
+        "found_target_ids": [],
+        "missing_target_ids": [],
+        "unresolved_target_ids": [],
+        "partial": True,
+        "error_type": type(error).__name__,
+    }
+    candidates = previous.candidates if previous else []
+    _write_discovery_payload(
+        path,
+        {
+            "version": 3,
+            "scanned_at": previous.scanned_at if previous else None,
+            "scan_id": previous.scan_id if previous else None,
+            "last_result": previous.last_result if previous else {},
+            "account_scope": previous.account_scope if previous else None,
+            "target_refresh": target_refresh,
+            "candidates": [asdict(candidate) for candidate in candidates],
+        },
+    )
+    return FriendDiscoveryResult(
+        previous.scanned_at if previous else None,
+        candidates,
+        path,
+        scan_id=previous.scan_id if previous else None,
+        last_result=previous.last_result if previous else {},
+        account_scope=previous.account_scope if previous else None,
+        target_refresh=target_refresh,
     )

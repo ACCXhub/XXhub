@@ -37,6 +37,17 @@ def test_wix_project_is_sdk_style_and_per_machine():
     assert "<SuppressIces>ICE60</SuppressIces>" in project
 
 
+def test_main_feature_is_always_installed_locally():
+    namespace = {"w": "http://wixtoolset.org/schemas/v4/wxs"}
+    root = ET.parse("packaging/wix/Product.wxs").getroot()
+
+    feature = root.find(".//w:Feature[@Id='MainFeature']", namespace)
+
+    assert feature is not None
+    assert feature.attrib["Level"] == "1"
+    assert feature.attrib["AllowAdvertise"] == "no"
+
+
 def test_msi_shortcuts_use_the_hidden_launcher():
     product = Path("packaging/wix/Product.wxs").read_text(encoding="utf-8")
 

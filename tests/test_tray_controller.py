@@ -343,7 +343,8 @@ def test_tray_cold_start_opens_a_local_wait_page_before_health_and_reuses_the_ta
         "http://127.0.0.1:8777",
         "location.replace(dashboardUrl)",
         "setTimeout(poll, 250)",
-        "30000",
+        "/api/startup-readiness.js",
+        "90000",
         "重试",
         "打开日志",
     ]:

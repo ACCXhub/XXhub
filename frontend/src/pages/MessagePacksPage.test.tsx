@@ -13,7 +13,8 @@ vi.mock("../api", () => ({
     reorderMessagePacks: vi.fn(),
     fuseMessagePack: vi.fn(),
     splitMessagePack: vi.fn(),
-    importMessagePack: vi.fn()
+    importMessagePack: vi.fn(),
+    config: vi.fn(), saveConfig: vi.fn()
   }
 }));
 
@@ -23,6 +24,8 @@ const other = { id: "other", name: "其他", description: "", version: "user", c
 const catalog = { revision: 7, packs: [daily, other] };
 
 beforeEach(() => {
+  vi.mocked(api.config).mockResolvedValue({ default_message_pack: "daily" } as never);
+  vi.mocked(api.saveConfig).mockImplementation(async (value) => value);
   vi.mocked(api.messagePacks).mockResolvedValue(catalog);
   vi.mocked(api.previewMessagePack).mockResolvedValue({
     pack: daily,
@@ -37,6 +40,18 @@ beforeEach(() => {
     added_count: 2, duplicate_count: 0, total_count: 62,
     backup_path: "data/backups/messages.txt", mode: "merge"
   });
+});
+
+test("shows the canonical default pack and can change it by stable id", async () => {
+  render(<MessagePacksPage notify={vi.fn()} />);
+  await screen.findAllByText("日常问候");
+
+  expect(screen.getByText("当前默认")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "设为默认" }));
+
+  await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith(
+    expect.objectContaining({ default_message_pack: "other" })
+  ));
 });
 
 afterEach(() => {

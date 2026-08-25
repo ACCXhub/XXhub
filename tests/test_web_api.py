@@ -31,6 +31,7 @@ artifact_dir: data/artifacts
 retry_count: 3
 timeout_ms: 30000
 headless: true
+default_message_pack: daily
 """.strip(),
         encoding="utf-8",
     )
@@ -111,7 +112,7 @@ def test_status_returns_dashboard_summary(tmp_path: Path):
     assert data["today"]["succeeded"] == 1
     assert data["today"]["total"] == 2
     assert data["today"]["message"] == "早安"
-    assert data["friends"][1]["status"] == "failed"
+    assert data["friends"][0]["status"] == "failed"
     assert data["login"]["status"] == "unknown"
 
 
@@ -614,6 +615,31 @@ def test_service_identity_reports_local_runtime_without_private_browser_data(tmp
     assert len(data["bundled_module"]["sha256"]) == 64
     assert "cookie" not in str(data).lower()
     assert "browser-profile" not in str(data).lower()
+
+
+def test_startup_readiness_runs_targeted_refresh_once_and_exposes_jsonp(tmp_path: Path):
+    calls = []
+    client = TestClient(
+        create_app(
+            make_project(tmp_path),
+            action_runner=lambda action: calls.append(action) or {
+                "id": "startup-job",
+                "action": action,
+                "status": "success",
+                "exit_code": 0,
+            },
+            startup_refresh_enabled=True,
+        )
+    )
+
+    readiness = client.get("/api/startup-readiness")
+    script = client.get("/api/startup-readiness.js")
+
+    assert readiness.json()["ready"] is True
+    assert readiness.json()["successful"] is True
+    assert calls == ["startup-refresh"]
+    assert script.headers["content-type"].startswith("application/javascript")
+    assert script.text.startswith("window.autodyStartupReady(")
 
 
 def test_frontend_entrypoint_is_not_cached_between_production_builds(tmp_path: Path):
@@ -2103,8 +2129,10 @@ def test_status_keeps_healthy_binding_and_routes_current_failure_from_detail(
                 "candidates": [
                     {
                         "candidate_id": "candidate-current",
-                        "display_name": "当前失败目标",
-                        "avatar_status": "missing",
+                        "display_name": "当前缓存名称",
+                        "avatar_cache_key": "candidate-current",
+                        "avatar_status": "cached",
+                        "avatar_updated_at": "2026-06-24T07:20:00",
                         "discovered_at": "2026-06-24T07:20:00",
                         "match_status": "configured",
                         "presence_status": "current",
@@ -2118,6 +2146,9 @@ def test_status_keeps_healthy_binding_and_routes_current_failure_from_detail(
         ),
         encoding="utf-8",
     )
+    avatar_cache = tmp_path / "data" / "avatar-cache"
+    avatar_cache.mkdir(parents=True)
+    (avatar_cache / "candidate-current.png").write_bytes(b"avatar")
     state_path = tmp_path / "data" / "state.json"
     state = json.loads(state_path.read_text(encoding="utf-8"))
     daily = state["daily"]["2026-06-24"]
@@ -2153,6 +2184,8 @@ def test_status_keeps_healthy_binding_and_routes_current_failure_from_detail(
     )
     assert friend["current_health"]["status"] == "healthy"
     assert friend["status"] == "failed"
+    assert friend["name"] == "当前缓存名称"
+    assert friend["avatar_url"].startswith("/api/avatars/candidate-current")
     assert issue["action"] == "retry_target"
     assert issue["target_ids"] == ["target-current"]
 

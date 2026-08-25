@@ -45,6 +45,8 @@ from autody.friend_discovery import (
     discover_friends,
     load_discovered_friends,
     record_discovery_failure,
+    record_target_refresh_failure,
+    refresh_configured_targets,
 )
 from autody.locking import SingleInstanceLock, TaskAlreadyRunning
 from autody.logging_setup import setup_logging
@@ -322,6 +324,68 @@ def _run_friend_scan(
         raise
 
 
+def _run_targeted_friend_refresh(
+    loaded: AppConfig,
+    config_path: Path,
+    discovery_path: Path,
+):
+    """Refresh configured targets only and keep full-cache freshness intact."""
+    progress = ScanProgress(discovery_path)
+    overall_deadline = time.monotonic() + loaded.friend_scan_overall_timeout_ms / 1000
+    result = None
+    _remember_cached_binding_evidence(config_path, loaded, discovery_path)
+    try:
+        progress.update("waiting_browser")
+        with SingleInstanceLock(
+            loaded.lock_file,
+            timeout_seconds=loaded.friend_scan_lock_timeout_ms / 1000,
+        ):
+            try:
+                remaining_ms = max(1_000, int((overall_deadline - time.monotonic()) * 1000))
+                progress.update("launching_chromium")
+                with open_chat(
+                    loaded.profile_dir,
+                    min(loaded.page_load_timeout_ms, remaining_ms),
+                    True,
+                    loaded.artifact_dir,
+                    home=_data_root(config_path),
+                    on_stage=progress.update,
+                ) as page:
+                    profile_refreshed = _refresh_profile_for_recovery(
+                        page, config_path, loaded
+                    )
+                    remaining_ms = max(1, int((overall_deadline - time.monotonic()) * 1000))
+                    result = refresh_configured_targets(
+                        loaded,
+                        page,
+                        DOUYIN_SELECTORS,
+                        discovery_path,
+                        overall_timeout_ms=remaining_ms,
+                        max_scrolls=loaded.friend_scan_max_rounds,
+                        avatar_timeout_ms=loaded.avatar_capture_timeout_ms,
+                        progress=progress.update,
+                    )
+                    _complete_friend_discovery(
+                        config_path,
+                        loaded,
+                        result,
+                        allow_recovery=profile_refreshed,
+                    )
+            finally:
+                progress.update("releasing_browser_lock")
+        progress.finish(
+            str(result.target_refresh.get("status", "completed")),
+            rows_found=result.target_refresh.get("rows_examined", 0),
+            targets_found=len(result.target_refresh.get("found_target_ids", [])),
+            targets_missing=len(result.target_refresh.get("missing_target_ids", [])),
+        )
+        return result
+    except Exception as exc:
+        progress.finish("failed", error_type=type(exc).__name__)
+        record_target_refresh_failure(discovery_path, exc)
+        raise
+
+
 def _send_activity_path(config: AppConfig) -> Path:
     return config.lock_file.parent / "daily-send-active.json"
 
@@ -483,7 +547,7 @@ def login(config: Path = typer.Option(Path("config.yaml"), "--config")):
 
 @app.command("refresh-account-profile")
 def refresh_account_profile(config: Path = typer.Option(Path("config.yaml"), "--config")):
-    """Refresh current account and, when guarded, its authoritative friend bindings."""
+    """Refresh the current account and its complete authoritative friend cache."""
     loaded = load_config(config)
     discovery_path = loaded.state_file.parent / "discovered_friends.json"
     try:
@@ -500,27 +564,26 @@ def refresh_account_profile(config: Path = typer.Option(Path("config.yaml"), "--
                 profile = resolve_account_profile(page, _data_root(config))
                 if profile.switched:
                     mark_bindings_for_revalidation(loaded.state_file.parent)
-                if bindings_revalidation_required(loaded.state_file.parent):
-                    try:
-                        result = discover_friends(
-                            loaded,
-                            page,
-                            DOUYIN_SELECTORS,
-                            discovery_path,
-                        )
-                        _complete_friend_discovery(
-                            config,
-                            loaded,
-                            result,
-                            allow_recovery=True,
-                        )
-                        logging.info(
-                            "账号刷新同时完成稳定绑定校验：发现 %s 个候选。",
-                            len(result.candidates),
-                        )
-                    except Exception as exc:
-                        record_discovery_failure(discovery_path, str(exc))
-                        logging.warning("账号已刷新，但稳定绑定自动恢复未完成：%s", exc)
+                try:
+                    result = discover_friends(
+                        loaded,
+                        page,
+                        DOUYIN_SELECTORS,
+                        discovery_path,
+                    )
+                    _complete_friend_discovery(
+                        config,
+                        loaded,
+                        result,
+                        allow_recovery=True,
+                    )
+                    logging.info(
+                        "账号刷新同时完成完整好友缓存刷新：发现 %s 个候选。",
+                        len(result.candidates),
+                    )
+                except Exception as exc:
+                    record_discovery_failure(discovery_path, str(exc))
+                    logging.warning("账号已刷新，但完整好友缓存刷新未完成：%s", exc)
             typer.echo("检测到登录账号已切换，账号资料已更新。" if profile.switched else "当前账号资料已刷新。")
     except AccountProfileUnavailable as exc:
         typer.echo(f"当前账号资料未验证：{exc}")
@@ -548,7 +611,7 @@ def health_check(config: Path = typer.Option(Path("config.yaml"), "--config")):
                 _write_health(loaded, "success")
                 profile_refreshed = _refresh_profile_for_recovery(page, config, loaded)
                 try:
-                    result = discover_friends(
+                    result = refresh_configured_targets(
                         loaded, page, DOUYIN_SELECTORS, discovery_path
                     )
                     _complete_friend_discovery(
@@ -558,12 +621,12 @@ def health_check(config: Path = typer.Option(Path("config.yaml"), "--config")):
                         allow_recovery=profile_refreshed,
                     )
                     logging.info(
-                        "登录健康检查已刷新候选好友：发现 %s 个记录。",
-                        len(result.candidates),
+                        "登录健康检查已刷新配置目标：成功 %s 个。",
+                        len(result.target_refresh.get("found_target_ids", [])),
                     )
                 except Exception as exc:
-                    record_discovery_failure(discovery_path, str(exc))
-                    logging.warning("登录健康检查后的候选好友扫描失败：%s", exc)
+                    record_target_refresh_failure(discovery_path, exc)
+                    logging.warning("登录健康检查后的配置目标刷新失败：%s", exc)
                 if loaded.preflight_after_health_enabled and _automatic_preflight_due(loaded):
                     try:
                         result = _run_preflight_with_page(
@@ -586,6 +649,30 @@ def health_check(config: Path = typer.Option(Path("config.yaml"), "--config")):
         typer.echo("登录健康检查发生未捕获异常，请查看当天日志。", err=True)
         raise typer.Exit(1) from exc
     typer.echo("登录状态正常，聊天页可用。")
+
+
+@app.command("startup-refresh")
+def startup_refresh(config: Path = typer.Option(Path("config.yaml"), "--config")):
+    """Read-only startup readiness for configured streak targets only."""
+    loaded = load_config(config)
+    discovery_path = loaded.state_file.parent / "discovered_friends.json"
+    try:
+        configure_runtime(_data_root(config))
+        setup_logging(loaded)
+        result = _run_targeted_friend_refresh(loaded, config, discovery_path)
+        typer.echo(
+            "启动准备完成：已刷新 "
+            f"{len(result.target_refresh.get('found_target_ids', []))} 个配置目标。"
+        )
+    except TaskAlreadyRunning:
+        _busy()
+        raise typer.Exit(2)
+    except FatalChatError as exc:
+        logging.warning("启动目标刷新未完成：%s", exc)
+        raise typer.Exit(3) from exc
+    except Exception as exc:
+        logging.exception("启动目标刷新发生未捕获异常。")
+        raise typer.Exit(1) from exc
 
 
 @app.command("preflight")
@@ -751,7 +838,7 @@ def ui(
     if not no_open:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     typer.echo(f"AutoDy 管理台正在运行：{url}")
-    dashboard_app = create_app(config)
+    dashboard_app = create_app(config, startup_refresh_enabled=True)
     _install_service_control_middleware(
         dashboard_app,
         lambda: signal.raise_signal(signal.SIGINT),

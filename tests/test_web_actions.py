@@ -66,6 +66,21 @@ def test_scheduler_writes_are_not_exposed_through_generic_actions(tmp_path: Path
         manager._command("remove-scheduler")
 
 
+def test_startup_refresh_uses_the_read_only_targeted_command(tmp_path: Path):
+    manager = ActionManager(tmp_path, tmp_path / "config.yaml")
+
+    command = manager._command("startup-refresh")
+
+    assert command == [
+        sys.executable,
+        "-m",
+        "autody.cli",
+        "startup-refresh",
+        "--config",
+        str(tmp_path / "config.yaml"),
+    ]
+
+
 def test_failed_action_job_exposes_structured_chinese_failure(tmp_path: Path):
     def execute(_command, **_kwargs):
         return type("Completed", (), {"returncode": 7})()

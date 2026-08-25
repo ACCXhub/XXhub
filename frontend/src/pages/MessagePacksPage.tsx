@@ -1,8 +1,8 @@
-import { Download, Eye, Library, Pencil, Plus, RefreshCw, Upload } from "lucide-react";
+import { Check, Download, Eye, Library, Pencil, Plus, RefreshCw, Upload } from "lucide-react";
 import type { DragEvent } from "react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { PackCatalog, PackImportResult, PackMutationResult, PackPreview } from "../types";
+import type { AppConfig, PackCatalog, PackImportResult, PackMutationResult, PackPreview } from "../types";
 
 const categoryLabels: Record<string, string> = {
   daily: "日常", cute: "可爱", funny: "趣味", care: "关心", festival: "节日", custom: "自定义"
@@ -15,6 +15,7 @@ type DropIntent =
 
 export function MessagePacksPage({ notify }: { notify: (message: string) => void }) {
   const [catalog, setCatalog] = useState<PackCatalog | null>(null);
+  const [config, setConfig] = useState<AppConfig | null>(null);
   const [preview, setPreview] = useState<PackPreview | null>(null);
   const [result, setResult] = useState<PackImportResult | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -22,7 +23,9 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dropIntent, setDropIntent] = useState<DropIntent | null>(null);
   const report = (error: unknown, fallback: string) => notify(error instanceof Error ? error.message : fallback);
-  const load = () => void api.messagePacks().then(setCatalog).catch((error) => report(error, "文案包加载失败"));
+  const load = () => void Promise.all([api.messagePacks(), api.config()])
+    .then(([nextCatalog, nextConfig]) => { setCatalog(nextCatalog); setConfig(nextConfig); })
+    .catch((error) => report(error, "文案包加载失败"));
   useEffect(load, []);
 
   const acceptMutation = (mutation: PackMutationResult) => {
@@ -112,6 +115,17 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
     finally { setBusy(null); }
   };
 
+  const setDefaultPack = async (id: string) => {
+    if (!config || config.default_message_pack === id) return;
+    setBusy(id);
+    try {
+      const saved = await api.saveConfig({ ...config, default_message_pack: id });
+      setConfig(saved);
+      notify("默认文案包已更新");
+    } catch (error) { report(error, "默认文案包更新失败"); }
+    finally { setBusy(null); }
+  };
+
   const replaceGlobalMessages = async () => {
     if (!overwritePack) return;
     const pack = overwritePack;
@@ -188,11 +202,12 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
             onDragEnd={finishDrag}
           >
             <span className="pack-icon"><Library size={22} /></span>
-            <div className="pack-meta"><span>{categoryLabels[pack.category] || pack.category}</span><span>{pack.count} 条</span>{pack.fused_source_count ? <span>含 {pack.fused_source_count} 个来源</span> : null}</div>
+            <div className="pack-meta"><span>{categoryLabels[pack.category] || pack.category}</span><span>{pack.count} 条</span>{config?.default_message_pack === pack.id ? <span className="tag success">当前默认</span> : null}{pack.fused_source_count ? <span>含 {pack.fused_source_count} 个来源</span> : null}</div>
             <h2>{pack.name}</h2><p>{pack.description || "普通用户文案包"}</p>
             {pack.direct_fused_sources.length ? <p className="pack-provenance">已融合：{pack.direct_fused_sources.map((source) => source.name).join("、")}</p> : null}
             <div className="pack-actions" data-no-pack-drag onDragStart={(event) => event.preventDefault()}>
               <button disabled={busy !== null} onClick={() => void showPreview(pack.id)}><Eye size={15} />预览</button>
+              <button disabled={busy !== null || config?.default_message_pack === pack.id} onClick={() => void setDefaultPack(pack.id)}><Check size={15} />{config?.default_message_pack === pack.id ? "默认文案包" : "设为默认"}</button>
               <button disabled={busy !== null} onClick={() => void renamePack(pack.id, pack.name)}><Pencil size={15} />重命名</button>
               {pack.direct_fused_sources.length ? (
                 <details className="pack-split-menu">
