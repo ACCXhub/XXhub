@@ -59,21 +59,34 @@ def profile(account_scope="account-a"):
     )
 
 
-def test_remember_binding_evidence_uses_only_authoritative_row_identity():
-    authoritative = target("candidate-a")
+def test_remember_binding_evidence_requires_existing_authoritative_continuity():
+    unproven = target("candidate-a")
+    authoritative = target(
+        "candidate-c",
+        key="row:old-key",
+        source="row_attribute",
+        scope="account-a",
+        stable_id="target-c",
+    )
     avatar_only = target("candidate-b", stable_id="target-b")
-    cfg = config(authoritative, avatar_only)
+    cfg = config(unproven, authoritative, avatar_only)
     result = discovered(
         "account-a",
         [
             candidate("candidate-a", "row:key-a"),
+            candidate(
+                "candidate-c",
+                "participant:key-c",
+                "participant_sec_user_id",
+            ),
             candidate("candidate-b", "avatar:key-b", "avatar_source"),
         ],
     )
 
     assert remember_binding_evidence(cfg, result) is True
-    assert authoritative.binding_identity_key == "row:key-a"
-    assert authoritative.binding_identity_source == "row_attribute"
+    assert unproven.binding_identity_key is None
+    assert authoritative.binding_identity_key == "participant:key-c"
+    assert authoritative.binding_identity_source == "participant_sec_user_id"
     assert authoritative.binding_account_scope == "account-a"
     assert avatar_only.binding_identity_key is None
 

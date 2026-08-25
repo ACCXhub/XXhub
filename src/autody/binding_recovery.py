@@ -200,6 +200,17 @@ def remember_binding_evidence(config, discovered) -> bool:
         candidate_id = getattr(target, "candidate_id", None)
         if not getattr(target, "stable_id", None) or not candidate_id:
             continue
+        if (
+            not getattr(target, "binding_identity_key", None)
+            or getattr(target, "binding_identity_source", None)
+            not in AUTHORITATIVE_BINDING_IDENTITY_SOURCES
+            or getattr(target, "binding_account_scope", None) != account_scope
+        ):
+            # A cache association is not continuity proof.  Missing/weak
+            # legacy bindings must be explicitly reassociated; only an
+            # already-authoritative same-account binding may be upgraded to
+            # a newer authoritative identity through its proven candidate.
+            continue
         matches = by_candidate_id.get(candidate_id, [])
         if len(matches) != 1:
             continue
