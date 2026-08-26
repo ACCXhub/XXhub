@@ -230,6 +230,7 @@ def test_participant_identity_resolves_the_separate_current_locator():
 
 
 def test_targeted_refresh_proves_one_stale_binding_without_claiming_full_scan():
+    now = datetime.now()
     item = target(
         "candidate-cache-old",
         key="participant:friend-a",
@@ -250,7 +251,7 @@ def test_targeted_refresh_proves_one_stale_binding_without_claiming_full_scan():
     )
     result.target_refresh = {
         "status": "completed",
-        "completed_at": "2026-08-25T08:00:00",
+        "completed_at": now.isoformat(),
         "account_scope": "account-a",
         "requested_target_ids": ["target-a"],
         "found_target_ids": ["target-a"],
@@ -263,7 +264,7 @@ def test_targeted_refresh_proves_one_stale_binding_without_claiming_full_scan():
         item,
         result,
         profile(),
-        now=datetime(2026, 8, 25, 8, 0, 5),
+        now=now,
     )
 
     assert resolution.status == "valid"

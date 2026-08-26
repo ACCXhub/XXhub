@@ -295,6 +295,27 @@ test("offers explicit relink and ignore actions for a genuine orphan binding", a
   expect(onDataChanged).toHaveBeenCalled();
 });
 
+test("offers explicit relink when a configured candidate lost durable proof", async () => {
+  apiMocks.discoveredFriends.mockResolvedValueOnce({
+    ...discovered,
+    refresh_running: false,
+    candidates: [{
+      ...discovered.candidates[0],
+      match_status: "needs_reassociation",
+      reassociation_target_id: "friend-xiaoming"
+    }]
+  });
+
+  render(<FriendsPage notify={vi.fn()} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "重新关联 小明" }));
+
+  await waitFor(() => expect(apiMocks.relinkCandidate).toHaveBeenCalledWith(
+    "friend-xiaoming", "friend-xiaoming"
+  ));
+  expect(screen.queryByRole("button", { name: "忽略缓存 小明" })).not.toBeInTheDocument();
+});
+
 test("keeps account refresh, switching and logout out of Friend Management", async () => {
   render(<FriendsPage notify={vi.fn()} onDataChanged={vi.fn()} />);
 

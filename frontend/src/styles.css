@@ -326,7 +326,6 @@ input:focus, textarea:focus, select:focus { border-color: #5797ef; box-shadow: 0
 .issue-item > div { display: grid; gap: 4px; }
 .issue-item strong { font-size: 12px; font-weight: 600; white-space: pre-wrap; }
 .issue-item small { color: #8b97a8; font-size: 10px; }
-.friends-table-wrap { max-height: 280px; overflow: auto; }
 .friends-table-wrap th { position: sticky; top: 0; z-index: 1; }
 .failure-summary { color: #b43f47; font-weight: 600; }
 .empty-state.compact { padding: 28px; }

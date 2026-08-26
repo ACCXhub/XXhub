@@ -13,7 +13,11 @@ v1.4.4 Scheduler/MSI 热修由两个生产提交组成：
 
 当前 `[Unreleased]` 本地维护状态已把好友身份与会话定位收敛为两个独立概念。当前抖音 React conversation model 的 `toParticipantSecUserId` 是持久好友身份证明，conversation `id`/`shortId` 是当前会话 locator；discovery/cache 的 `candidate_id` 只负责本地候选关联。`binding_recovery.resolve_stable_binding` 是权威绑定解析入口，负责用账号范围和持久 proof 唯一匹配完整 discovery，再返回当前 locator 给 Runner 与 Chat。旧 `row_attribute` proof 仅保留兼容；没有权威 proof、账号不一致、扫描不完整或匹配不唯一时继续 fail closed。
 
-当前 Dashboard 的“需要处理”由未解决的当前 FailureDetail 生成：可安全重试时只提供目标级安全补发，绑定问题进入好友管理，账号问题进入登录，`uncertain` 只进入人工查看且不自动重试。好友表分别显示当前绑定与今日发送，健康绑定不再重复显示“绑定有效”；表格使用受限高度的内部滚动以适配 1366×768 级桌面视口。
+当旧绑定因安全迁移被清空 proof、但仍保留当前 `candidate_id` 时，好友管理必须显示“重新关联”，而不能把该行误作健康的已配置状态。`binding_recovery.reassociate_stable_binding` 是唯一的显式重关联写入入口：它只接受完整且当前的 discovery 中唯一、未被其他 Target 占用的权威身份，并通过账号范围和稳定绑定解析后才持久化 identity key/source、账号范围与当前 locator；旧 name/avatar 证据不会借此成为 durable proof。历史失败不被清除，当前 action/health 在重关联后从新的绑定重新计算。
+
+当前 Dashboard 的“需要处理”由未解决的当前 FailureDetail 生成：可安全重试时只提供目标级安全补发，绑定问题进入好友管理，账号问题进入登录，`uncertain` 只进入人工查看且不自动重试。好友表分别显示当前绑定与今日发送，健康绑定不再重复显示“绑定有效”；表格按当前行数自然展开，统计卡保持其后的既有间距。
+
+Overview 的今日总数、好友状态行、好友状态标题与本机资源计数都从同一 enabled execution target set 派生；好友管理取消续火或重新启用后，刷新 `/api/status` 即收敛这些投影。好友状态表不再设置固定/最大高度或内部纵向滚动，按当前行数自然展开，统计卡保持其后既有间距。
 
 普通 Dashboard 启动现在由 `/api/startup-readiness` 驱动，只对已启用续火 Target 执行 targeted refresh。结果写回同一个 `discovered_friends.json` 的 `target_refresh` 证据，不冒充完整扫描或改写完整扫描的 `scanned_at`；权威 proof 唯一匹配时可安全更新当前 candidate/locator。显式“刷新当前账号资料”仍负责完整账号资料和全好友 discovery。Dashboard 与好友管理都从 `resolve_stable_binding` 返回的当前 candidate 读取显示名称和本地头像。
 

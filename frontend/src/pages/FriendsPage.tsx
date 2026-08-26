@@ -284,7 +284,7 @@ export function FriendsPage({
             <FriendAvatar name={friend.display_name} url={friend.avatar_url} />
             <span>{friend.display_name}</span><small>{targetMutationId === targetId ? "保存中…" : "点击加入续火目标"}</small>
           </div>;
-        })}{discovery.candidates.filter((candidate) => candidate.presence_status !== "stale" && !candidate.configured && candidate.match_status !== "configured").sort((left, right) => {
+        })}{discovery.candidates.filter((candidate) => candidate.presence_status !== "stale" && candidate.match_status !== "configured" && (!candidate.configured || candidate.match_status === "needs_reassociation")).sort((left, right) => {
           const group = (candidate: FriendDiscovery["candidates"][number]) => candidate.presence_status === "stale" ? 2 : candidate.configured ? 1 : 0;
           return group(left) - group(right);
         }).map((candidate) => {
@@ -295,7 +295,7 @@ export function FriendsPage({
             return <div className="candidate configured candidate-reassociation" key={candidate.candidate_id}>
               <FriendAvatar name={candidate.display_name} url={candidate.avatar_url} />
               <span>{candidate.display_name}</span><small>{adding ? "关联中…" : "需要重新关联"}</small>
-              <span className="candidate-actions"><button className="text-button" aria-label={`重新关联 ${candidate.display_name}`} disabled={adding} onClick={() => void relinkCandidate(candidate, candidate.reassociation_target_id)}>重新关联</button><button className="text-button" aria-label={`忽略缓存 ${candidate.display_name}`} disabled={adding} onClick={() => void ignoreOrphan(candidate.reassociation_target_id)}>忽略此缓存</button></span>
+              <span className="candidate-actions"><button className="text-button" aria-label={`重新关联 ${candidate.display_name}`} disabled={adding} onClick={() => void relinkCandidate(candidate, candidate.reassociation_target_id)}>重新关联</button>{!candidate.configured ? <button className="text-button" aria-label={`忽略缓存 ${candidate.display_name}`} disabled={adding} onClick={() => void ignoreOrphan(candidate.reassociation_target_id)}>忽略此缓存</button> : null}</span>
             </div>;
           }
           return <button type="button" className={canAdd ? "candidate" : "candidate configured"} key={candidate.candidate_id} aria-label={`添加 ${candidate.display_name}`} disabled={!canAdd || adding} onClick={() => void addCandidate(candidate)}>

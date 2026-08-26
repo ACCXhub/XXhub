@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from copy import copy
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -184,6 +185,70 @@ def all_stable_bindings_proven(targets, discovered, profile) -> bool:
         resolve_stable_binding(target, discovered, profile).proven
         for target in targets
     )
+
+
+def reassociate_stable_binding(
+    config,
+    target,
+    candidate_id: str,
+    discovered,
+    profile,
+    *,
+    now: datetime | None = None,
+) -> StableBindingResolution:
+    """Explicitly establish durable proof from one complete current discovery."""
+    if discovered is None:
+        return StableBindingResolution("scan_unavailable")
+    candidates = [
+        candidate
+        for candidate in getattr(discovered, "candidates", [])
+        if getattr(candidate, "candidate_id", None) == candidate_id
+        and getattr(candidate, "presence_status", None) == "current"
+    ]
+    if not candidates:
+        return StableBindingResolution("candidate_missing")
+    if len(candidates) != 1:
+        return StableBindingResolution("candidate_ambiguous")
+    candidate = candidates[0]
+    if (
+        not getattr(candidate, "identity_key", None)
+        or getattr(candidate, "identity_source", None)
+        not in AUTHORITATIVE_BINDING_IDENTITY_SOURCES
+    ):
+        return StableBindingResolution("binding_missing")
+
+    stable_id = getattr(target, "stable_id", None)
+    if not stable_id:
+        return StableBindingResolution("binding_missing")
+    occupied = any(
+        getattr(other, "stable_id", None) != stable_id
+        and getattr(other, "candidate_id", None) == candidate_id
+        for other in getattr(config, "targets", [])
+    )
+    if occupied:
+        return StableBindingResolution("candidate_occupied")
+
+    proposed = copy(target)
+    proposed.candidate_id = candidate.candidate_id
+    proposed.name = candidate.display_name
+    proposed.binding_identity_key = candidate.identity_key
+    proposed.binding_identity_source = candidate.identity_source
+    proposed.binding_account_scope = getattr(discovered, "account_scope", None)
+    resolution = resolve_stable_binding(
+        proposed,
+        discovered,
+        profile,
+        now=now,
+    )
+    if not resolution.valid:
+        return resolution
+
+    target.candidate_id = proposed.candidate_id
+    target.name = proposed.name
+    target.binding_identity_key = proposed.binding_identity_key
+    target.binding_identity_source = proposed.binding_identity_source
+    target.binding_account_scope = proposed.binding_account_scope
+    return resolution
 
 
 def remember_binding_evidence(config, discovered) -> bool:

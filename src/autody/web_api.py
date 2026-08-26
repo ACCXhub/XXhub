@@ -46,6 +46,7 @@ from autody.account_profiles import AccountProfileStoreError, MultiAccountStore
 from autody.binding_recovery import (
     AUTHORITATIVE_BINDING_IDENTITY_SOURCES,
     all_stable_bindings_proven,
+    reassociate_stable_binding,
     resolve_stable_binding,
 )
 from autody.failures import FailureDetail, failure_detail
@@ -1310,7 +1311,7 @@ def create_app(
             for candidate in (discovered.candidates if discovered else [])
         }
         cache_dir = config.state_file.parent / "avatar-cache"
-        for target in config.targets:
+        for target in executable_targets:
             target_id = target_identity(target)
             effective_status = effective_statuses.get(target_id)
             detail = (
@@ -2508,6 +2509,7 @@ def create_app(
             for target in config.targets
             if target.candidate_id and target.stable_id and _avatar_id(target.stable_id)
         }
+        profile = load_account_profile(config.messages_file.parent)
         current_candidate_ids = {
             candidate.candidate_id
             for candidate in result.candidates
@@ -2535,8 +2537,27 @@ def create_app(
                 if target.stable_id not in ignored_orphans
             ]
             if configured_target is not None:
-                match_status = "configured"
-                reassociation_target_id = None
+                current_resolution = resolve_stable_binding(
+                    configured_target,
+                    result,
+                    profile,
+                    now=current_time(),
+                )
+                proposed = configured_target.model_copy(deep=True)
+                reassociation = reassociate_stable_binding(
+                    config,
+                    proposed,
+                    candidate.candidate_id,
+                    result,
+                    profile,
+                    now=current_time(),
+                )
+                if not current_resolution.valid and reassociation.valid:
+                    match_status = "needs_reassociation"
+                    reassociation_target_id = configured_target.stable_id
+                else:
+                    match_status = "configured"
+                    reassociation_target_id = None
             elif len(actionable) == 1:
                 match_status = "needs_reassociation"
                 reassociation_target_id = actionable[0].stable_id
@@ -2765,17 +2786,6 @@ def create_app(
         discovered = load_discovered_friends(
             config.state_file.parent / "discovered_friends.json"
         )
-        candidate = next(
-            (
-                item
-                for item in (discovered.candidates if discovered else [])
-                if item.candidate_id == candidate_id
-                and item.presence_status == "current"
-            ),
-            None,
-        )
-        if candidate is None:
-            raise HTTPException(404, "未找到当前候选好友")
         target = next(
             (
                 item
@@ -2786,43 +2796,22 @@ def create_app(
         )
         if target is None:
             raise HTTPException(404, "待重新关联的续火目标不存在")
-        occupied = next(
-            (
-                item
-                for item in config.targets
-                if item is not target and item.candidate_id == candidate_id
-            ),
-            None,
-        )
-        if occupied is not None:
-            raise HTTPException(409, "该候选好友已关联到其他续火目标")
-        if (
-            not discovered.account_scope
-            or not candidate.identity_key
-            or candidate.identity_source
-            not in AUTHORITATIVE_BINDING_IDENTITY_SOURCES
-        ):
-            raise HTTPException(409, "当前候选缺少权威好友身份，不能安全重新关联")
-        proposed = target.model_copy(
-            update={
-                "candidate_id": candidate.candidate_id,
-                "name": candidate.display_name,
-                "binding_identity_key": candidate.identity_key,
-                "binding_identity_source": candidate.identity_source,
-                "binding_account_scope": discovered.account_scope,
-            }
-        )
-        if not resolve_stable_binding(
-            proposed,
+        resolution = reassociate_stable_binding(
+            config,
+            target,
+            candidate_id,
             discovered,
             load_account_profile(config.messages_file.parent),
-        ).proven:
+            now=current_time(),
+        )
+        if resolution.status == "candidate_missing":
+            raise HTTPException(404, "未找到当前候选好友")
+        if resolution.status == "candidate_occupied":
+            raise HTTPException(409, "该候选好友已关联到其他续火目标")
+        if resolution.status == "binding_missing":
+            raise HTTPException(409, "当前候选缺少权威好友身份，不能安全重新关联")
+        if not resolution.valid:
             raise HTTPException(409, "当前扫描尚不能权威证明该候选好友")
-        target.candidate_id = proposed.candidate_id
-        target.name = proposed.name
-        target.binding_identity_key = proposed.binding_identity_key
-        target.binding_identity_source = proposed.binding_identity_source
-        target.binding_account_scope = proposed.binding_account_scope
         save_config(config_path, config)
         refresh_binding_guard(config, discovered)
         ignored = ignored_orphan_target_ids()
@@ -2831,7 +2820,7 @@ def create_app(
             save_ignored_orphan_target_ids(ignored)
         return {
             "target_id": target.stable_id,
-            "candidate_id": candidate.candidate_id,
+            "candidate_id": target.candidate_id,
             "display_name": target.name,
         }
 

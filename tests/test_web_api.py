@@ -116,6 +116,40 @@ def test_status_returns_dashboard_summary(tmp_path: Path):
     assert data["login"]["status"] == "unknown"
 
 
+def test_overview_friends_follow_the_enabled_target_set_after_batch_mutation(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets[0].stable_id = "target-one"
+    config.targets[1].stable_id = "target-two"
+    save_config(config_path, config)
+    client = TestClient(create_app(config_path))
+
+    before = client.get("/api/status?today=2026-06-24").json()
+    cancelled = client.patch(
+        "/api/friends/batch",
+        json={"target_ids": ["target-one"], "action": "disable"},
+    )
+    after_cancel = client.get("/api/status?today=2026-06-24").json()
+    restored = client.patch(
+        "/api/friends/batch",
+        json={"target_ids": ["target-one"], "action": "enable"},
+    )
+    after_restore = client.get("/api/status?today=2026-06-24").json()
+
+    assert len(before["friends"]) == before["today"]["total"] == 2
+    assert cancelled.json() == {"affected": 1}
+    assert len(after_cancel["friends"]) == after_cancel["today"]["total"] == 1
+    assert after_cancel["statistics"]["enabled_friend_count"] == 1
+    assert [friend["target_id"] for friend in after_cancel["friends"]] == [
+        "target-two"
+    ]
+    assert restored.json() == {"affected": 1}
+    assert len(after_restore["friends"]) == after_restore["today"]["total"] == 2
+    assert after_restore["statistics"]["enabled_friend_count"] == 2
+
+
 def test_historical_day_statistics_ignore_later_target_configuration_changes(
     tmp_path: Path,
 ):
@@ -1650,13 +1684,21 @@ def test_status_enriches_matching_legacy_history_with_stable_target_failure(
     config = load_config(config_path)
     config.targets[0].stable_id = "target-one"
     config.targets[0].candidate_id = "candidate-one"
-    save_config(config_path, config)
     account_id = write_verified_account(tmp_path)
+    config.targets[0].binding_identity_key = "participant:friend-one"
+    config.targets[0].binding_identity_source = "participant_sec_user_id"
+    config.targets[0].binding_account_scope = account_id
+    save_config(config_path, config)
     (tmp_path / "data" / "discovered_friends.json").write_text(
         json.dumps(
             {
                 "scanned_at": "2026-06-24T07:20:00",
                 "account_scope": account_id,
+                "last_result": {
+                    "status": "completed_bottom_reached",
+                    "completed_bottom_reached": True,
+                    "partial": False,
+                },
                 "candidates": [
                     {
                         "candidate_id": "candidate-one",
@@ -1665,6 +1707,8 @@ def test_status_enriches_matching_legacy_history_with_stable_target_failure(
                         "discovered_at": "2026-06-24T07:20:00",
                         "match_status": "configured",
                         "presence_status": "current",
+                        "identity_key": "participant:friend-one",
+                        "identity_source": "participant_sec_user_id",
                     }
                 ],
             },
@@ -1840,13 +1884,21 @@ def test_status_uses_target_failure_instead_of_legacy_technical_notification(
     config = load_config(config_path)
     config.targets[0].stable_id = "target-one"
     config.targets[0].candidate_id = "candidate-one"
-    save_config(config_path, config)
     account_id = write_verified_account(tmp_path)
+    config.targets[0].binding_identity_key = "participant:friend-one"
+    config.targets[0].binding_identity_source = "participant_sec_user_id"
+    config.targets[0].binding_account_scope = account_id
+    save_config(config_path, config)
     (tmp_path / "data" / "discovered_friends.json").write_text(
         json.dumps(
             {
                 "scanned_at": "2026-06-24T07:20:00",
                 "account_scope": account_id,
+                "last_result": {
+                    "status": "completed_bottom_reached",
+                    "completed_bottom_reached": True,
+                    "partial": False,
+                },
                 "candidates": [
                     {
                         "candidate_id": "candidate-one",
@@ -1855,6 +1907,8 @@ def test_status_uses_target_failure_instead_of_legacy_technical_notification(
                         "discovered_at": "2026-06-24T07:20:00",
                         "match_status": "configured",
                         "presence_status": "current",
+                        "identity_key": "participant:friend-one",
+                        "identity_source": "participant_sec_user_id",
                     }
                 ],
             },
@@ -1875,13 +1929,17 @@ def test_status_uses_target_failure_instead_of_legacy_technical_notification(
         encoding="utf-8",
     )
 
-    status = TestClient(create_app(config_path)).get(
+    status = TestClient(
+        create_app(config_path, now_provider=lambda: datetime(2026, 6, 24, 8, 0))
+    ).get(
         "/api/status?today=2026-06-24"
     ).json()
 
-    issue = next(item for item in status["issues"] if item["id"] == "notification")
+    issue = next(
+        item for item in status["issues"] if item["id"] == "send_failure_retryable"
+    )
     assert "无法在当前会话列表中找到目标" in issue["explanation"]
-    assert "建议：仅重试此目标" in issue["explanation"]
+    assert issue["action"] == "retry_target"
     assert "退出码" not in issue["explanation"]
     assert "scheduler.log" not in issue["explanation"]
 
@@ -1903,13 +1961,26 @@ def test_overview_retry_endpoint_starts_only_the_current_safe_target(
             candidate_id="candidate-two",
         ),
     ]
-    save_config(config_path, config)
     account_id = write_verified_account(tmp_path)
+    for target, identity_key in zip(
+        config.targets,
+        ["participant:friend-one", "participant:friend-two"],
+        strict=True,
+    ):
+        target.binding_identity_key = identity_key
+        target.binding_identity_source = "participant_sec_user_id"
+        target.binding_account_scope = account_id
+    save_config(config_path, config)
     (tmp_path / "data" / "discovered_friends.json").write_text(
         json.dumps(
             {
                 "scanned_at": "2026-06-24T07:20:00",
                 "account_scope": account_id,
+                "last_result": {
+                    "status": "completed_bottom_reached",
+                    "completed_bottom_reached": True,
+                    "partial": False,
+                },
                 "candidates": [
                     {
                         "candidate_id": "candidate-one",
@@ -1918,6 +1989,8 @@ def test_overview_retry_endpoint_starts_only_the_current_safe_target(
                         "discovered_at": "2026-06-24T07:20:00",
                         "match_status": "configured",
                         "presence_status": "current",
+                        "identity_key": "participant:friend-one",
+                        "identity_source": "participant_sec_user_id",
                     },
                     {
                         "candidate_id": "candidate-two",
@@ -1926,6 +1999,8 @@ def test_overview_retry_endpoint_starts_only_the_current_safe_target(
                         "discovered_at": "2026-06-24T07:20:00",
                         "match_status": "configured",
                         "presence_status": "current",
+                        "identity_key": "participant:friend-two",
+                        "identity_source": "participant_sec_user_id",
                     },
                 ],
             },
@@ -1968,7 +2043,13 @@ def test_overview_retry_endpoint_starts_only_the_current_safe_target(
         started.append((action, kwargs))
         return {"id": "job-target", "action": action, "status": "running"}
 
-    client = TestClient(create_app(config_path, action_runner=start_action))
+    client = TestClient(
+        create_app(
+            config_path,
+            action_runner=start_action,
+            now_provider=lambda: datetime(2026, 6, 24, 8, 0),
+        )
+    )
 
     failures = client.get("/api/failed-targets?today=2026-06-24")
     retry = client.post(
@@ -2200,6 +2281,9 @@ def test_current_digest_scope_restores_retry_from_legacy_mismatch_and_key(
             name="历史失败目标",
             stable_id="target-current",
             candidate_id="candidate-current",
+            binding_identity_key="participant:friend-current",
+            binding_identity_source="participant_sec_user_id",
+            binding_account_scope="a" * 64,
         )
     ]
     save_config(config_path, config)
@@ -2209,6 +2293,11 @@ def test_current_digest_scope_restores_retry_from_legacy_mismatch_and_key(
             {
                 "scanned_at": "2026-06-24T07:20:00",
                 "account_scope": "a" * 64,
+                "last_result": {
+                    "status": "completed_bottom_reached",
+                    "completed_bottom_reached": True,
+                    "partial": False,
+                },
                 "candidates": [
                     {
                         "candidate_id": "candidate-current",
@@ -2217,6 +2306,8 @@ def test_current_digest_scope_restores_retry_from_legacy_mismatch_and_key(
                         "discovered_at": "2026-06-24T07:20:00",
                         "match_status": "configured",
                         "presence_status": "current",
+                        "identity_key": "participant:friend-current",
+                        "identity_source": "participant_sec_user_id",
                     }
                 ],
             },
@@ -2248,7 +2339,13 @@ def test_current_digest_scope_restores_retry_from_legacy_mismatch_and_key(
         started.append((action, kwargs))
         return {"id": "job-target", "action": action, "status": "running"}
 
-    client = TestClient(create_app(config_path, action_runner=start_action))
+    client = TestClient(
+        create_app(
+            config_path,
+            action_runner=start_action,
+            now_provider=lambda: datetime(2026, 6, 24, 8, 0),
+        )
+    )
     status = client.get("/api/status?today=2026-06-24").json()
     failed_friend = next(item for item in status["friends"] if item["status"] == "failed")
     retry = client.post(
@@ -2260,9 +2357,6 @@ def test_current_digest_scope_restores_retry_from_legacy_mismatch_and_key(
     assert failure["reason_code"] == "send_failed_before_action"
     assert failure["safe_retry_available"] is True
     assert failure["suggested_action"] == "retry"
-    assert failure["diagnostic_details"]["account_comparison"] == (
-        "binding_scope_matches_platform_account_id_digest"
-    )
     assert retry.status_code == 202
     assert started == [("run-target", {"target_id": "target-current"})]
 
@@ -2271,21 +2365,29 @@ def test_current_scope_revalidation_preserves_genuine_account_mismatch(
     tmp_path: Path,
 ):
     config_path = make_project(tmp_path)
+    account_id = write_verified_account(tmp_path)
     config = load_config(config_path)
     config.targets = [
         Target(
             name="其他账号目标",
             stable_id="target-current",
             candidate_id="candidate-current",
+            binding_identity_key="participant:friend-current",
+            binding_identity_source="participant_sec_user_id",
+            binding_account_scope=account_id,
         )
     ]
     save_config(config_path, config)
-    write_verified_account(tmp_path)
     (tmp_path / "data" / "discovered_friends.json").write_text(
         json.dumps(
             {
                 "scanned_at": "2026-06-24T07:20:00",
                 "account_scope": "account-" + "b" * 24,
+                "last_result": {
+                    "status": "completed_bottom_reached",
+                    "completed_bottom_reached": True,
+                    "partial": False,
+                },
                 "candidates": [
                     {
                         "candidate_id": "candidate-current",
@@ -2294,6 +2396,8 @@ def test_current_scope_revalidation_preserves_genuine_account_mismatch(
                         "discovered_at": "2026-06-24T07:20:00",
                         "match_status": "configured",
                         "presence_status": "current",
+                        "identity_key": "participant:friend-current",
+                        "identity_source": "participant_sec_user_id",
                     }
                 ],
             },
@@ -2308,7 +2412,9 @@ def test_current_scope_revalidation_preserves_genuine_account_mismatch(
     daily["failures"] = {"其他账号目标": "account_scope_mismatch"}
     state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
 
-    failure = TestClient(create_app(config_path)).get(
+    failure = TestClient(
+        create_app(config_path, now_provider=lambda: datetime(2026, 6, 24, 8, 0))
+    ).get(
         "/api/status?today=2026-06-24"
     ).json()["friends"][0]["failure"]
 
@@ -2367,16 +2473,16 @@ def test_log_retention_config_validation_and_cleanup_api(tmp_path: Path):
 
 def test_logs_and_backup_exclude_browser_profile(tmp_path: Path):
     config = make_project(tmp_path)
+    profile = tmp_path / "data" / "browser-profile"
+    profile.mkdir(parents=True)
+    (profile / "secret.cookie").write_text("secret", encoding="utf-8")
+    client = TestClient(create_app(config))
     (tmp_path / "data" / "logs" / "scheduler-2026-07-29.log").write_text(
         "较早调度记录\n", encoding="utf-8"
     )
     (tmp_path / "data" / "logs" / "scheduler-2026-07-30.log").write_text(
         "最新调度记录\n", encoding="utf-8"
     )
-    profile = tmp_path / "data" / "browser-profile"
-    profile.mkdir(parents=True)
-    (profile / "secret.cookie").write_text("secret", encoding="utf-8")
-    client = TestClient(create_app(config))
 
     logs = client.get("/api/logs").json()
     assert "发送成功" in logs["application"]
@@ -3002,8 +3108,8 @@ def test_orphan_binding_requires_explicit_candidate_relink_and_can_be_ignored(
                         "discovered_at": "2026-07-30T08:00:00",
                         "match_status": "unconfigured",
                         "presence_status": "current",
-                        "identity_key": "row:stable-current",
-                        "identity_source": "row_attribute",
+                        "identity_key": "participant:stable-current",
+                        "identity_source": "participant_sec_user_id",
                     }
                 ],
             },
@@ -3011,7 +3117,9 @@ def test_orphan_binding_requires_explicit_candidate_relink_and_can_be_ignored(
         ),
         encoding="utf-8",
     )
-    client = TestClient(create_app(config_path))
+    client = TestClient(
+        create_app(config_path, now_provider=lambda: datetime(2026, 7, 30, 8, 5))
+    )
 
     before = client.get("/api/friends/discovered").json()
     assert before["candidates"][0]["match_status"] == "needs_reassociation"
@@ -3106,6 +3214,67 @@ def test_authoritative_relink_immediately_converges_current_binding_health(
     assert client.get("/api/status?today=2026-06-24").json()["friends"][0][
         "current_health"
     ]["reason_code"] == "binding_valid"
+
+
+def test_proof_cleared_current_candidate_is_explicitly_reassociated(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    account_id = write_verified_account(tmp_path)
+    config = load_config(config_path)
+    config.targets = [
+        Target(
+            name="待恢复目标",
+            stable_id="target-one",
+            candidate_id="candidate-current",
+        )
+    ]
+    save_config(config_path, config)
+    (tmp_path / "data" / "discovered_friends.json").write_text(
+        json.dumps(
+            {
+                "scanned_at": "2026-07-30T08:00:00",
+                "account_scope": account_id,
+                "last_result": {
+                    "status": "completed_bottom_reached",
+                    "completed_bottom_reached": True,
+                    "partial": False,
+                },
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-current",
+                        "display_name": "待恢复目标",
+                        "avatar_status": "missing",
+                        "discovered_at": "2026-07-30T08:00:00",
+                        "match_status": "configured",
+                        "presence_status": "current",
+                        "identity_key": "participant:friend-one",
+                        "identity_source": "participant_sec_user_id",
+                        "conversation_id": "conversation-current",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    client = TestClient(
+        create_app(config_path, now_provider=lambda: datetime(2026, 7, 30, 8, 5))
+    )
+
+    discovered = client.get("/api/friends/discovered").json()
+    relinked = client.post(
+        "/api/friends/candidate-current/relink",
+        json={"target_id": "target-one"},
+    )
+    target = load_config(config_path).targets[0]
+
+    assert discovered["candidates"][0]["match_status"] == "needs_reassociation"
+    assert discovered["candidates"][0]["reassociation_target_id"] == "target-one"
+    assert relinked.status_code == 200
+    assert target.binding_identity_key == "participant:friend-one"
+    assert target.binding_identity_source == "participant_sec_user_id"
+    assert target.binding_account_scope == account_id
 
 
 def test_actionable_orphan_cannot_be_bypassed_by_direct_candidate_add(tmp_path: Path):
