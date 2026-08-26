@@ -5,4 +5,4 @@
 - [文档总览](文档总览.md)
 - [软件工程文档目录](软件工程/01-软件需求规格说明书.md)
 
-AutoDy v1.4.4 是已发布并进入维护状态的 v1.4.x 最终稳定基线。当前维护交接见 [`docs/codex/PROJECT_HANDOFF.md`](codex/PROJECT_HANDOFF.md)，发布摘要见 [`docs/RELEASE_NOTES.md`](RELEASE_NOTES.md)。
+AutoDy v1.5.0 是当前已发布并进入维护状态的稳定基线。当前维护交接见 [`docs/codex/PROJECT_HANDOFF.md`](codex/PROJECT_HANDOFF.md)，发布摘要见 [`docs/RELEASE_NOTES.md`](RELEASE_NOTES.md)。

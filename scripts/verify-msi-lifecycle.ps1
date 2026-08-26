@@ -1,8 +1,8 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = "1.4.4",
+    [string]$Version = "1.5.0",
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$PreviousVersion = "1.4.3",
+    [string]$PreviousVersion = "1.4.4",
     [string]$ArtifactDirectory,
     [string]$PreviousMsiPath,
     [string]$ReportDirectory

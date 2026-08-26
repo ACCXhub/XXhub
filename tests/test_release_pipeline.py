@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import tomllib
 import zipfile
 
 
@@ -11,6 +12,9 @@ RELEASE_COMMON = Path("scripts/release-common.ps1").resolve()
 BOOTSTRAP_SOURCE = Path("scripts/bootstrap-source.ps1").resolve()
 BUILD_MSI = Path("scripts/build-msi.ps1").resolve()
 BUILD_PORTABLE = Path("scripts/build-portable.ps1").resolve()
+SOURCE_VERSION = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))[
+    "project"
+]["version"]
 
 
 def run_powershell(command: str, *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -168,11 +172,12 @@ def test_public_build_plans_use_release_configuration_and_canonical_outputs(
 ):
     monkeypatch.setenv("AUTODY_BUILD_MSI", str(BUILD_MSI))
     monkeypatch.setenv("AUTODY_BUILD_PORTABLE", str(BUILD_PORTABLE))
+    monkeypatch.setenv("AUTODY_TEST_VERSION", SOURCE_VERSION)
     completed = run_powershell(
         r"""
         $ErrorActionPreference = "Stop"
-        $msi = & $env:AUTODY_BUILD_MSI -Version "1.4.3" -PlanOnly | ConvertFrom-Json
-        $portable = & $env:AUTODY_BUILD_PORTABLE -Version "1.4.3" -PlanOnly | ConvertFrom-Json
+        $msi = & $env:AUTODY_BUILD_MSI -Version $env:AUTODY_TEST_VERSION -PlanOnly | ConvertFrom-Json
+        $portable = & $env:AUTODY_BUILD_PORTABLE -Version $env:AUTODY_TEST_VERSION -PlanOnly | ConvertFrom-Json
         [pscustomobject]@{ msi = $msi; portable = $portable } |
           ConvertTo-Json -Depth 6 -Compress
         """,
@@ -191,10 +196,10 @@ def test_public_build_plans_use_release_configuration_and_canonical_outputs(
     ).stdout.strip()
     assert plans["msi"]["source_revision"] == source_revision
     assert plans["msi"]["artifact"].endswith(
-        r"output\release\v1.4.3\AutoDy-1.4.3-x64.msi"
+        f"output\\release\\v{SOURCE_VERSION}\\AutoDy-{SOURCE_VERSION}-x64.msi"
     )
     assert plans["portable"]["artifact"].endswith(
-        r"output\release\v1.4.3\AutoDy-Windows-Portable-1.4.3.zip"
+        f"output\\release\\v{SOURCE_VERSION}\\AutoDy-Windows-Portable-{SOURCE_VERSION}.zip"
     )
     assert plans["msi"]["release_directory"] == plans["portable"][
         "release_directory"
@@ -236,6 +241,30 @@ def test_msi_package_identity_changes_with_revision_without_changing_product_ide
     assert identities["package_a"] != identities["package_b"]
 
 
+def test_msi_builder_rejects_a_version_that_does_not_match_source(monkeypatch):
+    monkeypatch.setenv("AUTODY_BUILD_MSI", str(BUILD_MSI))
+    completed = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(BUILD_MSI),
+            "-Version",
+            "9.9.9",
+            "-PlanOnly",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "does not match source package version" in completed.stderr
+
+
 def test_portable_release_archive_is_byte_reproducible(monkeypatch):
     monkeypatch.setenv("AUTODY_BUILD_PORTABLE", str(BUILD_PORTABLE))
     env = dict(__import__("os").environ)
@@ -247,13 +276,15 @@ def test_portable_release_archive_is_byte_reproducible(monkeypatch):
         "-File",
         str(BUILD_PORTABLE),
         "-Version",
-        "1.4.3",
+        SOURCE_VERSION,
         "-ReuseRuntime",
     ]
 
     first = subprocess.run(command, capture_output=True, env=env, check=False)
     assert first.returncode == 0, first.stderr.decode("utf-8", errors="replace")
-    archive = Path("output/release/v1.4.3/AutoDy-Windows-Portable-1.4.3.zip")
+    archive = Path(
+        f"output/release/v{SOURCE_VERSION}/AutoDy-Windows-Portable-{SOURCE_VERSION}.zip"
+    )
     first_bytes = archive.read_bytes()
     second = subprocess.run(command, capture_output=True, env=env, check=False)
     assert second.returncode == 0, second.stderr.decode("utf-8", errors="replace")
@@ -292,10 +323,12 @@ def test_msi_release_is_byte_reproducible_with_stable_identity(monkeypatch):
         "-File",
         str(BUILD_MSI),
         "-Version",
-        "1.4.3",
+        SOURCE_VERSION,
         "-ReuseRuntime",
     ]
-    archive = Path("output/release/v1.4.3/AutoDy-1.4.3-x64.msi")
+    archive = Path(
+        f"output/release/v{SOURCE_VERSION}/AutoDy-{SOURCE_VERSION}-x64.msi"
+    )
 
     def build_and_inspect() -> dict[str, str]:
         completed = subprocess.run(command, capture_output=True, env=env, check=False)

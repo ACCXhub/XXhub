@@ -2,7 +2,7 @@
   <PropertyGroup>
     <OutputType>Package</OutputType>
     <Platform>x64</Platform>
-    <ProductVersion Condition="'$(ProductVersion)' == ''">1.4.4</ProductVersion>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">1.5.0</ProductVersion>
     <ProductCode Condition="'$(ProductCode)' == ''">*</ProductCode>
     <StageDir Condition="'$(StageDir)' == ''">$(MSBuildProjectDirectory)\stage</StageDir>
     <GeneratedWxs Condition="'$(GeneratedWxs)' == ''">$(MSBuildProjectDirectory)\GeneratedFiles.wxs</GeneratedWxs>

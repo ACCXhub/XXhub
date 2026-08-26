@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = "1.4.4",
+    [string]$Version = "1.5.0",
     [string]$ArtifactDirectory,
     [string]$ReportDirectory
 )
@@ -342,6 +342,7 @@ try {
                 [pscustomobject]@{ Action = 'SetExistingInstallFolder'; Type = '51'; Source = 'INSTALLFOLDER'; Target = '[AUTODY_EXISTING_INSTALLFOLDER]' },
                 [pscustomobject]@{ Action = 'SetDDriveInstallFolder'; Type = '51'; Source = 'INSTALLFOLDER'; Target = 'D:\AutoDy' },
                 [pscustomobject]@{ Action = 'StopExistingAutoDyTray'; Type = '1058'; Source = 'INSTALLFOLDER'; Target = '"[SystemFolder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "[INSTALLFOLDER]scripts\autody-tray.ps1" -StopExisting' },
+                [pscustomobject]@{ Action = 'StopExistingAutoDyForRemove'; Type = '1058'; Source = 'INSTALLFOLDER'; Target = '"[SystemFolder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "[INSTALLFOLDER]scripts\autody-tray.ps1" -StopExisting' },
                 [pscustomobject]@{ Action = 'SetRepairInstalledAutoDyTasksData'; Type = '51'; Source = 'RepairInstalledAutoDyTasks'; Target = '"[INSTALLFOLDER]runtime\python\python.exe" -B -m autody.cli repair-scheduler --config "[AUTODYDATAROOT]config.yaml" --program-root "[INSTALLFOLDER]." --data-root "[AUTODYDATAROOT]." --task-user-id "[AUTODY_INTERACTIVE_USER_SID]"' },
                 [pscustomobject]@{ Action = 'SetRollbackFreshInstallAutoDyTasksData'; Type = '51'; Source = 'RollbackFreshInstallAutoDyTasks'; Target = '"[SystemFolder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "[INSTALLFOLDER]scripts\remove-task.ps1"' },
                 [pscustomobject]@{ Action = 'RollbackFreshInstallAutoDyTasks'; Type = '3393'; Source = 'Wix4UtilCA_X64'; Target = 'WixQuietExec' },

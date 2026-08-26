@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = "1.4.4",
+    [string]$Version = "1.5.0",
     [ValidatePattern('^$|^[0-9a-fA-F]{40}$')]
     [string]$Commit = '',
     [switch]$ReuseRuntime,
@@ -53,6 +53,18 @@ if (Test-Path -LiteralPath (Join-Path $Root '.git')) {
     }
 } elseif ([string]::IsNullOrWhiteSpace($Commit)) {
     throw 'Pass -Commit when building an MSI from a source archive.'
+}
+$sourceMetadata = Get-Content -Raw -LiteralPath (Join-Path $Root 'pyproject.toml')
+$sourceVersionMatch = [regex]::Match(
+    $sourceMetadata,
+    '(?m)^version\s*=\s*"(?<version>\d+\.\d+\.\d+)"\s*$'
+)
+if (-not $sourceVersionMatch.Success) {
+    throw 'Unable to resolve the AutoDy source package version.'
+}
+$sourceVersion = $sourceVersionMatch.Groups['version'].Value
+if ($sourceVersion -ne $Version) {
+    throw "Requested release version $Version does not match source package version $sourceVersion."
 }
 $ProductCode = Get-ReproducibleMsiGuid -Purpose product -Version $Version
 $PackageCode = Get-ReproducibleMsiGuid `
@@ -385,7 +397,7 @@ Invoke-NativeChecked "Build AutoDy wheel" $HostPython @(
     "-m", "pip", "--disable-pip-version-check", "wheel", "--quiet",
     "--no-deps", "--wheel-dir", $wheelRoot, $Root
 )
-$wheels = @(Get-ChildItem -LiteralPath $wheelRoot -Filter "autody-$Version-*.whl" -File)
+$wheels = @(Get-ChildItem -LiteralPath $wheelRoot -Filter "autody-$sourceVersion-*.whl" -File)
 if ($wheels.Count -ne 1) {
     throw "The AutoDy wheel was not produced."
 }

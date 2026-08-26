@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = "1.4.4",
+    [string]$Version = "1.5.0",
     [switch]$ReuseRuntime,
     [switch]$PlanOnly
 )

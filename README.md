@@ -2,7 +2,7 @@
 
 AutoDy 是面向 Windows 的本机 Douyin 私信工作流管理台，用于管理续火目标、文案、计划、运行状态和历史。它以“不能证明安全就停止”为原则：发送前验证稳定会话身份、重复状态和页面条件，并通过全局浏览器锁避免并发冲突。
 
-当前稳定版本为 **v1.4.4**。这是已完成并进入维护状态的 v1.4.x 最终基线；后续通用浏览器工作流研究将在独立项目中继续，不属于 AutoDy 现有功能。
+当前稳定版本为 **v1.5.0**。这是当前已验收产品状态的正式维护版本；后续通用浏览器工作流研究将在独立项目中继续，不属于 AutoDy 现有功能。
 
 ## 主要能力
 
@@ -34,26 +34,22 @@ AutoDy 是面向 Windows 的本机 Douyin 私信工作流管理台，用于管�
 
 普通用户请从 [GitHub Releases](https://github.com/ACCXhub/hlhub/releases) 下载：
 
-- `AutoDy-1.4.4-x64.msi`
-- `AutoDy-1.4.4-x64.msi.sha256`
+- `AutoDy-1.5.0-x64.msi`
+- `AutoDy-1.5.0-x64.msi.sha256`
 
 下载后先校验：
 
 ```powershell
-Get-FileHash -Algorithm SHA256 '.\AutoDy-1.4.4-x64.msi'
+Get-FileHash -Algorithm SHA256 '.\AutoDy-1.5.0-x64.msi'
 ```
 
-v1.4.4 MSI 的 SHA-256 应为：
-
-```text
-bea7a7e7495c0137d33463f504d2999dcef250e7df7766c90eb0dbcb4a1daa10
-```
+结果必须与 Release 中同名 `.sha256` 文件记录的值一致。
 
 新安装默认优先 `D:\AutoDy`；D: 不可用时回退到原交互用户的 `%LocalAppData%\Programs\AutoDy`。程序数据始终位于原交互用户的 `%LocalAppData%\AutoDy`，普通卸载会移除程序、快捷方式和三项 Windows 任务，但默认保留 DataRoot。
 
-1.4.0–1.4.2 为 per-user 安装，1.4.3/1.4.4 为 per-machine 安装。升级旧 per-user 版本时，先从 Windows 设置正常卸载旧程序，再安装 v1.4.4；不要删除 `%LocalAppData%\AutoDy`。
+1.4.0–1.4.2 为 per-user 安装，1.4.3 及后续版本为 per-machine 安装。升级旧 per-user 版本时，先从 Windows 设置正常卸载旧程序，再安装 v1.5.0；不要删除 `%LocalAppData%\AutoDy`。
 
-v1.4.4 是安装器聚焦热修，因此本次 Release 只发布新的 MSI 与 checksum。v1.4.3 Portable 的运行架构和功能未改变；Portable 完整解压后从顶层 `AutoDy.cmd` 启动，程序与数据都保存在解包目录。
+v1.5.0 Release 同时提供 canonical MSI 与 Portable。Portable 完整解压后从顶层 `AutoDy.cmd` 启动，程序与数据都保存在解包目录。
 
 ## 首次启动与登录
 
@@ -101,11 +97,11 @@ AutoDy 的应用服务只监听回环地址。账号、目标、消息、计划�
 - [测试与验收](docs/软件工程/04-测试与验收报告.md)
 - [运维与故障排查](docs/软件工程/05-运维维护与故障排查.md)
 - [隐私与安全](docs/软件工程/06-隐私与安全设计.md)
-- [v1.4.4 Release Notes](docs/RELEASE_NOTES.md)
+- [v1.5.0 Release Notes](docs/RELEASE_NOTES.md)
 - [变更记录](CHANGELOG.md)
 
 ## 维护状态
 
-AutoDy v1.4.x 产品线已完成并进入维护状态。维护范围聚焦于阻断性可靠性、安全和安装问题，不在本仓库继续扩展 AutoDy 2.0 或 BrowserWeave 功能。
+AutoDy v1.5.0 已进入维护状态。维护范围聚焦于阻断性可靠性、安全和安装问题，不在本仓库继续扩展 AutoDy 2.0 或 BrowserWeave 功能。
 
 许可证见 [LICENSE](LICENSE)，安全说明见 [SECURITY.md](SECURITY.md)。

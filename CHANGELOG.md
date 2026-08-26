@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-26
+
 ### Changed
 
 - 好友绑定现在把持久好友身份证明、discovery/cache 候选键和当前会话 locator 明确分离；当前抖音会话行从 React conversation model 读取 `toParticipantSecUserId` 作为好友证明，并把 conversation `id`/`shortId` 仅作为打开会话所需的当前 locator。
@@ -20,6 +22,9 @@
 - 修复当前失败与历史运行确认、通知文件或重复补发面板同时占用“需要处理”，导致健康绑定与今日发送失败的动作含义不一致的问题。
 - 修复唯一显示名匹配可能把旧 Target/弱 candidate 直接升级为权威好友 proof 的问题；自动迁移现在只接受既有权威 identity 或唯一一致的 conversation locator 连续性，名称仅保留为诊断信息。
 - 修复 MSI 将 `MainFeature` 注册为 Advertised、普通维护安装虽返回成功却未实际替换 `D:\AutoDy` payload 的问题；主功能现在禁止按需公告并始终本地安装。
+- Dashboard watchdog 会验证服务身份并自动恢复已确认属于 AutoDy 的异常本机服务；托盘启动、停止与 MSI 卸载路径共享更严格的 lifecycle 所有权检查。
+- 好友管理取消或重新加入续火目标后，Overview 的今日任务、好友状态行与标题计数、本机资源计数会从同一当前目标集合收敛更新。
+- Overview 好友状态表按内容自然展开，不再使用内部纵向滚动条。
 
 ## [1.4.4] - 2026-08-11
 

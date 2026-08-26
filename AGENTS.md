@@ -5,7 +5,7 @@
 - Repository: current checkout root.
 - Remote: `ACCXhub/hlhub`
 - Product: Windows-local AutoDy dashboard.
-- Current published baseline: AutoDy `1.4.4`, Test Center `1.2.0`.
+- Current published baseline: AutoDy `1.5.0`, Test Center `1.2.0`.
 - Read `docs/codex/PROJECT_HANDOFF.md` before editing.
 - Then read only files directly related to the current task.
 

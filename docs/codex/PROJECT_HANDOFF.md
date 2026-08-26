@@ -2,7 +2,7 @@
 
 ## 当前权威状态
 
-AutoDy 当前稳定版本为 v1.4.4，是 v1.4.x 产品线的最终基线，后续只做必要的可靠性、安全和安装维护。本仓库不继续开展 AutoDy 2.0 或 BrowserWeave 功能；相关通用浏览器工作流研究属于独立项目。
+AutoDy 当前稳定版本为 v1.5.0，是已验收 watchdog、服务生命周期、稳定好友绑定、Friends/Overview 一致性和当前生产前端的发布基线。后续只做必要的可靠性、安全和安装维护；本仓库不继续开展 AutoDy 2.0 或 BrowserWeave 功能。
 
 v1.4.4 Scheduler/MSI 热修由两个生产提交组成：
 
@@ -11,7 +11,7 @@ v1.4.4 Scheduler/MSI 热修由两个生产提交组成：
 
 已验证 MSI 来自 `bb511b441b679d65685a1ef871d89da9eba349e1`，文件名为 `AutoDy-1.4.4-x64.msi`，大小 `301,540,220` bytes，SHA-256 为 `bea7a7e7495c0137d33463f504d2999dcef250e7df7766c90eb0dbcb4a1daa10`。后续文档提交不改变该二进制来源。
 
-当前 `[Unreleased]` 本地维护状态已把好友身份与会话定位收敛为两个独立概念。当前抖音 React conversation model 的 `toParticipantSecUserId` 是持久好友身份证明，conversation `id`/`shortId` 是当前会话 locator；discovery/cache 的 `candidate_id` 只负责本地候选关联。`binding_recovery.resolve_stable_binding` 是权威绑定解析入口，负责用账号范围和持久 proof 唯一匹配完整 discovery，再返回当前 locator 给 Runner 与 Chat。旧 `row_attribute` proof 仅保留兼容；没有权威 proof、账号不一致、扫描不完整或匹配不唯一时继续 fail closed。
+v1.5.0 已把好友身份与会话定位收敛为两个独立概念。当前抖音 React conversation model 的 `toParticipantSecUserId` 是持久好友身份证明，conversation `id`/`shortId` 是当前会话 locator；discovery/cache 的 `candidate_id` 只负责本地候选关联。`binding_recovery.resolve_stable_binding` 是权威绑定解析入口，负责用账号范围和持久 proof 唯一匹配完整 discovery，再返回当前 locator 给 Runner 与 Chat。旧 `row_attribute` proof 仅保留兼容；没有权威 proof、账号不一致、扫描不完整或匹配不唯一时继续 fail closed。
 
 当旧绑定因安全迁移被清空 proof、但仍保留当前 `candidate_id` 时，好友管理必须显示“重新关联”，而不能把该行误作健康的已配置状态。`binding_recovery.reassociate_stable_binding` 是唯一的显式重关联写入入口：它只接受完整且当前的 discovery 中唯一、未被其他 Target 占用的权威身份，并通过账号范围和稳定绑定解析后才持久化 identity key/source、账号范围与当前 locator；旧 name/avatar 证据不会借此成为 durable proof。历史失败不被清除，当前 action/health 在重关联后从新的绑定重新计算。
 

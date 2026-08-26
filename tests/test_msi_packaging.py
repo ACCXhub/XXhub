@@ -375,6 +375,7 @@ def test_release_privacy_verifier_covers_all_release_artifacts():
         "CaptureInteractiveLocalAppData",
         "SetAutoDyDataRoot",
         "StopExistingAutoDyTray",
+        "StopExistingAutoDyForRemove",
         "SetRepairInstalledAutoDyTasksData",
         "RepairInstalledAutoDyTasks",
         "SetRemoveInstalledAutoDyTasksData",
@@ -468,20 +469,20 @@ def test_ci_uploads_msi_lifecycle_diagnostics_after_failure():
 def test_release_workflow_publishes_only_versioned_public_assets():
     workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
 
-    assert "AUTODY_RELEASE_VERSION: \"1.4.4\"" in workflow
-    assert "AUTODY_PREVIOUS_VERSION: \"1.4.3\"" in workflow
-    assert "e4fb0502f4935ffa834be6584e886a261d92488a" in workflow
-    assert "6d08b2c613da048c470de93ccffbb87b3e81fd610dc84e049465db28cd904079" in workflow
+    assert "AUTODY_RELEASE_VERSION: \"1.5.0\"" in workflow
+    assert "AUTODY_PREVIOUS_VERSION: \"1.4.4\"" in workflow
+    assert "23fd4811aebbcc66faa10eacd4d09788039cd5e1" in workflow
+    assert "bea7a7e7495c0137d33463f504d2999dcef250e7df7766c90eb0dbcb4a1daa10" in workflow
     assert ".\\scripts\\build-release-from-clean-source.ps1" in workflow
     assert "write-release-manifest.ps1" not in workflow.split(
         "Publish only canonical guarded assets", 1
     )[1]
     for asset in [
-        "output/release/v1.4.4/AutoDy-1.4.4-x64.msi",
-        "output/release/v1.4.4/AutoDy-1.4.4-x64.msi.sha256",
-        "output/release/v1.4.4/AutoDy-Windows-Portable-1.4.4.zip",
-        "output/release/v1.4.4/AutoDy-Windows-Portable-1.4.4.zip.sha256",
-        "output/release/v1.4.4/release-manifest.json",
+        "output/release/v1.5.0/AutoDy-1.5.0-x64.msi",
+        "output/release/v1.5.0/AutoDy-1.5.0-x64.msi.sha256",
+        "output/release/v1.5.0/AutoDy-Windows-Portable-1.5.0.zip",
+        "output/release/v1.5.0/AutoDy-Windows-Portable-1.5.0.zip.sha256",
+        "output/release/v1.5.0/release-manifest.json",
     ]:
         assert asset in workflow
     published_files = workflow.split("files: |", 1)[1].split(
