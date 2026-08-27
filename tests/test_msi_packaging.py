@@ -434,6 +434,15 @@ def test_msi_lifecycle_verifier_preserves_shortcuts_and_data():
         assert token in verifier
 
 
+def test_msi_lifecycle_verifier_accepts_wix_short_and_long_config_filename():
+    verifier = Path("scripts/verify-msi-lifecycle.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+
+    assert "$encodedConfigName.LastIndexOf('|') + 1" in verifier
+    assert '$longConfigName -eq "config.yaml"' in verifier
+
+
 def test_ci_restores_wix_sdk_and_parses_release_scripts():
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
 

@@ -200,9 +200,13 @@ function Assert-MsiUi {
     $files = @(Get-MsiRows $MsiPath `
         'SELECT `File`,`Component_`,`FileName`,`Attributes` FROM `File`' 4)
     $configFiles = @($files | Where-Object {
+        $encodedConfigName = [string]$_.Values[2]
+        $longConfigName = $encodedConfigName.Substring(
+            $encodedConfigName.LastIndexOf('|') + 1
+        )
         $_.Values[0] -eq "InitialConfigFile" -and
         $_.Values[1] -eq "DataRootComponent" -and
-        $_.Values[2] -eq "config.yaml"
+        $longConfigName -eq "config.yaml"
     })
     if ($configFiles.Count -ne 1) {
         throw "MSI does not seed config.yaml in the dedicated data-root component."
