@@ -7,6 +7,8 @@ import subprocess
 import tomllib
 import zipfile
 
+import pytest
+
 
 RELEASE_COMMON = Path("scripts/release-common.ps1").resolve()
 BOOTSTRAP_SOURCE = Path("scripts/bootstrap-source.ps1").resolve()
@@ -265,6 +267,7 @@ def test_msi_builder_rejects_a_version_that_does_not_match_source(monkeypatch):
     assert "does not match source package version" in completed.stderr
 
 
+@pytest.mark.release_build
 def test_portable_release_archive_is_byte_reproducible(monkeypatch):
     monkeypatch.setenv("AUTODY_BUILD_PORTABLE", str(BUILD_PORTABLE))
     env = dict(__import__("os").environ)
@@ -312,6 +315,7 @@ def test_portable_release_archive_is_byte_reproducible(monkeypatch):
             assert release_only not in names
 
 
+@pytest.mark.release_build
 def test_msi_release_is_byte_reproducible_with_stable_identity(monkeypatch):
     monkeypatch.setenv("AUTODY_BUILD_MSI", str(BUILD_MSI))
     env = dict(__import__("os").environ)

@@ -443,46 +443,43 @@ def test_msi_lifecycle_verifier_accepts_wix_short_and_long_config_filename():
     assert '$longConfigName -eq "config.yaml"' in verifier
 
 
-def test_ci_restores_wix_sdk_and_parses_release_scripts():
+def test_ci_runs_only_lightweight_development_validation():
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
 
     assert ".\\scripts\\bootstrap-source.ps1" in workflow
-    assert ".\\scripts\\build-release-from-clean-source.ps1" in workflow
-    assert ".\\scripts\\verify-msi-lifecycle.ps1" in workflow
-    assert ".\\scripts\\verify-release-artifacts.ps1" in workflow
-    assert "actions/upload-artifact@v4" in workflow
-    assert "actions/download-artifact@v4" in workflow
-    assert "clean-windows-acceptance" in workflow
-
-
-def test_ci_uploads_msi_lifecycle_diagnostics_after_failure():
-    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-
-    lifecycle_step = workflow.index(
-        "- name: Run clean-user MSI lifecycle and upgrade acceptance"
-    )
-    diagnostic_step = workflow.index(
-        "- name: Upload MSI lifecycle diagnostics", lifecycle_step
-    )
-    manifest_step = workflow.index("- name: Write guarded release manifest")
-    diagnostic_block = workflow[diagnostic_step:manifest_step]
-
-    assert lifecycle_step < diagnostic_step < manifest_step
-    assert "if: always()" in diagnostic_block
-    assert "uses: actions/upload-artifact@v4" in diagnostic_block
-    assert "msi-lifecycle-report.json" in diagnostic_block
-    assert "msi-lifecycle-report.md" in diagnostic_block
-    assert "if-no-files-found: warn" in diagnostic_block
+    assert 'branches:\n      - "**"' in workflow
+    assert '-m "not release_build"' in workflow
+    assert "npm test" in workflow
+    assert "Parse release PowerShell scripts" in workflow
+    for release_only in [
+        "build-release-from-clean-source.ps1",
+        "verify-msi-lifecycle.ps1",
+        "verify-release-artifacts.ps1",
+        "actions/upload-artifact@v4",
+        "actions/download-artifact@v4",
+        "clean-windows-acceptance",
+        "package:",
+    ]:
+        assert release_only not in workflow
 
 
 def test_release_workflow_publishes_only_versioned_public_assets():
     workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+    release_script = Path("scripts/build-release-from-clean-source.ps1").read_text(
+        encoding="utf-8-sig"
+    )
 
     assert "AUTODY_RELEASE_VERSION: \"1.5.0\"" in workflow
     assert "AUTODY_PREVIOUS_VERSION: \"1.4.4\"" in workflow
     assert "23fd4811aebbcc66faa10eacd4d09788039cd5e1" in workflow
     assert "bea7a7e7495c0137d33463f504d2999dcef250e7df7766c90eb0dbcb4a1daa10" in workflow
+    assert "https://github.com/ACCXhub/XXhub/releases/download/" in workflow
+    assert "ACCXhub/hlhub" not in workflow
     assert ".\\scripts\\build-release-from-clean-source.ps1" in workflow
+    assert "-m release_build" in release_script
+    assert "npm.cmd test" not in release_script
+    assert "verify-release-artifacts.ps1" in release_script
+    assert "verify-msi-lifecycle.ps1" in release_script
     assert "write-release-manifest.ps1" not in workflow.split(
         "Publish only canonical guarded assets", 1
     )[1]

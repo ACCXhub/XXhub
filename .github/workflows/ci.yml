@@ -2,11 +2,9 @@ name: CI
 
 on:
   push:
+    branches:
+      - "**"
   pull_request:
-
-env:
-  AUTODY_RELEASE_VERSION: "1.5.0"
-  AUTODY_PREVIOUS_VERSION: "1.4.4"
 
 jobs:
   test:
@@ -28,7 +26,7 @@ jobs:
         run: .\scripts\bootstrap-source.ps1
       - name: Run Python tests
         shell: powershell
-        run: .\.venv\Scripts\python.exe -m pytest -q
+        run: .\.venv\Scripts\python.exe -m pytest -q -m "not release_build"
       - name: Run frontend tests
         working-directory: frontend
         run: npm test
@@ -43,126 +41,3 @@ jobs:
             ) | Out-Null
             if ($errors.Count) { throw "$($_.Name): $($errors.Message -join '; ')" }
           }
-
-  package:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: test
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-          cache-dependency-path: requirements-dev.lock
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Build canonical Release artifacts from clean source
-        shell: powershell
-        run: |
-          .\scripts\build-release-from-clean-source.ps1 `
-            -Version $env:AUTODY_RELEASE_VERSION `
-            -Commit $env:GITHUB_SHA `
-            -BuildOnly
-      - name: Upload privacy diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: autody-${{ env.AUTODY_RELEASE_VERSION }}-privacy-diagnostics
-          path: |
-            output/release/v${{ env.AUTODY_RELEASE_VERSION }}/release-privacy-report.json
-            output/release/v${{ env.AUTODY_RELEASE_VERSION }}/release-privacy-report.md
-          if-no-files-found: warn
-          retention-days: 7
-      - uses: actions/upload-artifact@v4
-        with:
-          name: autody-${{ env.AUTODY_RELEASE_VERSION }}-canonical
-          path: output/release/v${{ env.AUTODY_RELEASE_VERSION }}/
-          if-no-files-found: error
-          retention-days: 1
-
-  clean-windows-acceptance:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: package
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: actions/download-artifact@v4
-        with:
-          name: autody-${{ env.AUTODY_RELEASE_VERSION }}-canonical
-          path: output/release/v${{ env.AUTODY_RELEASE_VERSION }}
-      - name: Verify transferred hashes and fetch upgrade baseline
-        shell: powershell
-        run: |
-          $release = "output\release\v$env:AUTODY_RELEASE_VERSION"
-          $msi = Join-Path $release "AutoDy-$env:AUTODY_RELEASE_VERSION-x64.msi"
-          $portable = Join-Path $release "AutoDy-Windows-Portable-$env:AUTODY_RELEASE_VERSION.zip"
-          $before = [ordered]@{
-            msi = (Get-FileHash -Algorithm SHA256 $msi).Hash.ToLowerInvariant()
-            portable = (Get-FileHash -Algorithm SHA256 $portable).Hash.ToLowerInvariant()
-          }
-          $baseline = "output\baselines\v$env:AUTODY_PREVIOUS_VERSION"
-          New-Item -ItemType Directory -Force $baseline | Out-Null
-          $previous = Join-Path $baseline "AutoDy-$env:AUTODY_PREVIOUS_VERSION-x64.msi"
-          Invoke-WebRequest `
-            -Uri "https://github.com/ACCXhub/hlhub/releases/download/v$env:AUTODY_PREVIOUS_VERSION/AutoDy-$env:AUTODY_PREVIOUS_VERSION-x64.msi" `
-            -OutFile $previous -UseBasicParsing
-          $previousHash = (Get-FileHash -Algorithm SHA256 $previous).Hash.ToLowerInvariant()
-          if ($previousHash -ne "bea7a7e7495c0137d33463f504d2999dcef250e7df7766c90eb0dbcb4a1daa10") {
-            throw "v1.4.4 baseline hash mismatch"
-          }
-          [ordered]@{
-            schema_version = 1
-            transport = "github-actions-artifact"
-            hashes = $before
-            zone_identifier = [ordered]@{
-              msi = Test-Path -LiteralPath ($msi + ':Zone.Identifier')
-              portable = Test-Path -LiteralPath ($portable + ':Zone.Identifier')
-            }
-          } | ConvertTo-Json -Depth 5 |
-            Set-Content (Join-Path $release 'transfer-report.json') -Encoding utf8
-      - name: Verify MSI, CAB, DLL, portable and privacy
-        shell: powershell
-        run: |
-          $release = "output\release\v$env:AUTODY_RELEASE_VERSION"
-          .\scripts\verify-release-artifacts.ps1 `
-            -Version $env:AUTODY_RELEASE_VERSION `
-            -ArtifactDirectory $release `
-            -ReportDirectory $release
-      - name: Run clean-user MSI lifecycle and upgrade acceptance
-        shell: powershell
-        run: |
-          $release = "output\release\v$env:AUTODY_RELEASE_VERSION"
-          $previous = "output\baselines\v$env:AUTODY_PREVIOUS_VERSION\AutoDy-$env:AUTODY_PREVIOUS_VERSION-x64.msi"
-          .\scripts\verify-msi-lifecycle.ps1 `
-            -Version $env:AUTODY_RELEASE_VERSION `
-            -PreviousVersion $env:AUTODY_PREVIOUS_VERSION `
-            -ArtifactDirectory $release `
-            -PreviousMsiPath $previous `
-            -ReportDirectory $release
-      - name: Upload MSI lifecycle diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: autody-${{ env.AUTODY_RELEASE_VERSION }}-msi-lifecycle-diagnostics
-          path: |
-            output/release/v${{ env.AUTODY_RELEASE_VERSION }}/msi-lifecycle-report.json
-            output/release/v${{ env.AUTODY_RELEASE_VERSION }}/msi-lifecycle-report.md
-          if-no-files-found: warn
-          retention-days: 7
-      - name: Write guarded release manifest
-        shell: powershell
-        run: .\scripts\write-release-manifest.ps1 -Version $env:AUTODY_RELEASE_VERSION -Commit $env:GITHUB_SHA
-      - uses: actions/upload-artifact@v4
-        with:
-          name: autody-${{ env.AUTODY_RELEASE_VERSION }}-accepted
-          path: output/release/v${{ env.AUTODY_RELEASE_VERSION }}/
-          if-no-files-found: error
-          retention-days: 7

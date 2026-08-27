@@ -54,7 +54,7 @@ jobs:
           New-Item -ItemType Directory -Force $baseline | Out-Null
           $previous = Join-Path $baseline "AutoDy-$env:AUTODY_PREVIOUS_VERSION-x64.msi"
           Invoke-WebRequest `
-            -Uri "https://github.com/ACCXhub/hlhub/releases/download/v$env:AUTODY_PREVIOUS_VERSION/AutoDy-$env:AUTODY_PREVIOUS_VERSION-x64.msi" `
+            -Uri "https://github.com/ACCXhub/XXhub/releases/download/v$env:AUTODY_PREVIOUS_VERSION/AutoDy-$env:AUTODY_PREVIOUS_VERSION-x64.msi" `
             -OutFile $previous -UseBasicParsing
           if ((Get-FileHash -Algorithm SHA256 $previous).Hash.ToLowerInvariant() -ne "bea7a7e7495c0137d33463f504d2999dcef250e7df7766c90eb0dbcb4a1daa10") {
             throw "v1.4.4 baseline hash mismatch"

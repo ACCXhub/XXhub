@@ -31,15 +31,8 @@ if (Test-Path -LiteralPath (Join-Path $Root '.git')) {
 if ($LASTEXITCODE -ne 0) { throw 'Source bootstrap failed.' }
 
 $Python = Join-Path $Root '.venv\Scripts\python.exe'
-& $Python -m pytest -q
-if ($LASTEXITCODE -ne 0) { throw 'Python tests failed.' }
-Push-Location (Join-Path $Root 'frontend')
-try {
-    & npm.cmd test
-    if ($LASTEXITCODE -ne 0) { throw 'Frontend tests failed.' }
-} finally {
-    Pop-Location
-}
+& $Python -m pytest -q -m release_build
+if ($LASTEXITCODE -ne 0) { throw 'Release reproducibility tests failed.' }
 
 & (Join-Path $PSScriptRoot 'build-portable.ps1') -Version $Version
 if ($LASTEXITCODE -ne 0) { throw 'Portable build failed.' }

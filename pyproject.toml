@@ -35,3 +35,6 @@ include = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "release_build: builds large release artifacts for formal release validation",
+]
