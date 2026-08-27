@@ -1,83 +1,121 @@
 # AutoDy 项目交接
 
-## 当前权威状态
+## Outcome
 
-AutoDy 当前稳定版本为 v1.5.0，是已验收 watchdog、服务生命周期、稳定好友绑定、Friends/Overview 一致性和当前生产前端的发布基线。后续只做必要的可靠性、安全和安装维护；本仓库不继续开展 AutoDy 2.0 或 BrowserWeave 功能。
+维护现有 AutoDy Windows 本机产品，使其在好友身份、发送安全、服务恢复、Scheduler、安装/升级、DataRoot 和 Release 供应链上保持可验证、可恢复、fail-closed。当前产品功能不从零重构；优先关闭阻断性可靠性/安装/发布问题。
 
-v1.4.4 Scheduler/MSI 热修由两个生产提交组成：
+## Master
 
-- `8aa49eb5e92e3b6e8555f153c3ea70d4d4bf538a`：区分快照成功空结果与读取失败、增加有限验证重试和安全 rollback 清理。
-- `bb511b441b679d65685a1ef871d89da9eba349e1`：安装器内嵌 Python 使用 `-B`，避免 rollback 字节码残留。
+当前代码线为 1.5.0，核心已接受能力包括：
 
-已验证 MSI 来自 `bb511b441b679d65685a1ef871d89da9eba349e1`，文件名为 `AutoDy-1.4.4-x64.msi`，大小 `301,540,220` bytes，SHA-256 为 `bea7a7e7495c0137d33463f504d2999dcef250e7df7766c90eb0dbcb4a1daa10`。后续文档提交不改变该二进制来源。
+- durable friend proof、discovery candidate、conversation locator 明确分层；
+- `binding_recovery.resolve_stable_binding` 是唯一权威运行时解析，`reassociate_stable_binding` 是显式重新关联写入口；
+- Friends 重新关联、取消/重新加入与 Overview executable target set 投影一致；
+- Runner/Chat 保持 stable identity、账号范围、重复保护、确认、全局 browser lock；`uncertain` 不自动重试；
+- 多账号本地 profile/snapshot 隔离；账号写操作与 browser action 互斥；
+- Scheduler 使用原交互用户 Principal、`RunLevel Limited`，Dashboard 常态非提升，写操作走一次性受约束 UAC；
+- 托盘以 service identity + 用户/路径/解释器/进程事实验证服务 ownership，端口冲突安全回退 8766–8799；
+- watchdog 对 verified service 有界恢复：进程退出或约 15–20 秒连续 health failure、graceful first、exact PID 再验证、3 次/10 分钟熔断、manual full exit suppression；
+- MSI/Portable standalone runtime，MSI ProgramRoot/DataRoot 分离，普通卸载默认保留 DataRoot；
+- 普通 CI 与正式 Release validation 已分层。
 
-v1.5.0 已把好友身份与会话定位收敛为两个独立概念。当前抖音 React conversation model 的 `toParticipantSecUserId` 是持久好友身份证明，conversation `id`/`shortId` 是当前会话 locator；discovery/cache 的 `candidate_id` 只负责本地候选关联。`binding_recovery.resolve_stable_binding` 是权威绑定解析入口，负责用账号范围和持久 proof 唯一匹配完整 discovery，再返回当前 locator 给 Runner 与 Chat。旧 `row_attribute` proof 仅保留兼容；没有权威 proof、账号不一致、扫描不完整或匹配不唯一时继续 fail closed。
+## Locked
 
-当旧绑定因安全迁移被清空 proof、但仍保留当前 `candidate_id` 时，好友管理必须显示“重新关联”，而不能把该行误作健康的已配置状态。`binding_recovery.reassociate_stable_binding` 是唯一的显式重关联写入入口：它只接受完整且当前的 discovery 中唯一、未被其他 Target 占用的权威身份，并通过账号范围和稳定绑定解析后才持久化 identity key/source、账号范围与当前 locator；旧 name/avatar 证据不会借此成为 durable proof。历史失败不被清除，当前 action/health 在重关联后从新的绑定重新计算。
+以下边界是当前维护必须保持的安全契约：
 
-当前 Dashboard 的“需要处理”由未解决的当前 FailureDetail 生成：可安全重试时只提供目标级安全补发，绑定问题进入好友管理，账号问题进入登录，`uncertain` 只进入人工查看且不自动重试。好友表分别显示当前绑定与今日发送，健康绑定不再重复显示“绑定有效”；表格按当前行数自然展开，统计卡保持其后的既有间距。
+1. `candidate_id`/conversation locator 不是 durable friend identity；名称/头像不能建立权威 proof。
+2. 自动/显式 binding 恢复只接受完整当前 discovery、唯一权威 identity、匹配 account scope、candidate 未占用。
+3. 部分/失败/取消/陈旧 discovery、登录/账号异常不修改 stable binding。
+4. 历史失败保持历史；binding 恢复不能把旧 `uncertain` 改成可重试。
+5. 只有明确发生在发送动作前的失败可自动 retry；可能已发送/确认不确定必须停止。
+6. 浏览器任务共享全局锁；账号切换不能绕过发送/浏览器互斥。
+7. 不按端口、PID 或进程名终止未知进程；尤其禁止按 `python.exe` 名称批量 kill。
+8. Watchdog 自动恢复只管理服务，不发送、不扫描好友、不修 Scheduler、不修改无关 DataRoot。
+9. Scheduler 始终使用原交互用户/Limited；提升后的管理员环境不得重新推断 DataRoot。
+10. MSI/Repair/Upgrade/Uninstall 不把普通程序维护变成用户数据删除；DataRoot 默认保留。
+11. Git/Release/普通诊断不得包含真实账号、目标、消息、Cookie、browser profile、备份或未经审查的原始日志。
+12. 已发布历史 tag/Release asset 保持不可变；候选版本的部分验证不能冒充完整 Release。
 
-Overview 的今日总数、好友状态行、好友状态标题与本机资源计数都从同一 enabled execution target set 派生；好友管理取消续火或重新启用后，刷新 `/api/status` 即收敛这些投影。好友状态表不再设置固定/最大高度或内部纵向滚动，按当前行数自然展开，统计卡保持其后既有间距。
+## 当前发布事实
 
-普通 Dashboard 启动现在由 `/api/startup-readiness` 驱动，只对已启用续火 Target 执行 targeted refresh。结果写回同一个 `discovered_friends.json` 的 `target_refresh` 证据，不冒充完整扫描或改写完整扫描的 `scanned_at`；权威 proof 唯一匹配时可安全更新当前 candidate/locator。显式“刷新当前账号资料”仍负责完整账号资料和全好友 discovery。Dashboard 与好友管理都从 `resolve_stable_binding` 返回的当前 candidate 读取显示名称和本地头像。
+- 已确认公开稳定 Release：**v1.4.4**。
+- v1.4.4 MSI：`AutoDy-1.4.4-x64.msi`，`301,540,220` bytes，SHA-256 `bea7a7e7495c0137d33463f504d2999dcef250e7df7766c90eb0dbcb4a1daa10`。
+- 当前源码元数据版本：`1.5.0`。
+- `v1.5.0` tag 已存在，当前候选 release source 为 `4cf2620805f37e4c9fe8f221806b88c70f592ea8`。
+- 正式 Release run `33039551649`：immutable identity、v1.4.4 baseline、2 个 `release_build` reproducibility tests、Portable/MSI build、privacy/package verification 通过；`verify-msi-lifecycle.ps1` 失败；publish/public asset verify 被跳过。
+- 因此 **v1.5.0 尚未正式发布**。不要把 README/文档中的源码版本、tag 或 CI 候选 MSI当作公开稳定资产。
 
-旧 Target 迁移不得用唯一显示名建立权威 proof。允许的自动连续性只有同账号下已有权威 identity，或旧 candidate 与当前 candidate 唯一相同的 conversation locator；否则保留 Target 但清空新 proof、设置 revalidation guard，并要求在好友管理中显式重新关联。当前本机 10 个 legacy Target 因找不到独立于名称的连续性证据，已仅回退 `binding_identity_key`、`binding_identity_source`、`binding_account_scope`，其他用户配置保持不变。
+## 当前 Delta
 
-targeted refresh 不等待完整 discovery 的初始虚拟列表稳定窗口，并只在目标头像缓存缺失或超过 7 天时重新抓取；仍会在列表底部等待真实 lazy-load 增长。本机隔离剖析以 9 个配置目标、19 行为样本，完整浏览器启动、账号校验、目标刷新和关闭由约 11.1 秒降至约 6.5 秒，其中约 4.3 秒为真实聊天页启动/加载。
+发布阻断只剩 MSI lifecycle acceptance 的具体失败需要定位：
 
-当前默认文案包由 `AppConfig.default_message_pack` 的稳定 ID `daily-greeting` 表示，单 Target 的显式 pack 选择仍优先；只读预览不会为缺失 catalog 创建文件或锁。新配置及缺失旧字段的好友间最小/最大延迟默认均为 0 秒，已有显式用户值继续保留。
+1. 先取得或复现 `msi-lifecycle-report.json/md`；
+2. 读取具体 `stages` 和 `failure`；
+3. 判断是 verifier 对 MSI/WiX 事实的陈旧断言，还是 installer 真缺陷；
+4. 只修改对应 canonical owner；
+5. 只跑能证明该根因的 focused lifecycle validation；
+6. 产生最终 release source 后，再决定未成功发布的 `v1.5.0` tag/Release 的正确收口方式，并只执行一次 formal Release；
+7. Release 全绿后再把公开文档状态从“候选”切换到“已发布”。
 
-当前存储/映射所有权如下：
+不要因为 runner 已构建出 MSI 就绕过 lifecycle 后仍宣称完整验收。
 
-| 持久对象 | 稳定键 | 引用关系 | 运行期/当前数据与更新者 |
-| --- | --- | --- | --- |
-| Target | `stable_id` | `candidate_id` 仅关联当前缓存；binding 三字段引用权威好友 proof | 配置/API 显式管理 |
-| 好友 binding proof | `binding_account_scope + binding_identity_source + binding_identity_key` | 归属于一个 Target | 显式关联或有 locator/identity 连续性的 discovery 更新 |
-| 好友缓存项 | `candidate_id` | 反向标记 `configured_target_id` 仅供当前缓存展示 | discovery/targeted refresh 更新名称、头像和当前性 |
-| Conversation locator | 当前 candidate 的 `conversation_id` | resolver 由 proof 找到 candidate 后返回 | 每次 discovery/targeted refresh 更新，不作为永久好友 proof |
-| Failure/history | Target `stable_id` | 关联当日状态和运行记录 | Runner/失败存储更新；显示名不参与 join |
-| 默认文案包 | pack `id` | `default_message_pack` 或 Target 显式 `message_pack` | 文案包 catalog/API 更新，内容不复制进配置 |
+## CI/Release 结构
 
-WiX `MainFeature` 禁止 Advertise，普通安装、升级和修复必须把主 payload 注册为 Local 并实际更新 ProgramRoot；不得把 `ADDLOCAL=MainFeature` 作为正式安装依赖。最终安装验收仍需同时证明 DataRoot 保留、三项 Scheduler 契约和桌面入口到当前安装 payload 的身份链。
+普通 push/PR：
 
-文案库的 TXT/CSV/JSON 本地预览与合并、文案包的 TXT 本地导入仍复用现有 `MessagePackService` 和对应 API/UI，消息内容不通过新增远程上传系统。日常安装仍以 MSI 维护的 `D:\AutoDy` ProgramRoot 与原交互用户 `%LocalAppData%\AutoDy` DataRoot 为准；本地维护构建只能在验证源码服务后通过既有 MSI 路径替换程序资源，不能覆盖 DataRoot 或改变 Scheduler 的 Limited Principal/roots 语义。
+- 常规 Python tests（当前 selection 基线 529）；
+- frontend tests；
+- PowerShell parsing。
 
-## 仓库结构
+正式 Release：
 
-- `src/autody`：FastAPI、本地配置、状态、历史、Scheduler、浏览器安全和模块。
-- `frontend`：React/Vite Dashboard。
-- `scripts`：bootstrap、托盘、Scheduler、构建与验证。
-- `packaging/wix`：WiX MSI 定义。
-- `tests`：领域、API、Windows 脚本、安装器和发布契约测试。
-- `docs/软件工程`：当前中文工程文档。
-- `docs/archive`：完成版本的历史计划、设计和发布说明。
+- 2 个 `release_build` 大型 reproducibility tests；
+- clean-source Portable/MSI；
+- privacy/package verifier；
+- MSI lifecycle；
+- guarded manifest；
+- publish；
+- public assets re-download/hash/MSI/privacy verify。
 
-`output`、`data`、`.venv`、`node_modules`、日志、缓存、模块注册表和浏览器资料属于运行/构建边界，不得提交，也不得在不明确内容与路径时删除。
+Tag push 不再重复触发 ordinary CI。不要用交互代理持续轮询 GitHub Actions；远端任务启动后等待完成，再一次读取结果。
 
-## v1.4.4 热修语义
+## 数据/模块 owner 摘要
 
-`windows_task_rows()` 只有在 Scheduler 查询成功且无匹配任务时才返回空列表。超时、PowerShell/Task Scheduler 错误和无效 JSON 会产生明确的快照读取错误。Scheduler repair 对注册后瞬时读取失败执行有限重试；一旦取得成功快照，真实缺失或漂移仍会失败。
+| 责任 | canonical owner |
+| --- | --- |
+| AppConfig / Target | `src/autody/config.py` |
+| 当前好友 discovery | `friend_discovery.py` |
+| stable binding/reassociation | `binding_recovery.py` |
+| 当前账号/认证 revalidation | `account_profile.py` |
+| 多账号 snapshot/activation | `account_profiles.py` |
+| 发送状态机 | `runner.py` + `chat.py` |
+| 只读 preflight | `preflight.py` |
+| state/history/retry/failure | `state.py`、`history.py`、`retry_state.py`、`failures.py` |
+| Scheduler | `scheduler.py` + existing task PowerShell scripts |
+| 本地 API | `web_api.py` |
+| Dashboard | `frontend/src/` |
+| Tray/watchdog | `scripts/` 的现有 canonical scripts |
+| MSI | `packaging/wix/` + build/lifecycle scripts |
+| Release | `.github/workflows/release.yml` + build/verify scripts |
 
-fresh install 失败时，MSI rollback 只移除本次安装创建的三项 AutoDy 任务。Repair 与同安装范围升级不执行该 fresh-install 清理，不会盲目删除已有任务。原交互用户 SID、ProgramRoot、DataRoot 和 Limited Principal 继续显式跨越提升边界；Scheduler 仍是自动运行权威。
+完整字段见 `docs/软件工程/07-数据字典与数据存储设计.md`；API 见 06；需求—测试追踪见 08/09。
 
-## 长期产品边界
+## 文档 owner
 
-- MSI 程序目录与原交互用户 `%LocalAppData%\AutoDy` DataRoot 分离；普通卸载保留 DataRoot。
-- Portable 程序与数据位于解包目录，启动不依赖系统 Python、Node/npm 或在线恢复依赖。
-- 计划任务始终使用原交互用户 Principal 和 `RunLevel Limited`。
-- Dashboard 保持非提升；Scheduler 写操作只使用一次性受约束 UAC 子进程。
-- 发送前必须保留稳定身份、重复保护、确认和全局浏览器锁；`uncertain` 不自动重试。
-- 不按端口或进程名结束未知进程，不读取或导出真实账号、消息、Cookie、profile、日志或备份。
+当前完整软件工程文档入口：`docs/软件工程/00-文档总览.md`。正文按 00–13 管理：可行性、计划、需求、概要、详细设计、接口、数据字典、测试计划、测试报告、安装用户、运维、安全、项目总结。
+
+`docs/文档总览.md` 和 `docs/AUTODY_ENGINEERING_MANUAL.md` 只保留兼容入口；不要再形成第二套长文。`docs/archive` 只保存历史。
 
 ## 接手顺序
 
-1. 运行 `git status --short`、`git log -8 --oneline --decorate` 和 `git remote -v`，保留用户现有工作。
-2. 读取 `AGENTS.md`、[文档总览](../文档总览.md)和与任务直接相关的文件。
-3. 涉及本机服务时，先验证 service identity、用户、ProgramRoot、DataRoot 和解释器；端口或 PID 本身不是归属证明。
-4. 涉及真实浏览器时优先夹具或只读路径，绝不触碰真实消息编辑器。
-5. 按改动范围选择 focused tests；发布变更再执行对应发行和隐私门禁。
-6. 提交前审阅差异并运行 `git diff --check`；不得 force-push、移动既有标签或替换历史 Release 资产。
+1. 查看当前 `main`、工作树和 remote，先保留用户未提交工作。
+2. 读取 `AGENTS.md`、`docs/软件工程/00-文档总览.md`、本文件以及与任务直接相关的 03/05/06/07/08/09/12。
+3. 若任务是 v1.5.0 Release blocker，直接从 lifecycle report/失败 stage 开始，不重复已经通过的全部构建来猜问题。
+4. 涉及本机服务时先验证 service identity、用户、ProgramRoot、DataRoot、解释器和 exact PID ownership。
+5. 涉及真实浏览器时优先 fixture/read-only，验证不执行真实发送。
+6. 按风险做 focused validation；正式 Release 才执行重型 release gate。
+7. 修改当前 canonical owner，Git 保存历史；不创建 `final/fixed/latest` 副本。
 
-## 文档维护
+## Deliverables
 
-公开用法写入 README，当前版本差异写入 CHANGELOG/RELEASE_NOTES，当前工程事实写入六份软件工程文档。完成后的设计与计划移入 `docs/archive`，不在根目录保留一次性工作台文件。不要复制本文件形成第二份当前交接；此路径是代理维护状态的唯一权威。
+当前待交付只有：关闭 lifecycle blocker → 最终 v1.5.0 release source/tag → GitHub Release canonical assets/hash/manifest → public asset reverify → 文档正式发布状态切换。

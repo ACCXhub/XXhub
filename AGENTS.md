@@ -3,11 +3,11 @@
 ## Project
 
 - Repository: current checkout root.
-- Remote: `ACCXhub/hlhub`
+- Remote: `ACCXhub/XXhub`.
 - Product: Windows-local AutoDy dashboard.
-- Current published baseline: AutoDy `1.5.0`, Test Center `1.2.0`.
-- Read `docs/codex/PROJECT_HANDOFF.md` before editing.
-- Then read only files directly related to the current task.
+- Confirmed public stable Release: AutoDy `v1.4.4`.
+- Current source version line: `1.5.0`; the `v1.5.0` formal Release is still blocked by MSI lifecycle acceptance until GitHub Release assets are successfully published and reverified.
+- Read `docs/软件工程/00-文档总览.md` and `docs/codex/PROJECT_HANDOFF.md` before editing, then only files directly related to the task.
 
 ## Start Every Session
 
@@ -19,87 +19,69 @@ git remote -v
 
 - Preserve uncommitted user work.
 - Do not reset, clean, stash, or overwrite unrelated changes.
-- Confirm the process on `127.0.0.1:8765` belongs to this repository before restarting it.
-- Use the project `.venv`; do not silently use global Python.
-- Do not terminate unrelated Python, Chromium, Node.js, or browser processes.
+- Confirm a local listener belongs to this AutoDy installation before restarting/stopping it; a port or PID alone is not ownership proof.
+- Use the project `.venv` for source development; do not silently use global Python.
+- Do not terminate unrelated Python, Chromium, Node.js, browser, or PowerShell processes.
 
 ## Safety
 
 - Normal development, automated tests, preflight, and navigation checks must never type, prepare, paste, simulate, or send content in a real Douyin composer; use fake pages, mocks, fixtures, or read-only checks.
-- The only exception is one user-initiated Test Center controlled composer dry run explicitly requested for a user-selected target. It is allowed only after the browser lock is held, navigation-only acceptance has passed, the selected and visible stable conversation IDs match, display names are consistent, and the composer is proved empty with no attachment.
-- That controlled dry run may type only an in-memory temporary test value, must never press Enter, click a send control, call the send pipeline, or create a send attempt, and must clear exactly its own unchanged value and verify the composer is empty before reporting success.
-- The temporary value must never be persisted, logged, printed, returned by an API response, included in status/history, or captured in a screenshot. The exception is never automatic and must not retry.
-- Any identity mismatch must stop before the composer is focused or inspected. Existing drafts, attachments, changed text, ambiguous cleanup, or uncertain state must be preserved and stop the run.
-- Never send a real Douyin message.
+- The only existing Test Center controlled composer dry-run boundary remains user-initiated, browser-lock protected, stable-conversation verified, empty-composer/no-attachment only; it never presses Enter, clicks send, calls the send pipeline, persists the temporary value, or retries.
+- Any identity mismatch, existing draft/attachment, changed text, ambiguous cleanup, or uncertain state stops the run.
+- Never send a real Douyin message during development/validation.
 - Never retry when a send action may have occurred or the result is uncertain.
-- Preserve identity checks, duplicate protection, confirmation, and the global browser lock.
-- Core send safety must remain functional when Test Center is absent.
+- Preserve stable identity/account-scope checks, duplicate protection, confirmation, and the global browser lock.
+- Core send safety must work when Test Center is absent.
 - Never expose real accounts, friends, handles, avatars, messages, cookies, tokens, profiles, logs, or backups.
 
-## Data Boundaries
+## Data and Identity Boundaries
 
 - Core runtime data stays outside version-controlled application files.
-- Test Center runtime data belongs only under `data/modules/autody-test-center`.
-- Test Center uninstall must preserve core targets, messages, histories, browser data, schedules, backups, and config.
-- Do not store module settings or overrides in `config.yaml` or normal target records.
+- Durable friend identity is authoritative binding proof + account scope; `candidate_id`, conversation locator, display name, or avatar are not substitutes.
+- Partial/failed/cancelled/stale discovery must not rewrite stable binding.
+- Test Center runtime data belongs only under `data/modules/autody-test-center`; uninstall must preserve core targets/messages/history/browser data/schedules/backups/config.
 - Validate the exact expected path before recursive deletion.
-- Never delete friend cache after an incomplete, failed, cancelled, timed-out, or ambiguous scan.
+- ProgramRoot and DataRoot are separate under MSI; ordinary uninstall preserves DataRoot.
 
 ## UI
 
-- Normal Dashboard and Friends pages must not contain manual preflight or Test Center controls.
-- Test Center is an optional Settings child page, not a primary sidebar item.
-- When uninstalled, it must not mount an iframe, load assets, poll APIs, or expose a working route.
+- Normal Dashboard/Friends pages do not duplicate Test Center controls.
+- Test Center remains an optional Settings child page.
 - Match existing typography, spacing, icons, controls, and page headers.
-- Verify UI changes in the live production build at `127.0.0.1:8765`.
-- Rebuild frontend assets and restart only the confirmed AutoDy service.
-- Inspect console errors, requests, dimensions, dialogs, scrolling, and common desktop widths.
+- Product UI changes require rendered verification in the confirmed production service; inspect console/requests/layout relevant to the Delta.
 
 ## Implementation
 
 - Reproduce and identify the root cause before broad refactoring.
-- Prefer focused changes; do not redesign unrelated areas.
+- Modify the canonical owner in place; do not create parallel `new/final/fixed/latest` implementations.
+- Prefer focused changes and existing module contracts; do not redesign unrelated areas.
 - Do not create unnecessary abstractions, fixtures, Markdown files, packages, or release assets.
-- Do not leave placeholder controls or buttons that do not affect real state.
-- Keep module compatibility consistent across manifest, backend, frontend, bundled ZIP, and registry.
 - Preserve PowerShell 5.1 compatibility and ASCII-safe `.cmd` wrappers.
-- Preserve valid `.venv` reuse and visible launcher failures.
-- Source install may rebuild the frontend; portable install must not require Node.js.
+- Source install may rebuild frontend assets; Portable must not require Node.js.
 
 ## Verification
 
-```powershell
-.\.venv\Scripts\python.exe -m autody.cli doctor
-.\.venv\Scripts\pytest.exe -q
-cd frontend
-npm test
-npm run build
-cd ..
-.\scripts\build-portable.ps1
-```
-
-- Run focused tests first and full suites before release.
-- Recheck PowerShell parsing when installer, launcher, or packaging scripts change.
-- Recheck privacy scans when release contents change.
-- UI changes require fresh-browser acceptance.
-- Do not claim success without command output or live-page evidence.
+- Run focused validation first, chosen by the actual Delta/risk.
+- Ordinary CI owns normal Python/frontend/PowerShell regression.
+- Large `release_build` reproducibility tests, MSI/Portable build, privacy/package, lifecycle and public-asset verification belong to the formal Release workflow.
+- Do not run the full Release gate for unrelated development or documentation changes.
+- UI changes require rendered acceptance; installer/script changes require their focused PowerShell/WiX checks.
+- Do not claim success without actual evidence.
 
 ## Git and Release
 
-- Never move, delete, or force-update a published tag.
 - Never force-push.
-- Wait for main CI before creating a new release tag.
-- Use a new version when a tag or release already exists.
-- Keep commits focused and run `git diff --check`.
-- Do not commit runtime data, `.venv`, `node_modules`, logs, caches, module registry, or private screenshots.
-- Do not publish duplicate copies of the same module unless explicitly required.
-- Leave the working tree clean after a completed release task.
-- After feature work is committed, pushed, merged when applicable, and no longer needs isolation, remove its obsolete worktree with Git, prune worktree metadata, and delete its obsolete dependency, build, test-cache, and packaging staging artifacts; retain current source, active environments, necessary release artifacts, and the installed/user-data copies.
-- Do not let finished Codex worktrees, duplicated `node_modules`, browser/runtime bundles, package staging directories, or test/build caches accumulate indefinitely.
+- Published tags/assets are immutable history. A tag whose Release has not successfully completed is a release-management decision; do not move it as an unrelated side effect.
+- Keep commits focused and run `git diff --check` where applicable.
+- Do not commit runtime data, `.venv`, `node_modules`, logs, caches, module registry, private screenshots, or `output/work` staging.
+- Release state is not inferred from source version or local artifacts; it requires the formal GitHub Release workflow and public asset verification to succeed.
+- Once remote Actions are started, do not burn an interactive session polling repeatedly; return after completion and inspect the result once.
+- Remove superseded worktrees/staging/caches when their task no longer needs them; Git/Release preserve history.
 
 ## Documentation
 
-- Keep this file limited to durable rules.
-- Keep current state in `docs/codex/PROJECT_HANDOFF.md`.
-- Keep usage in `README.md` and history in `CHANGELOG.md`.
-- Prefer one substantial engineering manual over many one-paragraph documents.
+- `docs/软件工程/00-文档总览.md` is the canonical documentation map; 01–13 cover feasibility, plan, requirements, architecture, detailed design, interfaces, data dictionary, test plan/report, user/install, operations, security and project summary.
+- Keep current agent state in `docs/codex/PROJECT_HANDOFF.md`, public usage in `README.md`, version history in `CHANGELOG.md`, and release body in `docs/RELEASE_NOTES.md`.
+- `docs/文档总览.md` and `docs/AUTODY_ENGINEERING_MANUAL.md` are compatibility pointers, not second copies of engineering content.
+- Add a new document only when it has a distinct stable responsibility; otherwise update the existing canonical document.
+- Documentation must reflect actual release/test state and must not contain real private runtime data.
