@@ -13,7 +13,7 @@ $Output = Join-Path $Root "output"
 $ReleaseDirectory = Get-CanonicalReleaseDirectory -Root $Root -Version $Version
 $Work = Join-Path $Output "work\portable-v$Version"
 $Stage = Join-Path $Work "AutoDy-Windows"
-$SharedRuntimeStage = Join-Path $Output "work\msi-stage-v$Version\AutoDy"
+$SharedRuntimeStage = Join-Path $Output "work\msi-stage\AutoDy"
 $ArchiveName = "AutoDy-Windows-Portable-$Version.zip"
 $ChecksumName = "$ArchiveName.sha256"
 $Archive = Join-Path $ReleaseDirectory $ArchiveName
@@ -30,7 +30,8 @@ if ($PlanOnly) {
 }
 
 New-Item -ItemType Directory -Force -Path $ReleaseDirectory | Out-Null
-New-Item -ItemType Directory -Force -Path $Work | Out-Null
+Clear-SupersededReleaseWorkDirectories -Root $Root -Version $Version
+Reset-ReleaseWorkDirectory -Root $Root -Path $Work | Out-Null
 
 Get-ChildItem -LiteralPath (Join-Path $Root "scripts") -Filter *.ps1 | ForEach-Object {
     $tokens = $null
@@ -50,7 +51,6 @@ if (-not (Test-Path -LiteralPath $SharedRuntimeStage -PathType Container)) {
     throw "Standalone runtime staging did not produce the expected directory."
 }
 
-if (Test-Path -LiteralPath $Stage) { Remove-Item -LiteralPath $Stage -Recurse -Force }
 if (Test-Path -LiteralPath $Archive) { Remove-Item -LiteralPath $Archive -Force }
 if (Test-Path -LiteralPath $Checksum) { Remove-Item -LiteralPath $Checksum -Force }
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
@@ -106,5 +106,6 @@ $hash = Get-ReleaseFileSha256 -Path $Archive
 "$hash  $ArchiveName" | Set-Content -Encoding ascii -NoNewline $Checksum
 $null = Assert-CanonicalReleaseArtifact -Root $Root -Version $Version -Path $Archive
 $null = Assert-CanonicalReleaseArtifact -Root $Root -Version $Version -Path $Checksum
+Remove-ReleaseWorkDirectory -Root $Root -Path $Work
 Write-Host "Portable archive: $Archive"
 Write-Host "SHA-256: $Checksum"

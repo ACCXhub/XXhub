@@ -76,6 +76,43 @@ def test_release_path_guard_accepts_only_the_canonical_version_directory(
     assert result["rejected"] is True
 
 
+def test_release_work_pruning_keeps_only_current_canonical_directories(
+    tmp_path: Path, monkeypatch
+):
+    work = tmp_path / "output" / "work"
+    for name in [
+        "msi-stage-v1.4.4",
+        "msi-stage-v1.5.0",
+        "msi-stage",
+        "portable-v1.4.4",
+        "msi-lifecycle-v1.4.4",
+        "ci-lifecycle-33033797667",
+        "portable-v1.5.0",
+        "unrelated-work",
+    ]:
+        (work / name).mkdir(parents=True)
+
+    monkeypatch.setenv("AUTODY_TEST_ROOT", str(tmp_path))
+    monkeypatch.setenv("AUTODY_RELEASE_COMMON", str(RELEASE_COMMON))
+    completed = run_powershell(
+        r"""
+        $ErrorActionPreference = "Stop"
+        . $env:AUTODY_RELEASE_COMMON
+        Clear-SupersededReleaseWorkDirectories -Root $env:AUTODY_TEST_ROOT -Version "1.5.0"
+        Get-ChildItem -LiteralPath (Join-Path $env:AUTODY_TEST_ROOT "output\work") -Directory |
+          Select-Object -ExpandProperty Name | Sort-Object | ConvertTo-Json -Compress
+        """,
+        env=dict(__import__("os").environ),
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == [
+        "msi-stage",
+        "portable-v1.5.0",
+        "unrelated-work",
+    ]
+
+
 def test_release_manifest_hashes_real_canonical_artifacts(tmp_path: Path, monkeypatch):
     canonical = tmp_path / "output" / "release" / "v1.4.3"
     canonical.mkdir(parents=True)
@@ -265,6 +302,23 @@ def test_msi_builder_rejects_a_version_that_does_not_match_source(monkeypatch):
 
     assert completed.returncode != 0
     assert "does not match source package version" in completed.stderr
+
+
+def test_release_build_scripts_reset_or_remove_their_canonical_work_directories():
+    msi_builder = Path("scripts/build-msi.ps1").read_text(encoding="utf-8-sig")
+    portable_builder = Path("scripts/build-portable.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+    lifecycle_verifier = Path("scripts/verify-msi-lifecycle.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+
+    for script in (msi_builder, portable_builder, lifecycle_verifier):
+        assert "Clear-SupersededReleaseWorkDirectories" in script
+    assert "Remove-ReleaseWorkDirectory -Root $Root -Path $Work" in msi_builder
+    assert "Reset-ReleaseWorkDirectory -Root $Root -Path $Work" in portable_builder
+    assert "Remove-ReleaseWorkDirectory -Root $Root -Path $Work" in portable_builder
+    assert "if ($report.passed)" in lifecycle_verifier
 
 
 @pytest.mark.release_build

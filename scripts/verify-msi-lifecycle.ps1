@@ -482,6 +482,7 @@ if (-not (Test-Path -LiteralPath $PreviousMsi -PathType Leaf)) {
     throw "Previous-version MSI baseline is missing."
 }
 
+Clear-SupersededReleaseWorkDirectories -Root $Root -Version $Version
 Reset-OutputDirectory $Work
 $ProductCode = Get-MsiProperty $Msi "ProductCode"
 $PreviousProductCode = Get-MsiProperty $PreviousMsi "ProductCode"
@@ -763,9 +764,8 @@ $markdown = @(
 )
 $markdown -join "`r`n" | Set-Content -LiteralPath $ReportMarkdown -Encoding utf8
 
-$resolvedWork = Assert-OutputChild $Work
-if ($report.passed -and (Test-Path -LiteralPath $resolvedWork)) {
-    Remove-Item -LiteralPath $resolvedWork -Recurse -Force
+if ($report.passed) {
+    Remove-ReleaseWorkDirectory -Root $Root -Path $Work
 }
 
 if (-not $report.passed) {

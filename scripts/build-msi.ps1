@@ -15,7 +15,7 @@ $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 . (Join-Path $PSScriptRoot 'release-common.ps1')
 $Output = Join-Path $Root "output"
 $ReleaseDirectory = Get-CanonicalReleaseDirectory -Root $Root -Version $Version
-$StageRoot = Join-Path $Output "work\msi-stage-v$Version"
+$StageRoot = Join-Path $Output "work\msi-stage"
 $Stage = Join-Path $StageRoot "AutoDy"
 $Work = Join-Path $Output "work\msi-v$Version"
 $WixProject = Join-Path $Root "packaging\wix\AutoDy.Package.wixproj"
@@ -347,6 +347,7 @@ if (-not (Test-Path -LiteralPath $HostPython -PathType Leaf)) {
 }
 New-Item -ItemType Directory -Force -Path $Output | Out-Null
 New-Item -ItemType Directory -Force -Path $ReleaseDirectory | Out-Null
+Clear-SupersededReleaseWorkDirectories -Root $Root -Version $Version
 Reset-OutputDirectory $Work
 
 $runtimeReady = $ReuseRuntime -and
@@ -562,6 +563,7 @@ foreach ($file in $stagedFiles) {
 }
 
 if ($StageOnly) {
+    Remove-ReleaseWorkDirectory -Root $Root -Path $Work
     Write-Host "Standalone runtime stage: $Stage"
     return
 }
@@ -693,6 +695,8 @@ Copy-Item -LiteralPath $BuiltMsi -Destination $Msi -Force
 $null = Assert-CanonicalReleaseArtifact -Root $Root -Version $Version -Path $Msi
 $hash = Get-ReleaseFileSha256 -Path $Msi
 "$hash  AutoDy-$Version-x64.msi" | Set-Content -LiteralPath $Checksum -Encoding ascii -NoNewline
+$null = Assert-CanonicalReleaseArtifact -Root $Root -Version $Version -Path $Checksum
+Remove-ReleaseWorkDirectory -Root $Root -Path $Work
 
 Write-Host "MSI built: AutoDy-$Version-x64.msi"
 Write-Host "MSI checksum: AutoDy-$Version-x64.msi.sha256"

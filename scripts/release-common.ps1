@@ -146,6 +146,86 @@ function Get-CanonicalReleaseDirectory {
     )
 }
 
+function Resolve-ReleaseWorkDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $resolvedRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $workRoot = [IO.Path]::GetFullPath((Join-Path $resolvedRoot 'output\work')).TrimEnd('\')
+    $resolvedPath = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    if (
+        $resolvedPath.Equals($workRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        -not $resolvedPath.StartsWith($workRoot + '\', [StringComparison]::OrdinalIgnoreCase)
+    ) {
+        throw 'Release work cleanup may only modify a direct child of output\\work.'
+    }
+    if (
+        -not [IO.Path]::GetDirectoryName($resolvedPath).TrimEnd('\').Equals(
+            $workRoot, [StringComparison]::OrdinalIgnoreCase
+        )
+    ) {
+        throw 'Release work cleanup may only modify a direct child of output\\work.'
+    }
+    return $resolvedPath
+}
+
+function Remove-ReleaseWorkDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $resolved = Resolve-ReleaseWorkDirectory -Root $Root -Path $Path
+    if (Test-Path -LiteralPath $resolved) {
+        Remove-Item -LiteralPath $resolved -Recurse -Force
+    }
+}
+
+function Reset-ReleaseWorkDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $resolved = Resolve-ReleaseWorkDirectory -Root $Root -Path $Path
+    Remove-ReleaseWorkDirectory -Root $Root -Path $resolved
+    New-Item -ItemType Directory -Force -Path $resolved | Out-Null
+    return $resolved
+}
+
+function Clear-SupersededReleaseWorkDirectories {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^\d+\.\d+\.\d+$')]
+        [string]$Version
+    )
+
+    $resolvedRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $workRoot = Join-Path $resolvedRoot 'output\work'
+    if (-not (Test-Path -LiteralPath $workRoot -PathType Container)) {
+        return
+    }
+    $current = @(
+        'msi-stage',
+        "msi-v$Version",
+        "portable-v$Version",
+        "msi-lifecycle-v$Version"
+    )
+    foreach ($directory in (Get-ChildItem -LiteralPath $workRoot -Force -Directory)) {
+        $isVersionedReleaseWork = $directory.Name -match '^(msi-stage-v|msi-v|portable-v|msi-lifecycle-v)\d+\.\d+\.\d+$'
+        $isCiLifecycleDiagnostic = $directory.Name -match '^ci-lifecycle-\d+$'
+        if (-not $isVersionedReleaseWork -and -not $isCiLifecycleDiagnostic) {
+            continue
+        }
+        if ($isCiLifecycleDiagnostic -or $directory.Name -notin $current) {
+            Remove-ReleaseWorkDirectory -Root $Root -Path $directory.FullName
+        }
+    }
+}
+
 function Assert-CanonicalReleaseArtifact {
     param(
         [Parameter(Mandatory = $true)][string]$Root,
