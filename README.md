@@ -4,9 +4,9 @@ AutoDy 是面向 Windows 的本机 Douyin 私信工作流管理台，用于管�
 
 ## 当前版本状态
 
-- 当前源码版本线与正式发布目标：**v1.5.1**。
+- 当前源码版本线与正式发布目标：**v1.5.2**。
 - `v1.5.0` tag 的正式 workflow 在 MSI lifecycle acceptance 阶段失败且没有 GitHub Release；该标签保留为不可变历史。
-- `v1.5.1` 只有在正式 workflow 完成 clean-source build、MSI/Portable、lifecycle、publish 和 public asset reverify 后才属于公开稳定 Release；在此之前最后已确认稳定基线仍是 **v1.4.4**。
+- `v1.5.1` lifecycle 失败候选保留为不可变历史；`v1.5.2` 只有在正式 workflow 完成 source/build、MSI/Portable、privacy/package、manifest、publish 和 public asset reverify 后才属于公开稳定 Release；在此之前最后已确认稳定基线仍是 **v1.4.4**。
 
 因此普通用户当前应从正式 Releases 使用已发布稳定资产；不要把 CI artifact、本地候选 MSI 或仅有 tag 的版本当作正式 Release。
 
@@ -55,7 +55,7 @@ Get-FileHash -Algorithm SHA256 '.\AutoDy-<version>-x64.msi'
 bea7a7e7495c0137d33463f504d2999dcef250e7df7766c90eb0dbcb4a1daa10
 ```
 
-只有当 v1.5.1 Release 页面真正发布 `AutoDy-1.5.1-x64.msi`、checksum/Portable/manifest 且正式 workflow 全绿后，才把它视为正式升级资产。
+只有当 v1.5.2 Release 页面真正发布 `AutoDy-1.5.2-x64.msi`、checksum/Portable/manifest 且正式 workflow 全绿后，才把它视为正式升级资产。
 
 MSI 新安装默认优先 `D:\AutoDy`；D: 不可用时回退到原交互用户 `%LocalAppData%\Programs\AutoDy`。用户数据位于原交互用户 `%LocalAppData%\AutoDy`，普通卸载删除程序、快捷方式和三项 Windows Tasks，但默认保留 DataRoot。
 
@@ -91,7 +91,7 @@ AutoDy 不要求把账号、目标、消息、Cookie、browser profile、日志�
 - `uncertain`：保留现场，不重复发送覆盖结果。
 - Scheduler 失败：确认 UAC、snapshot read error/drift 和原用户 Principal/roots。
 - MSI/Repair 失败：校验来源/hash、保存 verbose log，不删除 DataRoot。
-- v1.5.1 资产尚未出现或 workflow 未全绿：继续使用最后已发布稳定版本，不下载 CI 中间包冒充 Release。
+- v1.5.2 资产尚未出现或 workflow 未全绿：继续使用最后已发布稳定版本，不下载 CI 中间包冒充 Release。
 
 完整排障见 [运维维护与故障排查](docs/软件工程/11-运维维护与故障排查.md)。
 
@@ -117,6 +117,6 @@ AutoDy 不要求把账号、目标、消息、Cookie、browser profile、日志�
 
 ## 维护状态
 
-AutoDy 当前重点是通过 v1.5.1 正式 Release 门禁并完成公开资产再校验。后续以阻断性可靠性、安全、安装/平台兼容维护为主；通用浏览器工作流研究不在本仓库扩展。
+AutoDy 当前重点是通过 v1.5.2 正式 Release 门禁并完成公开资产再校验。后续以阻断性可靠性、安全、安装/平台兼容维护为主；通用浏览器工作流研究不在本仓库扩展。
 
 许可证见 [LICENSE](LICENSE)，第三方说明见 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES.md)。

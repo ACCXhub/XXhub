@@ -82,12 +82,12 @@ def test_release_work_pruning_keeps_only_current_canonical_directories(
     work = tmp_path / "output" / "work"
     for name in [
         "msi-stage-v1.4.4",
-        "msi-stage-v1.5.1",
+        "msi-stage-v1.5.2",
         "msi-stage",
         "portable-v1.4.4",
         "msi-lifecycle-v1.4.4",
         "ci-lifecycle-33033797667",
-        "portable-v1.5.1",
+        "portable-v1.5.2",
         "unrelated-work",
     ]:
         (work / name).mkdir(parents=True)
@@ -98,7 +98,7 @@ def test_release_work_pruning_keeps_only_current_canonical_directories(
         r"""
         $ErrorActionPreference = "Stop"
         . $env:AUTODY_RELEASE_COMMON
-        Clear-SupersededReleaseWorkDirectories -Root $env:AUTODY_TEST_ROOT -Version "1.5.1"
+        Clear-SupersededReleaseWorkDirectories -Root $env:AUTODY_TEST_ROOT -Version "1.5.2"
         Get-ChildItem -LiteralPath (Join-Path $env:AUTODY_TEST_ROOT "output\work") -Directory |
           Select-Object -ExpandProperty Name | Sort-Object | ConvertTo-Json -Compress
         """,
@@ -108,7 +108,7 @@ def test_release_work_pruning_keeps_only_current_canonical_directories(
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout) == [
         "msi-stage",
-        "portable-v1.5.1",
+        "portable-v1.5.2",
         "unrelated-work",
     ]
 
@@ -319,6 +319,22 @@ def test_release_build_scripts_reset_or_remove_their_canonical_work_directories(
     assert "Reset-ReleaseWorkDirectory -Root $Root -Path $Work" in portable_builder
     assert "Remove-ReleaseWorkDirectory -Root $Root -Path $Work" in portable_builder
     assert "if ($report.passed)" in lifecycle_verifier
+
+
+def test_release_build_keeps_lifecycle_failure_non_blocking_and_records_status():
+    release_builder = Path(
+        "scripts/build-release-from-clean-source.ps1"
+    ).read_text(encoding="utf-8-sig")
+    manifest_writer = Path("scripts/write-release-manifest.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+
+    assert "try {" in release_builder
+    assert "Write-Warning 'MSI lifecycle verification reported a failure" in release_builder
+    assert "throw 'MSI lifecycle acceptance failed.'" not in release_builder
+    assert "Write-Warning 'MSI lifecycle verification did not pass" in manifest_writer
+    assert "MSI lifecycle report is unavailable" in manifest_writer
+    assert "-LifecyclePassed ([bool]$lifecycle.passed)" in manifest_writer
 
 
 @pytest.mark.release_build

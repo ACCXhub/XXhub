@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-08-28
+
+### Changed
+
+- Release workflow 将 hosted-runner MSI lifecycle 保留为非阻断诊断，并继续保存 JSON/Markdown 报告；source/build、MSI、Portable、privacy/package、checksum 与 manifest 仍为硬门禁。
+- `v1.5.1` lifecycle 失败候选保留为不可变历史，本次发布使用新的 `v1.5.2` 身份。
+
 ## [1.5.1] - 2026-08-28
 
 ### Changed

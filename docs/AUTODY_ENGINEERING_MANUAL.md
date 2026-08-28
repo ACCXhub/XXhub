@@ -12,4 +12,4 @@
 - [测试与验收报告](软件工程/09-测试与验收报告.md)
 - [Codex 项目交接](codex/PROJECT_HANDOFF.md)
 
-发布事实：当前源码版本线与发布目标为 1.5.1；`v1.5.0` 标签的正式 Release 在 MSI lifecycle acceptance 阶段失败且未发布资产，保留为历史。`v1.5.1` 只有在正式 workflow 与公开资产再校验全绿后才是稳定 Release。
+发布事实：当前源码版本线与发布目标为 1.5.2；`v1.5.0`、`v1.5.1` 标签的正式 Release 均未完成公开发布，保留为历史。`v1.5.2` 只有在正式 workflow 与公开资产再校验全绿后才是稳定 Release。

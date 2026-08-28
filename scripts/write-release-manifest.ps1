@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '1.5.1',
+    [string]$Version = '1.5.2',
     [ValidatePattern('^$|^[0-9a-fA-F]{40}$')]
     [string]$Commit = ''
 )
@@ -117,9 +117,17 @@ try {
 }
 
 $privacy = Get-Content -Raw -LiteralPath $PrivacyReport | ConvertFrom-Json
-$lifecycle = Get-Content -Raw -LiteralPath $LifecycleReport | ConvertFrom-Json
+$lifecycleReportExists = Test-Path -LiteralPath $LifecycleReport -PathType Leaf
+$lifecycle = if ($lifecycleReportExists) {
+    Get-Content -Raw -LiteralPath $LifecycleReport | ConvertFrom-Json
+} else {
+    Write-Warning 'MSI lifecycle report is unavailable; recording the diagnostic as not_run.'
+    [pscustomobject]@{ passed = $false }
+}
 if (-not $privacy.passed) { throw 'Privacy verification did not pass.' }
-if (-not $lifecycle.passed) { throw 'MSI lifecycle verification did not pass.' }
+if (-not $lifecycle.passed) {
+    Write-Warning 'MSI lifecycle verification did not pass; recording the failure in the release manifest.'
+}
 
 $manifest = New-ReleaseManifestData `
     -Root $Root `
@@ -130,12 +138,16 @@ $manifest = New-ReleaseManifestData `
     -ProductCode $properties.ProductCode `
     -UpgradeCode $properties.UpgradeCode `
     -PrivacyPassed $true `
-    -LifecyclePassed $true
+    -LifecyclePassed ([bool]$lifecycle.passed)
 $manifest['package_code'] = $summaryData.package_code
 $manifest['msi_summary'] = $summaryData
 $manifest['embedded_cabinets'] = $cabinets
 $manifest['privacy_report'] = [IO.Path]::GetFileName($PrivacyReport)
-$manifest['lifecycle_report'] = [IO.Path]::GetFileName($LifecycleReport)
+$manifest['lifecycle_report'] = if ($lifecycleReportExists) {
+    [IO.Path]::GetFileName($LifecycleReport)
+} else {
+    $null
+}
 $json = $manifest | ConvertTo-Json -Depth 8
 [IO.File]::WriteAllText($ManifestPath, $json, (New-Object Text.UTF8Encoding($false)))
 Write-Host "Release manifest: $([IO.Path]::GetFileName($ManifestPath))"

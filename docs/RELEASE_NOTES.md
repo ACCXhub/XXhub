@@ -1,6 +1,6 @@
-# AutoDy v1.5.1
+# AutoDy v1.5.2
 
-AutoDy v1.5.1 发布当前已接受的 Windows 本机产品状态，重点提升 Dashboard 自适应布局与自动恢复、服务生命周期安全、好友绑定稳定性，以及 Friends 与 Overview 的状态一致性。既有发送前身份验证、重复保护、全局浏览器锁和 fail-closed 边界保持不变。
+AutoDy v1.5.2 发布当前已接受的 Windows 本机产品状态，重点提升 Dashboard 自适应布局与自动恢复、服务生命周期安全、好友绑定稳定性，以及 Friends 与 Overview 的状态一致性。既有发送前身份验证、重复保护、全局浏览器锁和 fail-closed 边界保持不变。
 
 ## 主要改进
 
@@ -18,16 +18,16 @@ AutoDy v1.5.1 发布当前已接受的 Windows 本机产品状态，重点提升
 
 目标正式资产：
 
-- `AutoDy-1.5.1-x64.msi`
-- `AutoDy-1.5.1-x64.msi.sha256`
-- `AutoDy-Windows-Portable-1.5.1.zip`
-- `AutoDy-Windows-Portable-1.5.1.zip.sha256`
+- `AutoDy-1.5.2-x64.msi`
+- `AutoDy-1.5.2-x64.msi.sha256`
+- `AutoDy-Windows-Portable-1.5.2.zip`
+- `AutoDy-Windows-Portable-1.5.2.zip.sha256`
 - `release-manifest.json`
 
-**这些文件只有在 GitHub `ACCXhub/XXhub` v1.5.1 Release 页面正式出现并通过 public asset verification 后才属于公开发布件。CI 中间产物和失败 run 生成的 runner 候选不得当作正式下载包。**
+**这些文件只有在 GitHub `ACCXhub/XXhub` v1.5.2 Release 页面正式出现并通过 public asset verification 后才属于公开发布件。CI 中间产物和失败 run 生成的 runner 候选不得当作正式下载包。**
 
 v1.4.3 及后续版本均为 per-machine 安装；1.4.0–1.4.2 是 per-user。跨 scope 迁移应先正常移除旧程序登记/ProgramRoot并保留 `%LocalAppData%\AutoDy`，再安装当前正式 MSI。普通卸载和升级继续保留原交互用户 DataRoot。
 
-`v1.5.0` 标签的正式 workflow 曾在 lifecycle 阶段失败且未创建 Release；该标签不移动、不发布资产。本次 `v1.5.1` 从最后已确认稳定的 v1.4.4 MSI 执行升级生命周期验收。
+`v1.5.0` 和 `v1.5.1` 标签的正式 workflow 均未完成公开发布；这些标签不移动、不发布资产。本次 `v1.5.2` 从最后已确认稳定的 v1.4.4 MSI 执行构建与本地安装验收。
 
 下载后应以同一 Release 的 `.sha256` 和 `release-manifest.json` 核对文件。MSI 当前未声明代码签名，Windows/组织策略可能显示信任提示。

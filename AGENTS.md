@@ -6,7 +6,7 @@
 - Remote: `ACCXhub/XXhub`.
 - Product: Windows-local AutoDy dashboard.
 - Confirmed public stable baseline before the current release pass: AutoDy `v1.4.4`.
-- Current source version line and release target: `1.5.1`. The failed `v1.5.0` tag remains immutable history; treat `v1.5.1` as stable only after its formal workflow publishes and reverifies the GitHub Release assets.
+- Current source version line and release target: `1.5.2`. The failed `v1.5.0` and `v1.5.1` tags remain immutable history; treat `v1.5.2` as stable only after its formal workflow publishes and reverifies the GitHub Release assets.
 - Read `docs/软件工程/00-文档总览.md` and `docs/codex/PROJECT_HANDOFF.md` before editing, then only files directly related to the task.
 
 ## Start Every Session
