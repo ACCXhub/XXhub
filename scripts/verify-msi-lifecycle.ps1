@@ -216,6 +216,8 @@ function Assert-MsiUi {
         'SELECT `Action`,`Type`,`Source`,`Target` FROM `CustomAction`' 4)
     $repairData = @($customActions | Where-Object {
         $_.Values[0] -eq "SetRepairInstalledAutoDyTasksData" -and
+        $_.Values[1] -eq "51" -and
+        $_.Values[2] -eq "RepairInstalledAutoDyTasks" -and
         $_.Values[3] -like '* -B -m autody.cli repair-scheduler*' -and
         $_.Values[3] -like '*--data-root*' -and
         $_.Values[3] -like '*--task-user-id*' -and
@@ -223,29 +225,39 @@ function Assert-MsiUi {
     })
     $repair = @($customActions | Where-Object {
         $_.Values[0] -eq "RepairInstalledAutoDyTasks" -and
-        $_.Values[3] -eq "[CustomActionData]"
+        $_.Values[1] -eq "3073" -and
+        $_.Values[2] -eq "Wix4UtilCA_X64" -and
+        $_.Values[3] -eq "WixQuietExec"
     })
     if ($repairData.Count -ne 1 -or $repair.Count -ne 1) {
         throw "MSI Scheduler repair CustomActionData contract is invalid."
     }
     $rollbackData = @($customActions | Where-Object {
         $_.Values[0] -eq "SetRollbackFreshInstallAutoDyTasksData" -and
+        $_.Values[1] -eq "51" -and
+        $_.Values[2] -eq "RollbackFreshInstallAutoDyTasks" -and
         $_.Values[3] -like '*scripts\remove-task.ps1*'
     })
     $rollback = @($customActions | Where-Object {
         $_.Values[0] -eq "RollbackFreshInstallAutoDyTasks" -and
-        $_.Values[3] -eq "[CustomActionData]"
+        $_.Values[1] -eq "3393" -and
+        $_.Values[2] -eq "Wix4UtilCA_X64" -and
+        $_.Values[3] -eq "WixQuietExec"
     })
     if ($rollbackData.Count -ne 1 -or $rollback.Count -ne 1) {
         throw "MSI Scheduler fresh-install rollback CustomActionData contract is invalid."
     }
     $removeData = @($customActions | Where-Object {
         $_.Values[0] -eq "SetRemoveInstalledAutoDyTasksData" -and
+        $_.Values[1] -eq "51" -and
+        $_.Values[2] -eq "RemoveInstalledAutoDyTasks" -and
         $_.Values[3] -like '*scripts\remove-task.ps1*'
     })
     $remove = @($customActions | Where-Object {
         $_.Values[0] -eq "RemoveInstalledAutoDyTasks" -and
-        $_.Values[3] -eq "[CustomActionData]"
+        $_.Values[1] -eq "3073" -and
+        $_.Values[2] -eq "Wix4UtilCA_X64" -and
+        $_.Values[3] -eq "WixQuietExec"
     })
     if ($removeData.Count -ne 1 -or $remove.Count -ne 1) {
         throw "MSI Scheduler uninstall CustomActionData contract is invalid."

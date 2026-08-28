@@ -443,6 +443,25 @@ def test_msi_lifecycle_verifier_accepts_wix_short_and_long_config_filename():
     assert '$longConfigName -eq "config.yaml"' in verifier
 
 
+def test_msi_lifecycle_verifier_checks_wix_quiet_exec_custom_action_pairs():
+    verifier = Path("scripts/verify-msi-lifecycle.ps1").read_text(
+        encoding="utf-8-sig"
+    )
+
+    assert verifier.count('$_.Values[1] -eq "51"') == 3
+    for action in [
+        "RepairInstalledAutoDyTasks",
+        "RollbackFreshInstallAutoDyTasks",
+        "RemoveInstalledAutoDyTasks",
+    ]:
+        assert f'$_.Values[2] -eq "{action}"' in verifier
+    assert verifier.count('$_.Values[2] -eq "Wix4UtilCA_X64"') == 3
+    assert verifier.count('$_.Values[3] -eq "WixQuietExec"') == 3
+    assert verifier.count('$_.Values[1] -eq "3073"') == 2
+    assert '$_.Values[1] -eq "3393"' in verifier
+    assert '$_.Values[3] -eq "[CustomActionData]"' not in verifier
+
+
 def test_ci_runs_only_lightweight_development_validation():
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
 
