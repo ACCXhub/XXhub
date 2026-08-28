@@ -82,12 +82,12 @@ def test_release_work_pruning_keeps_only_current_canonical_directories(
     work = tmp_path / "output" / "work"
     for name in [
         "msi-stage-v1.4.4",
-        "msi-stage-v1.5.0",
+        "msi-stage-v1.5.1",
         "msi-stage",
         "portable-v1.4.4",
         "msi-lifecycle-v1.4.4",
         "ci-lifecycle-33033797667",
-        "portable-v1.5.0",
+        "portable-v1.5.1",
         "unrelated-work",
     ]:
         (work / name).mkdir(parents=True)
@@ -98,7 +98,7 @@ def test_release_work_pruning_keeps_only_current_canonical_directories(
         r"""
         $ErrorActionPreference = "Stop"
         . $env:AUTODY_RELEASE_COMMON
-        Clear-SupersededReleaseWorkDirectories -Root $env:AUTODY_TEST_ROOT -Version "1.5.0"
+        Clear-SupersededReleaseWorkDirectories -Root $env:AUTODY_TEST_ROOT -Version "1.5.1"
         Get-ChildItem -LiteralPath (Join-Path $env:AUTODY_TEST_ROOT "output\work") -Directory |
           Select-Object -ExpandProperty Name | Sort-Object | ConvertTo-Json -Compress
         """,
@@ -108,7 +108,7 @@ def test_release_work_pruning_keeps_only_current_canonical_directories(
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout) == [
         "msi-stage",
-        "portable-v1.5.0",
+        "portable-v1.5.1",
         "unrelated-work",
     ]
 

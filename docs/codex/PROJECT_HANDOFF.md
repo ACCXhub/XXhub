@@ -6,7 +6,7 @@
 
 ## Master
 
-当前代码线为 1.5.0，核心已接受能力包括：
+当前代码线与正式发布目标为 1.5.1，核心已接受能力包括：
 
 - durable friend proof、discovery candidate、conversation locator 明确分层；
 - `binding_recovery.resolve_stable_binding` 是唯一权威运行时解析，`reassociate_stable_binding` 是显式重新关联写入口；
@@ -40,22 +40,20 @@
 
 - 已确认公开稳定 Release：**v1.4.4**。
 - v1.4.4 MSI：`AutoDy-1.4.4-x64.msi`，`301,540,220` bytes，SHA-256 `bea7a7e7495c0137d33463f504d2999dcef250e7df7766c90eb0dbcb4a1daa10`。
-- 当前源码元数据版本：`1.5.0`。
-- `v1.5.0` tag 已存在，当前候选 release source 为 `4cf2620805f37e4c9fe8f221806b88c70f592ea8`。
+- 当前源码元数据版本：`1.5.1`。
+- `v1.5.0` tag 固定在 `4cf2620805f37e4c9fe8f221806b88c70f592ea8`，其 workflow 在 lifecycle 阶段失败且没有 GitHub Release；该标签保留为历史。
 - 正式 Release run `33039551649`：immutable identity、v1.4.4 baseline、2 个 `release_build` reproducibility tests、Portable/MSI build、privacy/package verification 通过；`verify-msi-lifecycle.ps1` 失败；publish/public asset verify 被跳过。
-- 因此 **v1.5.0 尚未正式发布**。不要把 README/文档中的源码版本、tag 或 CI 候选 MSI当作公开稳定资产。
+- 当前唯一 release target 为 `v1.5.1`；只有该 tag 的 formal workflow、publish 和 public asset verify 全绿后才能称为稳定发布。
 
 ## 当前 Delta
 
-发布阻断只剩 MSI lifecycle acceptance 的具体失败需要定位：
+本次发布 Delta 是在已收敛的 lifecycle staging 修复与 Dashboard 自适应布局之上执行一次 `v1.5.1` formal Release：
 
-1. 先取得或复现 `msi-lifecycle-report.json/md`；
-2. 读取具体 `stages` 和 `failure`；
-3. 判断是 verifier 对 MSI/WiX 事实的陈旧断言，还是 installer 真缺陷；
-4. 只修改对应 canonical owner；
-5. 只跑能证明该根因的 focused lifecycle validation；
-6. 产生最终 release source 后，再决定未成功发布的 `v1.5.0` tag/Release 的正确收口方式，并只执行一次 formal Release；
-7. Release 全绿后再把公开文档状态从“候选”切换到“已发布”。
+1. 版本、Release workflow、发布说明与 source tag 收敛为 `v1.5.1`；
+2. 从 v1.4.4 固定 MSI baseline 执行 clean-source build、Portable/MSI、privacy/package 与 lifecycle；
+3. 门禁通过后只发布 canonical MSI/Portable/checksum/manifest；
+4. 重新下载公开资产并复核集合、hash、MSI 与 privacy；
+5. 对当前已安装运行时执行一次升级后的只读验收。
 
 不要因为 runner 已构建出 MSI 就绕过 lifecycle 后仍宣称完整验收。
 
@@ -110,7 +108,7 @@ Tag push 不再重复触发 ordinary CI。不要用交互代理持续轮询 GitH
 
 1. 查看当前 `main`、工作树和 remote，先保留用户未提交工作。
 2. 读取 `AGENTS.md`、`docs/软件工程/00-文档总览.md`、本文件以及与任务直接相关的 03/05/06/07/08/09/12。
-3. 若任务是 v1.5.0 Release blocker，直接从 lifecycle report/失败 stage 开始，不重复已经通过的全部构建来猜问题。
+3. 若 v1.5.1 formal Release 失败，直接从该次 run 的具体失败 stage/report 开始，不重复整个构建来猜问题。
 4. 涉及本机服务时先验证 service identity、用户、ProgramRoot、DataRoot、解释器和 exact PID ownership。
 5. 涉及真实浏览器时优先 fixture/read-only，验证不执行真实发送。
 6. 按风险做 focused validation；正式 Release 才执行重型 release gate。
@@ -118,4 +116,4 @@ Tag push 不再重复触发 ordinary CI。不要用交互代理持续轮询 GitH
 
 ## Deliverables
 
-当前待交付只有：关闭 lifecycle blocker → 最终 v1.5.0 release source/tag → GitHub Release canonical assets/hash/manifest → public asset reverify → 文档正式发布状态切换。
+当前待交付只有：最终 v1.5.1 release source/tag → GitHub Release canonical assets/hash/manifest → public asset reverify → installed-runtime acceptance。

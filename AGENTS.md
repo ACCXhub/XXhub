@@ -5,8 +5,8 @@
 - Repository: current checkout root.
 - Remote: `ACCXhub/XXhub`.
 - Product: Windows-local AutoDy dashboard.
-- Confirmed public stable Release: AutoDy `v1.4.4`.
-- Current source version line: `1.5.0`; the `v1.5.0` formal Release is still blocked by MSI lifecycle acceptance until GitHub Release assets are successfully published and reverified.
+- Confirmed public stable baseline before the current release pass: AutoDy `v1.4.4`.
+- Current source version line and release target: `1.5.1`. The failed `v1.5.0` tag remains immutable history; treat `v1.5.1` as stable only after its formal workflow publishes and reverifies the GitHub Release assets.
 - Read `docs/软件工程/00-文档总览.md` and `docs/codex/PROJECT_HANDOFF.md` before editing, then only files directly related to the task.
 
 ## Start Every Session
