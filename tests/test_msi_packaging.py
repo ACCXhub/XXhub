@@ -480,6 +480,18 @@ def test_release_workflow_publishes_only_versioned_public_assets():
     assert "npm.cmd test" not in release_script
     assert "verify-release-artifacts.ps1" in release_script
     assert "verify-msi-lifecycle.ps1" in release_script
+    assert "workflow_dispatch:" in workflow
+    assert "Build and run focused MSI lifecycle diagnostic" in workflow
+    assert "Preserve MSI lifecycle diagnostic reports" in workflow
+    diagnostic_upload = workflow.split(
+        "Preserve MSI lifecycle diagnostic reports", 1
+    )[1].split("Publish only canonical guarded assets", 1)[0]
+    assert "actions/upload-artifact@v4" in diagnostic_upload
+    assert "msi-lifecycle-report.json" in diagnostic_upload
+    assert "msi-lifecycle-report.md" in diagnostic_upload
+    assert "AutoDy-1.5.1-x64.msi" not in diagnostic_upload
+    assert "AutoDy-Windows-Portable-1.5.1.zip" not in diagnostic_upload
+    assert "if: github.event_name == 'push' && success()" in workflow
     assert "write-release-manifest.ps1" not in workflow.split(
         "Publish only canonical guarded assets", 1
     )[1]

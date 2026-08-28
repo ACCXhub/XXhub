@@ -1,6 +1,7 @@
 name: Release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v1.5.1"
@@ -32,7 +33,10 @@ jobs:
       - name: Verify immutable release identity
         shell: powershell
         run: |
-          if ("${{ github.ref_name }}" -ne "v$env:AUTODY_RELEASE_VERSION") {
+          if (
+            "${{ github.event_name }}" -eq "push" -and
+            "${{ github.ref_name }}" -ne "v$env:AUTODY_RELEASE_VERSION"
+          ) {
             throw "Release tag does not match the configured version."
           }
           if ((git rev-parse v1.4.0) -ne "c2ff5c97a5af7b53f6f0361cec70f01f96370970") {
@@ -60,6 +64,7 @@ jobs:
             throw "v1.4.4 baseline hash mismatch"
           }
       - name: Build and accept the clean-source release
+        if: github.event_name == 'push'
         shell: powershell
         run: |
           $previous = "output\baselines\v$env:AUTODY_PREVIOUS_VERSION\AutoDy-$env:AUTODY_PREVIOUS_VERSION-x64.msi"
@@ -68,7 +73,33 @@ jobs:
             -PreviousVersion $env:AUTODY_PREVIOUS_VERSION `
             -PreviousMsiPath $previous `
             -Commit $env:GITHUB_SHA
+      - name: Build and run focused MSI lifecycle diagnostic
+        if: github.event_name == 'workflow_dispatch'
+        shell: powershell
+        run: |
+          $previous = "output\baselines\v$env:AUTODY_PREVIOUS_VERSION\AutoDy-$env:AUTODY_PREVIOUS_VERSION-x64.msi"
+          .\scripts\bootstrap-source.ps1
+          .\scripts\build-msi.ps1 `
+            -Version $env:AUTODY_RELEASE_VERSION `
+            -Commit $env:GITHUB_SHA
+          .\scripts\verify-msi-lifecycle.ps1 `
+            -Version $env:AUTODY_RELEASE_VERSION `
+            -PreviousVersion $env:AUTODY_PREVIOUS_VERSION `
+            -ArtifactDirectory "output\release\v$env:AUTODY_RELEASE_VERSION" `
+            -PreviousMsiPath $previous `
+            -ReportDirectory "output\release\v$env:AUTODY_RELEASE_VERSION"
+      - name: Preserve MSI lifecycle diagnostic reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: msi-lifecycle-reports-v${{ env.AUTODY_RELEASE_VERSION }}-${{ github.run_id }}
+          path: |
+            output/release/v${{ env.AUTODY_RELEASE_VERSION }}/msi-lifecycle-report.json
+            output/release/v${{ env.AUTODY_RELEASE_VERSION }}/msi-lifecycle-report.md
+          if-no-files-found: warn
+          retention-days: 14
       - name: Publish only canonical guarded assets
+        if: github.event_name == 'push' && success()
         uses: softprops/action-gh-release@v2
         with:
           fail_on_unmatched_files: true
@@ -82,6 +113,7 @@ jobs:
 
   verify-public-assets:
     needs: build-accept-publish
+    if: github.event_name == 'push'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
