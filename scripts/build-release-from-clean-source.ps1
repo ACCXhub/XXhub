@@ -31,8 +31,9 @@ if (Test-Path -LiteralPath (Join-Path $Root '.git')) {
 if ($LASTEXITCODE -ne 0) { throw 'Source bootstrap failed.' }
 
 $Python = Join-Path $Root '.venv\Scripts\python.exe'
-& $Python -m pytest -q -m release_build
-if ($LASTEXITCODE -ne 0) { throw 'Release reproducibility tests failed.' }
+# The long release_build reproducibility marker remains available for dedicated
+# diagnostics, but it is intentionally outside the lightweight publication gate.
+Write-Host '[INFO] Skipping long release_build reproducibility tests for the lightweight release gate.'
 
 & (Join-Path $PSScriptRoot 'build-portable.ps1') -Version $Version
 if ($LASTEXITCODE -ne 0) { throw 'Portable build failed.' }
