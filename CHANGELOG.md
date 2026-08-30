@@ -4,12 +4,25 @@
 
 ## [Unreleased]
 
-## [1.5.2] - 2026-08-28
+## [1.5.2] - 2026-08-30
 
 ### Changed
 
-- Release workflow 将 hosted-runner MSI lifecycle 保留为非阻断诊断，并继续保存 JSON/Markdown 报告；source/build、MSI、Portable、privacy/package、checksum 与 manifest 仍为硬门禁。
-- `v1.5.1` lifecycle 失败候选保留为不可变历史，本次发布使用新的 `v1.5.2` 身份。
+- 本机维护方式收敛为源码仓库 canonical runtime：影响运行行为的源码修改完成后直接重启当前仓库实例并做最小运行验收；源码模式默认使用 `%LOCALAPPDATA%\AutoDy` 作为 DataRoot，Scheduler 与现有启动入口统一指向仓库，不再要求先构建 MSI/Portable 才能让本地修改生效。
+- 每日任务分母统一使用全部 enabled 目标；safely executable 只决定当次是否可发送，不再让可执行子集提前触发 `complete`、`consumed` 或 `ALREADY_DONE`。
+- 好友 discovery 收敛为单一串行 DOM lane：可见行批量 snapshot，头像只在 immutable URL 快照后并行处理；targeted scan 找齐配置目标即可提前结束，新鲜完整 snapshot 命中时无需扫描，一键修复也不按好友重复扫描。
+- reconciliation 的当天事实统一为 `confirmed_sent`、`confirmed_missing`、`unknown`；只有可证明缺失且 binding 有效的目标才复用既有 `run_daily(..., target_ids=...)` 发送链，`unknown` 不自动补发，人工核验使用独立 `human_verified_today` evidence source。
+- `one_for_all` 文案包每天只选择并持久化一条 canonical 文案，当天所有目标及 retry/reconciliation 复用同一条；当天完整完成后才推进既有 `MessageRotation`，不再永久固定 `pack_messages[0]`。
+- Dashboard 增加“待核实”发送状态；手动运行进入 `uncertain` 时直接说明无法验证本次发送确认并安全停止，不再压缩为泛化“操作未完成”。
+- Release workflow 将 hosted-runner MSI lifecycle 保留为非阻断诊断，并继续保存 JSON/Markdown 报告；正式发布能力仍保留 source/build、MSI、Portable、privacy/package、checksum 与 manifest 验证，但只有明确需要公开分发时才执行。
+- `v1.5.1` lifecycle 失败候选保留为不可变历史；当前 `v1.5.2` 仍是源码版本线，在正式 GitHub Release 发布前不作为公开稳定资产。
+
+### Fixed
+
+- 修复 `DouyinChat.send()` 在 Enter 前看到历史最后一条 outgoing 与本次文案相同就直接返回 `confirmed, send_attempts=0` 的假确认；发送成功现在必须包含本次真实发送边界之后新增 outgoing 的 `post_send_observed` provenance。
+- 修复旧 bare `confirmed/retry_confirmed`、`succeeded` 或 `consumed` 可被当作当天强发送证据的问题；缺少可靠 provenance 的历史记录保持 fail-closed，不再制造 false `9/9`。
+- 修复 reconciliation 把裸确认字符串直接视为 `same_day_delivery_confirmation` 的问题；只有真实 post-send confirmation 才能形成该强证据，live audit 与人工核验保持独立来源。
+- 修复发送真值已经明确为 `uncertain` 时前端只显示“操作未完成”的问题；现在显示可理解的安全停止原因和下一步边界。
 
 ## [1.5.1] - 2026-08-28
 
