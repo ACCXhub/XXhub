@@ -172,6 +172,28 @@ class TaskOutcomeStore:
             reason=reason,
         )
 
+    def resume_confirmed_missing(
+        self,
+        run_id: str,
+        now: datetime,
+    ) -> TaskRunState:
+        """Reopen a terminal day only after a live audit proves it missing."""
+        record = self.get(run_id)
+        if record is None:
+            raise KeyError(run_id)
+        if (
+            record.outcome not in {TaskOutcome.FINAL_FAILED, TaskOutcome.UNCERTAIN}
+            or now >= record.completion_deadline
+        ):
+            return record
+        return self._update(
+            run_id,
+            outcome=TaskOutcome.RETRY_PENDING,
+            next_attempt_at=now,
+            updated_at=now,
+            reason="today_delivery_confirmed_missing",
+        )
+
     def complete(self, run_id: str, now: datetime) -> TaskRunState:
         return self._update(run_id, outcome=TaskOutcome.COMPLETED, next_attempt_at=None, updated_at=now, reason=None)
 

@@ -98,6 +98,7 @@ class TodayDeliveryReconciliationPlan:
     outcomes: dict[str, str]
     evidence_sources: dict[str, str]
     live_audit_target_ids: tuple[str, ...]
+    confirmed_missing_target_ids: tuple[str, ...] = ()
 
 
 def _history_path(config: AppConfig):
@@ -664,11 +665,11 @@ def apply_today_human_verified_delivery_reconciliation(
     confirmed_missing_ids: set[str],
     today: date,
 ) -> dict[str, str]:
-    """Persist an operator's explicit current-day delivery verification.
+    """Persist a one-time migration verification for legacy current-day data.
 
-    This is deliberately reconciliation evidence, not a fabricated AutoDy
-    post-send observation.  Normal sender safety and post-send provenance
-    remain required for every future send.
+    This is deliberately not a normal product workflow or a fabricated AutoDy
+    post-send observation. Normal sender safety and post-send provenance remain
+    required for every future send.
     """
     overlap = confirmed_sent_ids & confirmed_missing_ids
     if overlap:
@@ -706,34 +707,66 @@ def plan_today_delivery_reconciliation(
     targets = enabled_daily_targets(config)
     state = StateStore(config.state_file).load()
     confirmed_ids = same_day_confirmed_target_ids(config, state, today)
-    reconciliation = state.daily.get(today.isoformat(), {}).get(
-        "delivery_reconciliation", {}
+    daily = state.daily.get(today.isoformat(), {})
+    reconciliation = daily.get("delivery_reconciliation", {})
+    reconciliation_evidence = daily.get("delivery_reconciliation_evidence", {})
+    reconciliation = reconciliation if isinstance(reconciliation, dict) else {}
+    reconciliation_evidence = (
+        reconciliation_evidence
+        if isinstance(reconciliation_evidence, dict)
+        else {}
     )
     conflicting_ids = {
         target_id
         for target_id in confirmed_ids
-        if isinstance(reconciliation, dict)
-        and reconciliation.get(target_id)
-        == TodayOutgoingStatus.CONFIRMED_MISSING.value
+        if reconciliation.get(target_id) == TodayOutgoingStatus.CONFIRMED_MISSING.value
     }
-    direct_confirmation_ids = confirmed_ids - conflicting_ids
+    post_send_confirmation_ids = confirmed_ids - conflicting_ids
+    live_audit_sent_ids = {
+        target_id
+        for target_id, outcome in reconciliation.items()
+        if outcome == TodayOutgoingStatus.CONFIRMED_SENT.value
+        and reconciliation_evidence.get(target_id) == "live_chat_audit"
+    }
+    live_audit_missing_ids = {
+        target_id
+        for target_id, outcome in reconciliation.items()
+        if outcome == TodayOutgoingStatus.CONFIRMED_MISSING.value
+        and reconciliation_evidence.get(target_id) == "live_chat_audit"
+    }
+    direct_confirmation_ids = post_send_confirmation_ids | live_audit_sent_ids
     outcomes = {
         target_id: TodayOutgoingStatus.CONFIRMED_SENT.value
         for target_id in direct_confirmation_ids
     }
     evidence_sources = {
-        target_id: "same_day_delivery_confirmation"
+        target_id: (
+            "same_day_delivery_confirmation"
+            if target_id in post_send_confirmation_ids
+            else "live_chat_audit"
+        )
         for target_id in direct_confirmation_ids
     }
+    outcomes.update(
+        {
+            target_id: TodayOutgoingStatus.CONFIRMED_MISSING.value
+            for target_id in live_audit_missing_ids
+        }
+    )
+    evidence_sources.update(
+        {target_id: "live_chat_audit" for target_id in live_audit_missing_ids}
+    )
+    settled_ids = direct_confirmation_ids | live_audit_missing_ids
     live_audit_target_ids = tuple(
         target_identity(target)
         for target in targets
-        if target_identity(target) not in direct_confirmation_ids
+        if target_identity(target) not in settled_ids
     )
     return TodayDeliveryReconciliationPlan(
         outcomes,
         evidence_sources,
         live_audit_target_ids,
+        tuple(sorted(live_audit_missing_ids)),
     )
 
 
@@ -743,6 +776,7 @@ def reconcile_today_delivery(
     today: date,
     *,
     plan: TodayDeliveryReconciliationPlan | None = None,
+    supplement: bool = True,
 ) -> TodayDeliveryReconciliation:
     """Audit only targets lacking strong same-day delivery confirmation.
 
@@ -762,7 +796,7 @@ def reconcile_today_delivery(
     resolutions = _binding_resolutions(config, live_targets)
     outcomes = dict(plan.outcomes)
     evidence_sources = dict(plan.evidence_sources)
-    supplement_ids: set[str] = set()
+    supplement_ids = set(plan.confirmed_missing_target_ids)
     for target in live_targets:
         target_id = target_identity(target)
         try:
@@ -809,8 +843,24 @@ def reconcile_today_delivery(
     pre_supplement_complete = bool(targets) and all(
         statuses.get(target_identity(target)) == "success" for target in targets
     )
+    resendable_ids = {
+        target_id
+        for target_id in supplement_ids
+        if evidence_sources.get(target_id) == "live_chat_audit"
+    }
+    remaining_ids = {
+        target_id
+        for target_id, status in statuses.items()
+        if status != "success"
+    }
+    if resendable_ids and remaining_ids == resendable_ids:
+        daily = StateStore(config.state_file).load().daily.get(today.isoformat(), {})
+        run_id = str(daily.get("task_run_id") or _daily_run_id(today))
+        outcome_store = TaskOutcomeStore(_outcome_path(config))
+        if outcome_store.get(run_id) is not None:
+            outcome_store.resume_confirmed_missing(run_id, datetime.now())
     supplement_result = None
-    if supplement_ids:
+    if supplement and supplement_ids:
         supplement_result = run_daily(
             config,
             chat,

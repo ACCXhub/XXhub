@@ -24,6 +24,9 @@
 - 修复 reconciliation 把裸确认字符串直接视为 `same_day_delivery_confirmation` 的问题；只有真实 post-send confirmation 才能形成该强证据，live audit 与人工核验保持独立来源。
 - 修复发送真值已经明确为 `uncertain` 时前端只显示“操作未完成”的问题；现在显示可理解的安全停止原因和下一步边界。
 
+- 恢复自动发送 reconciliation 闭环：AutoDy 以只读 live chat audit 独立判断当天 `confirmed_sent`、`confirmed_missing` 或 `unknown`；只对明确未发送的目标恢复既有安全发送链，已发送不重发、无法确认不盲目重发。
+- live audit 确认缺失时会清理该目标当天陈旧的 terminal retry 投影并恢复可重试状态；后续“一键诊断与修复”会重新 audit `unknown`，而非要求用户维护发送 truth。`human_verified_today` 仅保留为旧版本污染数据的一次性迁移 evidence。
+
 ## [1.5.1] - 2026-08-28
 
 ### Changed

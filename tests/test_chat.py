@@ -355,6 +355,9 @@ def test_production_confirmation_selector_is_isolated_and_scoped():
     assert DOUYIN_CONFIRMATION_SELECTORS.outgoing_message_text.startswith(
         ".componentsRightPanelwrapper .MessageBoxContentactiveClickArea"
     )
+    assert DOUYIN_CONFIRMATION_SELECTORS.history_container == (
+        ".componentsRightPanelwrapper .messageMessageListlist"
+    )
     assert not hasattr(DOUYIN_SELECTORS, "message_text")
 
 

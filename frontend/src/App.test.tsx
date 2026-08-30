@@ -179,7 +179,7 @@ test("explains an uncertain manual run without claiming that it sent a message",
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "立即运行" }));
 
-  expect(await screen.findByText("发送状态不确定：系统无法验证今日消息的本次发送确认。为避免重复发送，已停止。请先人工核对聊天记录；不要自动重试。"))
+  expect(await screen.findByText("发送状态暂无法自动确认：系统已停止以避免重复发送。请使用“一键诊断与修复”重新核查聊天记录；系统仅在确认今日未发送后自动补发。"))
     .toBeInTheDocument();
   expect(screen.queryByText("操作未完成")).not.toBeInTheDocument();
 });

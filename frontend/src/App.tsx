@@ -60,7 +60,7 @@ function manualRunFailureMessage(status: DashboardStatus): string | null {
     (item) => item.task_type === "daily_send" && item.trigger_source === "manual"
   );
   if (latestManualRun?.final_status !== "uncertain") return null;
-  return "发送状态不确定：系统无法验证今日消息的本次发送确认。为避免重复发送，已停止。请先人工核对聊天记录；不要自动重试。";
+  return "发送状态暂无法自动确认：系统已停止以避免重复发送。请使用“一键诊断与修复”重新核查聊天记录；系统仅在确认今日未发送后自动补发。";
 }
 
 export default function App() {

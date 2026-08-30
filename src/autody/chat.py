@@ -314,7 +314,7 @@ DOUYIN_SELECTORS = ChatSelectors(
 # editor selectors. A Douyin page change here must not alter friend search/send.
 DOUYIN_CONFIRMATION_SELECTORS = ConfirmationSelectors(
     outgoing_message_text=".componentsRightPanelwrapper .MessageBoxContentactiveClickArea .MessageItemTextisFromMe .TextMessageTextpureText",
-    history_container=".componentsRightPanelwrapper .MessageBoxContentactiveClickArea",
+    history_container=".componentsRightPanelwrapper .messageMessageListlist",
 )
 
 

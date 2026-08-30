@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import hashlib
 import json
 import logging
@@ -22,6 +22,7 @@ from autody.logging_setup import DailyAppendFileHandler
 from autody.message_packs import MessagePackService
 from autody.runner import (
     RunStatus,
+    TodayDeliveryReconciliationPlan,
     apply_today_delivery_reconciliation,
     apply_today_human_verified_delivery_reconciliation,
     automatic_daily_run_gate,
@@ -667,6 +668,153 @@ def test_reconciliation_supplement_uses_normal_confirmed_send_path(tmp_path: Pat
     stored = StateStore(config.state_file).load().daily["2026-08-30"]
     assert "target-a" not in stored["delivery_reconciliation"]
     assert "target-a" not in stored["delivery_reconciliation_evidence"]
+
+
+def test_live_audit_missing_reopens_uncertain_and_only_resends_missing_target(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.min_delay_seconds = 0
+    config.max_delay_seconds = 0
+    config.targets = [
+        Target(
+            name=f"目标 {index}",
+            stable_id=f"target-{index}",
+            candidate_id=f"candidate-{index}",
+        )
+        for index in range(9)
+    ]
+    write_verified_retry_scope(
+        tmp_path,
+        [target.candidate_id for target in config.targets],
+    )
+    bind_authoritatively(config)
+    day = date(2026, 8, 30)
+    missing = config.targets[-1]
+    run_id = runner_module._daily_run_id(day)
+    state = StateStore(config.state_file).load()
+    state.daily[day.isoformat()] = {
+        "message": "早安",
+        "succeeded": [target.name for target in config.targets[:-1]],
+        "failures": {missing.name: "binding_stale"},
+        "confirmation_results": {
+            target.stable_id: "confirmed" for target in config.targets[:-1]
+        },
+        "confirmation_provenance": {
+            target.stable_id: "post_send_observed"
+            for target in config.targets[:-1]
+        },
+        "target_failures": {
+            missing.stable_id: failure_detail(
+                "binding_stale",
+                stage="target_binding_resolved",
+                run_id=run_id,
+                target_stable_id=missing.stable_id,
+            ).model_dump(mode="json")
+        },
+        "task_run_id": run_id,
+        "consumed": False,
+    }
+    StateStore(config.state_file).save(state)
+    outcomes = TaskOutcomeStore(tmp_path / "history" / "task-outcomes.json")
+    outcomes.schedule(
+        run_id,
+        day.isoformat(),
+        datetime(2026, 8, 30, 23, 59),
+    )
+    outcomes.uncertain(run_id, datetime(2026, 8, 30, 19, 0), "legacy_uncertain")
+
+    class MissingAuditChat:
+        def __init__(self):
+            self.sent = []
+
+        def open_conversation_identity(self, *_args, **_kwargs):
+            return SimpleNamespace(identity_match=True)
+
+        def audit_today_outgoing(self, *_args, **_kwargs):
+            return SimpleNamespace(status=TodayOutgoingStatus.CONFIRMED_MISSING)
+
+        def send(self, target, message, **_kwargs):
+            self.sent.append((target, message))
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMED,
+                send_attempts=1,
+                confirmation_provenance=DeliveryConfirmationProvenance.POST_SEND_OBSERVED,
+            )
+
+    chat = MissingAuditChat()
+    audit_only = reconcile_today_delivery(
+        config,
+        chat,
+        day,
+        plan=TodayDeliveryReconciliationPlan({}, {}, (missing.stable_id,)),
+        supplement=False,
+    )
+    stored = StateStore(config.state_file).load().daily[day.isoformat()]
+    statuses = runner_module.effective_daily_target_statuses(
+        config, StateStore(config.state_file).load(), day
+    )
+
+    assert audit_only.supplement_result is None
+    assert chat.sent == []
+    assert statuses == {
+        **{target.stable_id: "success" for target in config.targets[:-1]},
+        missing.stable_id: "pending",
+    }
+    assert stored["delivery_reconciliation"][missing.stable_id] == "confirmed_missing"
+    assert stored["delivery_reconciliation_evidence"][missing.stable_id] == "live_chat_audit"
+    assert missing.stable_id not in stored["target_failures"]
+    assert outcomes.get(run_id).outcome is TaskOutcome.RETRY_PENDING
+    recovered_plan = plan_today_delivery_reconciliation(config, day)
+    assert recovered_plan.live_audit_target_ids == ()
+    assert recovered_plan.confirmed_missing_target_ids == (missing.stable_id,)
+
+    resent = run_daily(
+        config,
+        chat,
+        day,
+        now=datetime.now() + timedelta(seconds=1),
+    )
+
+    assert resent.sent_count == 1
+    assert [target for target, _message in chat.sent] == [missing.name]
+    assert resent.total_targets == 9
+    assert resent.status in {RunStatus.COMPLETED, RunStatus.RECOVERED}
+    assert StateStore(config.state_file).load().daily[day.isoformat()]["consumed"] is True
+
+
+def test_live_audit_sent_remains_success_and_is_not_selected_for_resend(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.targets = [
+        Target(name="目标", stable_id="target-a", candidate_id="candidate-a")
+    ]
+    write_verified_retry_scope(tmp_path, ["candidate-a"])
+    bind_authoritatively(config)
+
+    class SentAuditChat:
+        def __init__(self):
+            self.sent = []
+
+        def open_conversation_identity(self, *_args, **_kwargs):
+            return SimpleNamespace(identity_match=True)
+
+        def audit_today_outgoing(self, *_args, **_kwargs):
+            return SimpleNamespace(status=TodayOutgoingStatus.CONFIRMED_SENT)
+
+        def send(self, *_args, **_kwargs):
+            raise AssertionError("live-audited sent target must not be resent")
+
+    chat = SentAuditChat()
+    result = reconcile_today_delivery(config, chat, date(2026, 8, 30))
+
+    assert result.outcomes == {"target-a": "confirmed_sent"}
+    assert result.supplement_result is None
+    assert chat.sent == []
+    assert runner_module.effective_daily_target_statuses(
+        config, StateStore(config.state_file).load(), date(2026, 8, 30)
+    ) == {"target-a": "success"}
 
 
 def test_running_denominator_is_immutable_and_next_run_uses_latest_targets(

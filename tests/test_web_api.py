@@ -2,6 +2,7 @@ from io import BytesIO
 from datetime import datetime
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import zipfile
 
 from fastapi.testclient import TestClient
@@ -11,7 +12,7 @@ from autody.scheduler import scheduler_status_rows
 from autody.history import TaskHistoryStore, TaskRunRecord
 from autody.config import Target, load_config, save_config, stable_target_id
 from autody.preflight import PreflightStore
-from autody.runner import TodayDeliveryReconciliation
+from autody.runner import TodayDeliveryReconciliation, TodayDeliveryReconciliationPlan
 from autody.modules import OFFICIAL_TEST_CENTER_CORE_RANGE, OFFICIAL_TEST_CENTER_VERSION, MODULE_ID, ModuleManager, build_module_archive
 from autody.account_profile import mark_bindings_for_revalidation
 from autody.failures import failure_detail
@@ -449,6 +450,59 @@ def test_repair_summary_reports_overall_delivery_evidence(tmp_path: Path, monkey
         "live_audit_required": 0,
         "evidence": {"same_day_delivery_confirmation": 2},
     }
+
+
+def test_repair_supplements_a_persisted_live_confirmed_missing_target(
+    tmp_path: Path, monkeypatch
+):
+    config_path = make_project(tmp_path)
+    monkeypatch.setattr("autody.web_api._runtime_available", lambda _root: True)
+    monkeypatch.setattr("autody.scheduler.windows_task_rows", lambda: [])
+    monkeypatch.setattr(
+        "autody.web_api.SchedulerService",
+        type("NoopScheduler", (), {
+            "__init__": lambda self, *_args, **_kwargs: None,
+            "repair": lambda self, _config: None,
+        }),
+    )
+    plan = TodayDeliveryReconciliationPlan(
+        outcomes={"target-missing": "confirmed_missing"},
+        evidence_sources={"target-missing": "live_chat_audit"},
+        live_audit_target_ids=(),
+        confirmed_missing_target_ids=("target-missing",),
+    )
+    monkeypatch.setattr(
+        "autody.web_api.plan_today_delivery_reconciliation",
+        lambda *_args: plan,
+    )
+    observed = []
+
+    def supplement(config, chat, today, *, plan):
+        observed.append((chat, today, plan.confirmed_missing_target_ids))
+        return TodayDeliveryReconciliation(
+            outcomes=plan.outcomes,
+            pre_supplement_success_count=8,
+            pre_supplement_complete=False,
+            supplement_result=SimpleNamespace(sent_count=1),
+            live_audit_required=0,
+            evidence_sources=plan.evidence_sources,
+        )
+
+    monkeypatch.setattr("autody.web_api.reconcile_today_delivery", supplement)
+    client = TestClient(create_app(
+        config_path,
+        action_runner=lambda action: {
+            "id": f"job-{action}", "action": action,
+            "status": "success", "exit_code": 0,
+        },
+    ))
+
+    response = client.post("/api/repair")
+
+    assert response.status_code == 200
+    assert observed and observed[0][0] is None
+    assert observed[0][2] == ("target-missing",)
+    assert response.json()["today_delivery"]["supplemented"] == 1
 
 
 def test_scheduler_route_uses_sid_captured_from_normal_dashboard_process(

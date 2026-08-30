@@ -21,8 +21,8 @@ AutoDy 是面向 Windows 的本机 Douyin 私信工作流管理台，用于管�
 - 好友 discovery 使用单一串行 DOM lane 获取真实列表，可见行批量 snapshot；targeted scan 找齐配置目标即可结束，新鲜完整 snapshot 命中时无需重复扫描。
 - 每日任务分母以全部 enabled 目标为准；目标暂时不可安全执行只影响本次发送资格，不会把任务提前算成完成。
 - 发送成功必须来自本次真实发送边界之后的新 outgoing observation；历史同文案气泡、旧 `confirmed` 字符串、旧 `succeeded/consumed` 都不能单独证明今天已经发送。
-- 当历史证据不足时 Dashboard 显示“待核实”，运行进入 `uncertain` 并安全停止；人工核对事实与自动 `post_send_observed` 保持独立 evidence source，不伪造成自动发送确认。
-- reconciliation 将当日事实区分为 `confirmed_sent`、`confirmed_missing`、`unknown`；只对可证明缺失且绑定有效的目标复用正常发送/确认链，`unknown` 不自动补发，reconciliation 本身不重复扫描好友。
+- 当历史证据不足时 Dashboard 显示“待核实”，运行进入 `uncertain` 并安全停止；`human_verified_today` 仅保留为旧版本污染数据的一次性迁移 evidence，不伪造成自动发送确认，也不是日常流程。
+- reconciliation 会以只读 live chat audit 将当日事实区分为 `confirmed_sent`、`confirmed_missing`、`unknown`；只对可证明缺失且绑定有效的目标复用正常发送/确认链，`unknown` 不自动补发，但可由“一键诊断与修复”重新 audit，reconciliation 本身不重复扫描好友。
 - `one_for_all` 文案包每天持久化选择一条 canonical 文案，当天所有目标及 retry/reconciliation 复用同一条；当天完整完成后才推进既有 `MessageRotation`。
 - 只读发送前自检（Preflight）：可打开会话和检查 DOM，但不输入、不准备、不发送消息。
 - 多账号本地隔离：账号级目标、计划、受管 browser profile 和 runtime snapshot。
@@ -103,7 +103,7 @@ bea7a7e7495c0137d33463f504d2999dcef250e7df7766c90eb0dbcb4a1daa10
 3. 在“定时任务”设置每日健康检查、每日续火和每周健康检查。
 4. 用“总览/运行日志”查看今日结果、历史和需处理事项。
 5. “待核实”表示当前证据不足以证明今天已发送或未发送；此时不会自动补发。
-6. `uncertain` 表示系统无法安全确认发送结果，立即运行会停止并给出明确说明；只有可证明的 safe pre-send failure / confirmed_missing 才进入安全重试或正常补发链。
+6. `uncertain` 时使用“一键诊断与修复”重新执行只读 live audit；确认未发送的目标才会恢复到原有安全发送链，确认已发送或无法确认的目标不会盲目重发。人工核对仅用于处理旧版本污染数据的一次性迁移，不是日常流程。
 
 关闭浏览器窗口不等于停止 Scheduler。显式“完整退出”才会抑制 watchdog 同日自动恢复服务。
 
@@ -118,7 +118,7 @@ AutoDy 不要求把账号、目标、消息、Cookie、browser profile、日志�
 - Dashboard 未打开：从当前 canonical 启动入口重新打开，先确认 service identity，不按进程名批量结束 Python/Chromium。
 - 8765 被占：允许 AutoDy 使用 8766–8799 的已验证回退端口。
 - 好友要求重新关联：完整 discovery 后在 Friends 使用显式 relink，不按昵称直接覆盖绑定。
-- `uncertain` / “待核实”：保留现场，不用旧 bare confirmation 猜测成功，也不重复发送覆盖结果。
+- `uncertain` / “待核实”：使用“一键诊断与修复”重新进行只读 live audit；无法自动确认时保留现场，不用旧 bare confirmation 猜测成功，也不重复发送覆盖结果。
 - Scheduler 失败：确认 UAC、snapshot read error/drift、原用户 Principal、ProgramRoot 与 DataRoot。
 - 源码维护环境出现“改了代码但界面没变化”：先确认当前服务确实来自仓库 `.venv` 和 `src\autody`，再重启 canonical runtime。
 - MSI/Repair 失败：仅在使用正式分发版时校验来源/hash、保存 verbose log，不删除 DataRoot。

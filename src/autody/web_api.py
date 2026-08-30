@@ -1189,24 +1189,8 @@ def create_app(
             )
 
         if not plan.live_audit_target_ids:
-            statuses = apply_today_delivery_reconciliation(
-                config,
-                plan.outcomes,
-                today,
-                evidence_sources=plan.evidence_sources,
-            )
             return (
-                TodayDeliveryReconciliation(
-                    plan.outcomes,
-                    sum(status == "success" for status in statuses.values()),
-                    bool(required)
-                    and all(
-                        statuses.get(target_identity(target)) == "success"
-                        for target in required
-                    ),
-                    live_audit_required=0,
-                    evidence_sources=plan.evidence_sources,
-                ),
+                reconcile_today_delivery(config, None, today, plan=plan),
                 None,
             )
 
