@@ -119,7 +119,7 @@ def test_portable_builder_reuses_the_msi_standalone_runtime_authority():
     assert "Get-Command python" not in text
 
 
-def test_runtime_context_distinguishes_source_and_portable_data_roots(tmp_path):
+def test_runtime_context_uses_local_appdata_for_source_and_root_for_portable(tmp_path):
     resolver = Path("scripts/resolve-runtime-roots.ps1").resolve()
     source_root = tmp_path / "source"
     portable_root = tmp_path / "portable"
@@ -160,7 +160,9 @@ def test_runtime_context_distinguishes_source_and_portable_data_roots(tmp_path):
     assert completed.returncode == 0, completed.stderr
     result = json.loads(completed.stdout)
     assert result["source"]["DistributionMode"] == "source"
-    assert Path(result["source"]["DataRoot"]) == source_root.resolve()
+    assert Path(result["source"]["DataRoot"]) == (
+        Path(os.environ["LOCALAPPDATA"]) / "AutoDy"
+    ).resolve()
     assert Path(result["source"]["Python"]) == (
         source_root / ".venv" / "Scripts" / "python.exe"
     ).resolve()

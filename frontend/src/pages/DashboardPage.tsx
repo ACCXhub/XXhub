@@ -8,7 +8,8 @@ import type { ViewName } from "../components/Sidebar";
 const deliveryStatusLabel = {
   success: "已发送",
   failed: "今日失败",
-  pending: "待发送"
+  pending: "待发送",
+  unknown: "待核实"
 };
 
 const healthLabel = {
@@ -26,7 +27,8 @@ const healthTag = {
 const deliveryTag = {
   success: "success",
   failed: "failed",
-  pending: "pending"
+  pending: "pending",
+  unknown: "pending"
 };
 
 export function DashboardPage({
@@ -84,6 +86,8 @@ export function DashboardPage({
                 };
                 const currentSummary = friend.status === "failed" && friend.failure && !friend.failure.resolved
                   ? friend.failure.user_summary_zh
+                  : friend.status === "unknown" && friend.error
+                    ? friend.error
                   : health.status === "healthy"
                     ? "—"
                     : health.summary_zh;

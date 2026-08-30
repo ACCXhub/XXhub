@@ -9,8 +9,9 @@ from fastapi.testclient import TestClient
 from autody.web_api import create_app
 from autody.scheduler import scheduler_status_rows
 from autody.history import TaskHistoryStore, TaskRunRecord
-from autody.config import Target, load_config, save_config
+from autody.config import Target, load_config, save_config, stable_target_id
 from autody.preflight import PreflightStore
+from autody.runner import TodayDeliveryReconciliation
 from autody.modules import OFFICIAL_TEST_CENTER_CORE_RANGE, OFFICIAL_TEST_CENTER_VERSION, MODULE_ID, ModuleManager, build_module_archive
 from autody.account_profile import mark_bindings_for_revalidation
 from autody.failures import failure_detail
@@ -42,6 +43,10 @@ default_message_pack: daily
                 "message": "早安",
                 "succeeded": ["小明"],
                 "failures": {"小红": "target not found"},
+                "confirmation_results": {stable_target_id("小明"): "confirmed"},
+                "confirmation_provenance": {
+                    stable_target_id("小明"): "post_send_observed"
+                },
                 "consumed": False,
             }
         },
@@ -307,7 +312,11 @@ def test_diagnose_and_repair_uses_existing_safe_repair_primitives(
     )
     monkeypatch.setattr("autody.web_api.SchedulerService", RecordingSchedulerService)
     monkeypatch.setattr("autody.scheduler.windows_task_rows", lambda: [])
-    client = TestClient(create_app(config_path, action_runner=run_action))
+    client = TestClient(create_app(
+        config_path,
+        action_runner=run_action,
+        today_reconciler=lambda *_args: (None, None),
+    ))
 
     response = client.post("/api/repair")
 
@@ -376,6 +385,7 @@ def test_diagnose_and_repair_never_reassociates_an_ambiguous_binding(
         action_runner=lambda action: {
             "id": f"job-{action}", "action": action, "status": "success", "exit_code": 0
         },
+        today_reconciler=lambda *_args: (None, None),
     ))
 
     response = client.post("/api/repair")
@@ -386,6 +396,59 @@ def test_diagnose_and_repair_never_reassociates_an_ambiguous_binding(
     assert (tmp_path / "data" / "account-binding-state.json").exists()
     assert any(item["id"] == "bindings" for item in payload["manual"])
     assert all(item["id"] != "bindings" for item in payload["repaired"])
+
+
+def test_repair_summary_reports_overall_delivery_evidence(tmp_path: Path, monkeypatch):
+    config_path = make_project(tmp_path)
+    monkeypatch.setattr("autody.web_api._runtime_available", lambda _root: True)
+    monkeypatch.setattr("autody.scheduler.windows_task_rows", lambda: [])
+    monkeypatch.setattr(
+        "autody.web_api.SchedulerService",
+        type("NoopScheduler", (), {
+            "__init__": lambda self, *_args, **_kwargs: None,
+            "repair": lambda self, _config: None,
+        }),
+    )
+    reconciliation = TodayDeliveryReconciliation(
+        outcomes={
+            "target-one": "confirmed_sent",
+            "target-two": "confirmed_sent",
+        },
+        pre_supplement_success_count=2,
+        pre_supplement_complete=True,
+        live_audit_required=0,
+        evidence_sources={
+            "target-one": "same_day_delivery_confirmation",
+            "target-two": "same_day_delivery_confirmation",
+        },
+    )
+    client = TestClient(create_app(
+        config_path,
+        action_runner=lambda action: {
+            "id": f"job-{action}", "action": action,
+            "status": "success", "exit_code": 0,
+        },
+        today_reconciler=lambda *_args: (reconciliation, None),
+    ))
+
+    response = client.post("/api/repair")
+
+    assert response.status_code == 200
+    assert response.json()["today_delivery"] == {
+        "outcomes": {
+            "target-one": "confirmed_sent",
+            "target-two": "confirmed_sent",
+        },
+        "confirmed_sent": 2,
+        "confirmed_missing": 0,
+        "unknown": 0,
+        "pre_supplement_success_count": 2,
+        "pre_supplement_complete": True,
+        "supplemented": 0,
+        "scan_count": 0,
+        "live_audit_required": 0,
+        "evidence": {"same_day_delivery_confirmation": 2},
+    }
 
 
 def test_scheduler_route_uses_sid_captured_from_normal_dashboard_process(
@@ -967,7 +1030,7 @@ def test_target_settings_and_today_plan_are_test_center_routes(tmp_path: Path):
     assert (tmp_path / "data" / "state.json").read_bytes() == before
 
 
-def test_dashboard_and_plan_count_only_enabled_targets_with_executable_bindings(
+def test_dashboard_counts_binding_blocked_enabled_targets_as_daily_required(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -1033,8 +1096,8 @@ def test_dashboard_and_plan_count_only_enabled_targets_with_executable_bindings(
         "/api/modules/autody-test-center/today-plan?today=2026-06-24"
     ).json()
 
-    assert dashboard["today"]["total"] == 1
-    assert dashboard["statistics"]["enabled_friend_count"] == 1
+    assert dashboard["today"]["total"] == 2
+    assert dashboard["statistics"]["enabled_friend_count"] == 2
     send_task = next(
         task
         for task in dashboard["scheduler"]
@@ -1043,7 +1106,7 @@ def test_dashboard_and_plan_count_only_enabled_targets_with_executable_bindings(
     assert send_task["target_count"] == 1
     assert send_task["configured_time"] == "07:30"
     assert send_task["drift"] is False
-    assert plan["enabled_target_count"] == 1
+    assert plan["enabled_target_count"] == 2
     assert plan["pending_count"] == 1
     assert plan["blocked_count"] == 1
     missing = next(
@@ -1051,6 +1114,55 @@ def test_dashboard_and_plan_count_only_enabled_targets_with_executable_bindings(
     )
     assert missing["status"] == "blocked"
     assert missing["blocked_reason"] == "目标缺少稳定绑定，需要重新关联。"
+
+
+def test_dashboard_does_not_complete_when_enabled_targets_are_binding_blocked(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    executable = [
+        Target(
+            name=f"可执行目标 {index}",
+            stable_id=f"target-{index}",
+            candidate_id=f"candidate-{index}",
+        )
+        for index in range(3)
+    ]
+    config.targets = executable + [
+        Target(name=f"缺少绑定目标 {index}") for index in range(6)
+    ]
+    save_config(config_path, config)
+    state_path = tmp_path / "data" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["daily"]["2026-06-24"] = {
+            "message": "早安",
+            "succeeded": [target.name for target in executable],
+            "failures": {},
+            "confirmation_results": {
+                target.stable_id: "confirmed" for target in executable
+            },
+            "confirmation_provenance": {
+                target.stable_id: "post_send_observed" for target in executable
+            },
+            "consumed": False,
+    }
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    dashboard = TestClient(create_app(config_path)).get(
+        "/api/status?today=2026-06-24"
+    ).json()
+
+    assert dashboard["today"] == {
+        "date": "2026-06-24",
+        "message": "早安",
+        "succeeded": 3,
+        "failed": 0,
+        "total": 9,
+        "complete": False,
+    }
+    assert len(dashboard["friends"]) == 9
+    assert sum(friend["status"] == "blocked" for friend in dashboard["friends"]) == 6
 
 
 def test_failed_target_center_is_shared_by_overview_and_test_center(tmp_path: Path):
@@ -1137,6 +1249,8 @@ def test_status_exposes_target_failure_detail_in_overview_and_history(
     daily = state["daily"]["2026-06-24"]
     daily["succeeded"] = ["小红"]
     daily["failures"] = {"小明": "target not found"}
+    daily["confirmation_results"] = {}
+    daily["confirmation_provenance"] = {}
     daily["target_failures"] = {
         "target-one": detail.model_dump(mode="json")
     }
@@ -1243,6 +1357,7 @@ def test_daily_summary_uses_each_targets_latest_execution_result(
             skipped_count=1,
             final_status="completed",
             confirmation_results={"target-one": "retry_confirmed"},
+            confirmation_provenance={"target-one": "post_send_observed"},
         )
     )
 
@@ -1289,6 +1404,8 @@ def test_daily_summary_keeps_confirmed_success_after_later_recovery_failure(
     daily = state["daily"]["2026-06-24"]
     daily["succeeded"] = []
     daily["failures"] = {"小明": "conversation_not_found"}
+    daily["confirmation_results"] = {}
+    daily["confirmation_provenance"] = {}
     state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
 
     later_failure = failure_detail(
@@ -1314,6 +1431,7 @@ def test_daily_summary_keeps_confirmed_success_after_later_recovery_failure(
             success_count=1,
             final_status="completed",
             confirmation_results={"target-one": "confirmed"},
+            confirmation_provenance={"target-one": "post_send_observed"},
         )
     )
     store.append(
@@ -1367,6 +1485,8 @@ def test_daily_summary_keeps_failure_when_day_has_no_confirmed_success(
     daily = state["daily"]["2026-06-24"]
     daily["succeeded"] = []
     daily["failures"] = {"小明": "conversation_not_found"}
+    daily["confirmation_results"] = {}
+    daily["confirmation_provenance"] = {}
     state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
 
     failure = failure_detail(
@@ -1437,6 +1557,13 @@ def test_daily_summary_ignores_unmatched_deleted_target_confirmation(
             confirmation_results={
                 **{f"target-{index}": "confirmed" for index in range(1, 9)},
                 "target-deleted": "confirmed",
+            },
+            confirmation_provenance={
+                **{
+                    f"target-{index}": "post_send_observed"
+                    for index in range(1, 9)
+                },
+                "target-deleted": "post_send_observed",
             },
         )
     )

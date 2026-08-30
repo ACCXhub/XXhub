@@ -155,6 +155,35 @@ test("keeps browser action buttons disabled until the action finishes", async ()
   await waitFor(() => expect(runButton).not.toBeDisabled());
 });
 
+test("explains an uncertain manual run without claiming that it sent a message", async () => {
+  const initialStatus = {
+    today: { date: "2026-06-24", message: "测试文案", succeeded: 0, failed: 0, total: 9, complete: false },
+    friends: [],
+    history: [],
+    scheduler: [],
+    next_run: "2026-06-25T07:30:00",
+    login: { status: "normal" },
+    message_count: 60,
+    issues: [],
+    statistics: { last_completed_run: null, consecutive_successful_days: 0, success_rate_7d: 0, success_rate_30d: 0, successful_today: 0, failed_today: 0, configured_friend_count: 9, enabled_friend_count: 9, local_message_count: 60, active_message_pack_count: 5, next_health_check: null, next_daily_send: "2026-06-25T07:30:00", most_recent_issue: null }
+  };
+  apiMocks.status
+    .mockResolvedValueOnce(initialStatus)
+    .mockResolvedValueOnce({
+      ...initialStatus,
+      history: [{ run_id: "run-uncertain", date: "2026-06-24", task_type: "daily_send", trigger_source: "manual", success_count: 0, failed_count: 0, skipped_count: 9, total_targets: 9, retry_count: 0, final_status: "uncertain", end_time: "2026-06-24T18:31:18" }]
+    });
+  apiMocks.action.mockResolvedValue({ id: "job-uncertain", action: "run", status: "running" });
+  apiMocks.waitForAction.mockResolvedValue({ status: "failed", failure: { user_summary_zh: "操作未完成" } });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "立即运行" }));
+
+  expect(await screen.findByText("发送状态不确定：系统无法验证今日消息的本次发送确认。为避免重复发送，已停止。请先人工核对聊天记录；不要自动重试。"))
+    .toBeInTheDocument();
+  expect(screen.queryByText("操作未完成")).not.toBeInTheDocument();
+});
+
 test("shows the structured one-click repair summary and refreshes current state", async () => {
   apiMocks.repair.mockResolvedValue({
     repaired: [{ id: "scheduler", label: "Scheduler 已恢复" }],

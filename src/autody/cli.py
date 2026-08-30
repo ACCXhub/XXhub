@@ -47,6 +47,7 @@ from autody.friend_discovery import (
     record_discovery_failure,
     record_target_refresh_failure,
     refresh_configured_targets,
+    targeted_refresh_cache_is_usable,
 )
 from autody.locking import SingleInstanceLock, TaskAlreadyRunning
 from autody.logging_setup import setup_logging
@@ -299,6 +300,8 @@ def _run_friend_scan(
         progress.finish(
             str(result.last_result.get("status", "completed")),
             rows_found=result.last_result.get("candidates_found", 0),
+            rows_inspected=result.last_result.get("rows_inspected", 0),
+            ended_by=result.last_result.get("ended_by", "scroll_limit"),
             avatars_reused=result.last_result.get("avatars_reused", 0),
             avatars_updated=result.last_result.get("avatars_updated", 0),
             avatar_failures=result.last_result.get("avatars_failed", 0),
@@ -331,6 +334,17 @@ def _run_targeted_friend_refresh(
 ):
     """Refresh configured targets only and keep full-cache freshness intact."""
     progress = ScanProgress(discovery_path)
+    cached = targeted_refresh_cache_is_usable(loaded, discovery_path)
+    if cached is not None:
+        progress.update("writing_cache", 0, 0)
+        progress.finish(
+            "cached",
+            rows_inspected=0,
+            ended_by="cache",
+            targets_found=len(cached.target_refresh.get("found_target_ids", [])),
+            targets_missing=len(cached.target_refresh.get("missing_target_ids", [])),
+        )
+        return cached
     overall_deadline = time.monotonic() + loaded.friend_scan_overall_timeout_ms / 1000
     result = None
     _remember_cached_binding_evidence(config_path, loaded, discovery_path)
@@ -375,7 +389,8 @@ def _run_targeted_friend_refresh(
                 progress.update("releasing_browser_lock")
         progress.finish(
             str(result.target_refresh.get("status", "completed")),
-            rows_found=result.target_refresh.get("rows_examined", 0),
+            rows_inspected=result.target_refresh.get("rows_inspected", 0),
+            ended_by=result.target_refresh.get("ended_by", "scroll_limit"),
             targets_found=len(result.target_refresh.get("found_target_ids", [])),
             targets_missing=len(result.target_refresh.get("missing_target_ids", [])),
         )
@@ -501,17 +516,20 @@ def login(config: Path = typer.Option(Path("config.yaml"), "--config")):
                 loaded.state_file.parent / "discovered_friends.json",
             )
             typer.echo("浏览器将打开，请扫码登录；检测到聊天列表后会自动保存并关闭。")
-            scan_message = "候选好友扫描未启动。"
+            scan_message = "配置目标刷新未启动。"
 
             def scan_after_login(page) -> None:
                 nonlocal scan_message
                 profile_refreshed = _refresh_profile_for_recovery(page, config, loaded)
                 try:
-                    result = discover_friends(
+                    result = refresh_configured_targets(
                         loaded,
                         page,
                         DOUYIN_SELECTORS,
                         loaded.state_file.parent / "discovered_friends.json",
+                        overall_timeout_ms=loaded.friend_scan_overall_timeout_ms,
+                        max_scrolls=loaded.friend_scan_max_rounds,
+                        avatar_timeout_ms=loaded.avatar_capture_timeout_ms,
                     )
                     _complete_friend_discovery(
                         config,
@@ -519,18 +537,21 @@ def login(config: Path = typer.Option(Path("config.yaml"), "--config")):
                         result,
                         allow_recovery=profile_refreshed,
                     )
-                    scan_message = f"候选好友已刷新：发现 {len(result.candidates)} 个记录。"
+                    scan_message = (
+                        "配置目标已刷新：成功 "
+                        f"{len(result.target_refresh.get('found_target_ids', []))} 个。"
+                    )
                     logging.info(scan_message)
                 except Exception as exc:
                     error = str(exc)
                     try:
-                        record_discovery_failure(
+                        record_target_refresh_failure(
                             loaded.state_file.parent / "discovered_friends.json",
                             error=error,
                         )
                     except Exception:
-                        logging.exception("登录后的候选好友扫描失败，且无法保存失败状态。")
-                    scan_message = f"候选好友扫描失败：{error}"
+                        logging.exception("登录后的配置目标刷新失败，且无法保存失败状态。")
+                    scan_message = f"配置目标刷新失败：{error}"
                     logging.warning(scan_message)
 
             browser_login(
@@ -547,7 +568,7 @@ def login(config: Path = typer.Option(Path("config.yaml"), "--config")):
 
 @app.command("refresh-account-profile")
 def refresh_account_profile(config: Path = typer.Option(Path("config.yaml"), "--config")):
-    """Refresh the current account and its complete authoritative friend cache."""
+    """Refresh the current account and only the configured target bindings."""
     loaded = load_config(config)
     discovery_path = loaded.state_file.parent / "discovered_friends.json"
     try:
@@ -565,11 +586,16 @@ def refresh_account_profile(config: Path = typer.Option(Path("config.yaml"), "--
                 if profile.switched:
                     mark_bindings_for_revalidation(loaded.state_file.parent)
                 try:
-                    result = discover_friends(
+                    result = targeted_refresh_cache_is_usable(
+                        loaded, discovery_path
+                    ) or refresh_configured_targets(
                         loaded,
                         page,
                         DOUYIN_SELECTORS,
                         discovery_path,
+                        overall_timeout_ms=loaded.friend_scan_overall_timeout_ms,
+                        max_scrolls=loaded.friend_scan_max_rounds,
+                        avatar_timeout_ms=loaded.avatar_capture_timeout_ms,
                     )
                     _complete_friend_discovery(
                         config,
@@ -578,12 +604,12 @@ def refresh_account_profile(config: Path = typer.Option(Path("config.yaml"), "--
                         allow_recovery=True,
                     )
                     logging.info(
-                        "账号刷新同时完成完整好友缓存刷新：发现 %s 个候选。",
-                        len(result.candidates),
+                        "账号刷新同时完成配置目标刷新：成功 %s 个。",
+                        len(result.target_refresh.get("found_target_ids", [])),
                     )
                 except Exception as exc:
                     record_discovery_failure(discovery_path, str(exc))
-                    logging.warning("账号已刷新，但完整好友缓存刷新未完成：%s", exc)
+                    logging.warning("账号已刷新，但配置目标刷新未完成：%s", exc)
             typer.echo("检测到登录账号已切换，账号资料已更新。" if profile.switched else "当前账号资料已刷新。")
     except AccountProfileUnavailable as exc:
         typer.echo(f"当前账号资料未验证：{exc}")

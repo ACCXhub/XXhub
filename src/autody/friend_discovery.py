@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta
 import hashlib
@@ -10,17 +11,23 @@ import logging
 import os
 from pathlib import Path
 import re
+from tempfile import TemporaryDirectory
 import time
 from typing import Callable
+from urllib.error import URLError
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 import uuid
 
 from PIL import Image, UnidentifiedImageError
 
 from autody.chat import (
+    CONVERSATION_ID_ATTRIBUTES,
     ChatSelectors,
     conversation_candidate_id,
     conversation_row_identity,
     conversation_row_locator,
+    normalized_avatar_source,
     opaque_conversation_identity,
 )
 from autody.account_profile import load_account_profile
@@ -35,6 +42,7 @@ _VIRTUAL_LIST_GROWTH_WINDOW_MS = 4_000
 _VIRTUAL_LIST_STABLE_MS = 750
 _VIRTUAL_LIST_POLL_MS = 250
 _VIRTUAL_LIST_BOTTOM_GROWTH_MS = 3_000
+_AVATAR_FETCH_WORKERS = 4
 logger = logging.getLogger(__name__)
 
 
@@ -167,6 +175,73 @@ class _ScannedItem:
     capture_attempted: bool = True
     avatar_capture_failed: bool = False
     association_uncertain: bool = False
+    avatar_source: str | None = None
+
+
+@dataclass(frozen=True)
+class _VisibleRowSnapshot:
+    """Immutable browser-row data safe to use after the virtual list moves."""
+
+    name: str
+    identity_key: str | None
+    identity_source: str | None
+    conversation_id: str | None
+    avatar_source: str | None
+    row_index: int
+
+
+_VISIBLE_ROWS_SNAPSHOT_SCRIPT = r"""
+(rows, options) => {
+    const conversationFromFiber = start => {
+        let fiber = start;
+        for (let level = 0; fiber && level < 18; level += 1, fiber = fiber.return) {
+            for (const props of [fiber.memoizedProps, fiber.pendingProps]) {
+                const candidates = [
+                    props?.conversation,
+                    props?.children?.props?.conversation,
+                    props?.children?.[0]?.props?.children?.props?.conversation,
+                ];
+                const conversation = candidates.find(value => value != null);
+                if (conversation) return conversation;
+            }
+        }
+        return null;
+    };
+    const runtimeFields = element => {
+        const nodes = [element, ...element.querySelectorAll('*')];
+        for (const node of nodes) {
+            const fiberKey = Object.getOwnPropertyNames(node).find(
+                key => key.startsWith('__reactFiber$')
+            );
+            const conversation = fiberKey
+                ? conversationFromFiber(node[fiberKey])
+                : null;
+            if (!conversation) continue;
+            const text = value => value == null ? null : String(value);
+            return {
+                participant: text(conversation.toParticipantSecUserId),
+                conversation: text(conversation.id || conversation.shortId),
+            };
+        }
+        return { participant: null, conversation: null };
+    };
+    return rows.map((row, rowIndex) => {
+        const nameNode = row.querySelector(options.nameSelector);
+        const avatar = row.querySelector('img');
+        const attributes = {};
+        for (const attribute of options.identityAttributes) {
+            attributes[attribute] = row.getAttribute(attribute);
+        }
+        return {
+            name: (nameNode?.innerText || '').trim(),
+            avatarSource: avatar?.getAttribute('src') || null,
+            attributes,
+            rowIndex,
+            ...runtimeFields(row),
+        };
+    });
+}
+"""
 
 
 def _new_local_id(prefix: str) -> str:
@@ -229,6 +304,110 @@ def _row_identity_hint(item) -> tuple[str | None, str | None]:
 
 def _candidate_id(identity_key: str | None) -> str:
     return conversation_candidate_id(identity_key) or _new_local_id("candidate")
+
+
+def _snapshot_visible_rows(
+    conversations,
+    selectors: ChatSelectors,
+) -> list[_VisibleRowSnapshot] | None:
+    """Snapshot a viewport in one evaluation, with no retained row Locators.
+
+    Test doubles and older locator adapters may not support ``evaluate_all``;
+    callers retain the conservative one-row fallback for those cases.
+    """
+    try:
+        payload = conversations.evaluate_all(
+            _VISIBLE_ROWS_SNAPSHOT_SCRIPT,
+            {
+                "nameSelector": selectors.conversation_name,
+                "identityAttributes": list(CONVERSATION_ID_ATTRIBUTES),
+            },
+        )
+    except (AttributeError, TypeError):
+        return None
+    except Exception:
+        logger.debug("批量会话行快照不可用，回退逐行安全读取。", exc_info=True)
+        return None
+    if not isinstance(payload, list):
+        return None
+
+    snapshots: list[_VisibleRowSnapshot] = []
+    for index, raw in enumerate(payload):
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or "").strip()
+        if not name:
+            continue
+        avatar_source = raw.get("avatarSource")
+        avatar_source = str(avatar_source) if avatar_source else None
+        participant = raw.get("participant")
+        conversation = raw.get("conversation")
+        attributes = raw.get("attributes")
+        identity_key: str | None = None
+        identity_source: str | None = None
+        if participant:
+            identity_key = _opaque_identity("participant", str(participant))
+            identity_source = "participant_sec_user_id"
+        elif isinstance(attributes, dict):
+            for attribute in CONVERSATION_ID_ATTRIBUTES:
+                value = attributes.get(attribute)
+                if value:
+                    identity_key = _opaque_identity("row", str(value))
+                    identity_source = "row_attribute"
+                    break
+        if identity_key is None and avatar_source:
+            identity_key = _opaque_identity(
+                "avatar", normalized_avatar_source(avatar_source)
+            )
+            identity_source = "avatar_source"
+        conversation_id = (
+            conversation_candidate_id(
+                _opaque_identity("conversation", str(conversation))
+            )
+            if conversation
+            else conversation_candidate_id(identity_key)
+        )
+        try:
+            row_index = int(raw.get("rowIndex", index))
+        except (TypeError, ValueError):
+            row_index = index
+        snapshots.append(
+            _VisibleRowSnapshot(
+                name=name,
+                identity_key=identity_key,
+                identity_source=identity_source,
+                conversation_id=conversation_id,
+                avatar_source=avatar_source,
+                row_index=row_index,
+            )
+        )
+    return snapshots
+
+
+def _fetch_avatar_from_source(
+    source: str,
+    cache_dir: Path,
+    timeout_ms: int,
+) -> tuple[Path | None, str | None, bool]:
+    """Fetch one immutable avatar URL without accessing Playwright objects."""
+    try:
+        parsed = urlsplit(source)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("unsupported avatar URL scheme")
+        request = Request(source, headers={"User-Agent": "AutoDy/1"})
+        with urlopen(request, timeout=max(0.1, timeout_ms / 1000)) as response:
+            content = response.read()
+        temporary = cache_dir / f".scan-{uuid.uuid4().hex}.png"
+        with Image.open(BytesIO(content)) as image:
+            image.save(temporary, format="PNG")
+        saved = temporary.read_bytes()
+        if not saved:
+            raise OSError("downloaded avatar was empty")
+        return temporary, hashlib.sha256(saved).hexdigest(), False
+    except (OSError, URLError, UnidentifiedImageError, ValueError):
+        return None, None, True
+    except Exception:
+        return None, None, True
 
 
 def _scroll_metrics(scrollable) -> dict[str, int | float]:
@@ -308,7 +487,8 @@ def _scan_items(
         _VIRTUAL_LIST_GROWTH_WINDOW_MS + _VIRTUAL_LIST_STABLE_MS
     ),
     stop_after_identities: set[str] | None = None,
-) -> tuple[list[_ScannedItem], bool, bool]:
+    wait_for_bottom_growth: bool = True,
+) -> tuple[list[_ScannedItem], bool, bool, str, int]:
     """Read visible conversation rows while keeping avatar failures non-fatal."""
     cache_dir.mkdir(parents=True, exist_ok=True)
     conversations = page.locator(selectors.conversation)
@@ -316,9 +496,13 @@ def _scan_items(
     items: list[_ScannedItem] = []
     seen: set[str] = set()
     missing_counts: Counter[str] = Counter()
+    rows_inspected = 0
+    avatar_futures: list[tuple[int, Future[tuple[Path | None, str | None, bool]]]] = []
+    avatar_executor = ThreadPoolExecutor(max_workers=_AVATAR_FETCH_WORKERS)
 
     partial_timeout = False
     completed_bottom_reached = False
+    ended_by = "scroll_limit"
     try:
         scrollable.first.wait_for(state="visible", timeout=avatar_timeout_ms)
     except AttributeError:  # test doubles do not implement wait_for
@@ -334,168 +518,238 @@ def _scan_items(
         )
     if progress:
         progress("locating_chat_list", 0, None)
-    for _ in range(max_scrolls + 1):
-        if deadline is not None and monotonic() >= deadline:
-            partial_timeout = True
-            break
-        if progress:
-            progress("scanning_rows", len(items), None)
-        for index in range(conversations.count()):
+    try:
+        for _ in range(max_scrolls + 1):
             if deadline is not None and monotonic() >= deadline:
                 partial_timeout = True
+                ended_by = "timeout"
                 break
-            # Locators follow a virtualized DOM node.  Snapshot and capture a
-            # single row in one operation; never retain row locators while
-            # collecting names for the rest of the viewport.
-            accepted = None
-            last_snapshot: tuple[
-                str, str | None, str | None, str | None
-            ] | None = None
-            for _attempt in range(2):
-                item = conversations.nth(index)
-                try:
-                    name = item.locator(selectors.conversation_name).inner_text().strip()
-                except Exception:
-                    break
-                if not name:
-                    break
-                identity_key, identity_source = _row_identity_hint(item)
-                conversation_id = conversation_row_locator(item)
-                last_snapshot = (
-                    name,
-                    identity_key,
-                    identity_source,
-                    conversation_id,
-                )
-                should_capture = capture_avatar is None or capture_avatar(identity_key)
-                if should_capture:
-                    if progress:
-                        progress("updating_avatars", len(items), None)
-                    remaining_avatar_timeout = avatar_timeout_ms
-                    if deadline is not None:
-                        remaining_avatar_timeout = max(
-                            1, min(avatar_timeout_ms, int((deadline - monotonic()) * 1000))
+            if progress:
+                progress("scanning_rows", rows_inspected, None)
+            visible_snapshots = _snapshot_visible_rows(conversations, selectors)
+            if visible_snapshots is not None:
+                rows_inspected += len(visible_snapshots)
+                for snapshot in visible_snapshots:
+                    identity_key = snapshot.identity_key
+                    identity_source = snapshot.identity_source
+                    if identity_key is None:
+                        missing_counts[snapshot.name] += 1
+                        identity_key = _opaque_identity(
+                            "unresolved",
+                            f"{snapshot.name}\0{missing_counts[snapshot.name]}\0{uuid.uuid4().hex}",
                         )
-                        if remaining_avatar_timeout <= 1:
-                            partial_timeout = True
-                            break
-                    temporary, avatar_hash, avatar_capture_failed = _capture_temporary_avatar(
-                        page, item, cache_dir, remaining_avatar_timeout
+                        identity_source = "unresolved"
+                    if identity_key in seen:
+                        continue
+                    seen.add(identity_key)
+                    should_capture = capture_avatar is None or capture_avatar(identity_key)
+                    item_index = len(items)
+                    items.append(
+                        _ScannedItem(
+                            snapshot.name,
+                            None,
+                            None,
+                            identity_key,
+                            identity_source,
+                            snapshot.conversation_id,
+                            snapshot.row_index,
+                            should_capture,
+                            should_capture and not snapshot.avatar_source,
+                            False,
+                            snapshot.avatar_source,
+                        )
                     )
-                else:
-                    temporary, avatar_hash, avatar_capture_failed = None, None, False
-                try:
-                    verified_name = item.locator(selectors.conversation_name).inner_text().strip()
-                except Exception:
-                    verified_name = ""
-                verified_identity_key, _ = _row_identity_hint(item)
-                verified_conversation_id = conversation_row_locator(item)
-                if (
-                    name == verified_name
-                    and identity_key == verified_identity_key
-                    and conversation_id == verified_conversation_id
-                ):
-                    accepted = (
+                    if should_capture and snapshot.avatar_source:
+                        if progress:
+                            progress("updating_avatars", rows_inspected, None)
+                        avatar_futures.append(
+                            (
+                                item_index,
+                                avatar_executor.submit(
+                                    _fetch_avatar_from_source,
+                                    snapshot.avatar_source,
+                                    cache_dir,
+                                    avatar_timeout_ms,
+                                ),
+                            )
+                        )
+
+            for index in range(conversations.count() if visible_snapshots is None else 0):
+                rows_inspected += 1
+                # Locators follow a virtualized DOM node.  Snapshot and capture a
+                # single row in one operation; never retain row locators while
+                # collecting names for the rest of the viewport.
+                accepted = None
+                last_snapshot: tuple[
+                    str, str | None, str | None, str | None
+                ] | None = None
+                for _attempt in range(2):
+                    item = conversations.nth(index)
+                    try:
+                        name = item.locator(selectors.conversation_name).inner_text().strip()
+                    except Exception:
+                        break
+                    if not name:
+                        break
+                    identity_key, identity_source = _row_identity_hint(item)
+                    conversation_id = conversation_row_locator(item)
+                    last_snapshot = (
                         name,
                         identity_key,
                         identity_source,
                         conversation_id,
-                        temporary,
-                        avatar_hash,
-                        avatar_capture_failed,
-                        should_capture,
-                        False,
                     )
+                    should_capture = capture_avatar is None or capture_avatar(identity_key)
+                    if should_capture:
+                        if progress:
+                            progress("updating_avatars", rows_inspected, None)
+                        remaining_avatar_timeout = avatar_timeout_ms
+                        if deadline is not None:
+                            remaining_avatar_timeout = max(
+                                1, min(avatar_timeout_ms, int((deadline - monotonic()) * 1000))
+                            )
+                            if remaining_avatar_timeout <= 1:
+                                partial_timeout = True
+                                ended_by = "timeout"
+                                break
+                        temporary, avatar_hash, avatar_capture_failed = _capture_temporary_avatar(
+                            page, item, cache_dir, remaining_avatar_timeout
+                        )
+                    else:
+                        temporary, avatar_hash, avatar_capture_failed = None, None, False
+                    try:
+                        verified_name = item.locator(selectors.conversation_name).inner_text().strip()
+                    except Exception:
+                        verified_name = ""
+                    verified_identity_key, _ = _row_identity_hint(item)
+                    verified_conversation_id = conversation_row_locator(item)
+                    if (
+                        name == verified_name
+                        and identity_key == verified_identity_key
+                        and conversation_id == verified_conversation_id
+                    ):
+                        accepted = (
+                            name,
+                            identity_key,
+                            identity_source,
+                            conversation_id,
+                            temporary,
+                            avatar_hash,
+                            avatar_capture_failed,
+                            should_capture,
+                            False,
+                        )
+                        break
+                    if temporary:
+                        temporary.unlink(missing_ok=True)
+                if partial_timeout:
                     break
-                if temporary:
-                    temporary.unlink(missing_ok=True)
-            if partial_timeout:
-                break
-            if accepted is None:
-                # A reused DOM node is unsafe evidence.  Keep a current row
-                # record with a fallback avatar rather than showing an image
-                # captured for a different nickname.
-                if last_snapshot is None:
-                    continue
-                accepted = (*last_snapshot, None, None, True, True, True)
-            (
-                name,
-                identity_key,
-                identity_source,
-                conversation_id,
-                temporary,
-                avatar_hash,
-                avatar_capture_failed,
-                should_capture,
-                association_uncertain,
-            ) = accepted
-            if identity_key is None and avatar_hash is not None:
-                identity_key = _opaque_identity("pixels", f"{name}\0{avatar_hash}")
-                identity_source = "avatar_pixels"
-            if identity_key is None:
-                # There is no safe durable identity, so keep this row distinct
-                # instead of merging it with another same-name conversation.
-                missing_counts[name] += 1
-                identity_key = _opaque_identity(
-                    "unresolved", f"{name}\0{missing_counts[name]}\0{uuid.uuid4().hex}"
-                )
-                identity_source = "unresolved"
-            if deadline is not None and monotonic() >= deadline:
-                if temporary:
-                    temporary.unlink(missing_ok=True)
-                partial_timeout = True
-                break
-            if identity_key in seen:
-                if temporary:
-                    temporary.unlink(missing_ok=True)
-                continue
-            seen.add(identity_key)
-            items.append(
-                _ScannedItem(
+                if accepted is None:
+                    # A reused DOM node is unsafe evidence.  Keep a current row
+                    # record with a fallback avatar rather than showing an image
+                    # captured for a different nickname.
+                    if last_snapshot is None:
+                        continue
+                    accepted = (*last_snapshot, None, None, True, True, True)
+                (
                     name,
-                    temporary,
-                    avatar_hash,
                     identity_key,
                     identity_source,
                     conversation_id,
-                    index,
-                    should_capture,
+                    temporary,
+                    avatar_hash,
                     avatar_capture_failed,
+                    should_capture,
                     association_uncertain,
+                ) = accepted
+                if identity_key is None and avatar_hash is not None:
+                    identity_key = _opaque_identity("pixels", f"{name}\0{avatar_hash}")
+                    identity_source = "avatar_pixels"
+                if identity_key is None:
+                    # There is no safe durable identity, so keep this row distinct
+                    # instead of merging it with another same-name conversation.
+                    missing_counts[name] += 1
+                    identity_key = _opaque_identity(
+                        "unresolved", f"{name}\0{missing_counts[name]}\0{uuid.uuid4().hex}"
+                    )
+                    identity_source = "unresolved"
+                if deadline is not None and monotonic() >= deadline:
+                    if temporary:
+                        temporary.unlink(missing_ok=True)
+                    partial_timeout = True
+                    ended_by = "timeout"
+                    break
+                if identity_key in seen:
+                    if temporary:
+                        temporary.unlink(missing_ok=True)
+                    continue
+                seen.add(identity_key)
+                items.append(
+                    _ScannedItem(
+                        name,
+                        temporary,
+                        avatar_hash,
+                        identity_key,
+                        identity_source,
+                        conversation_id,
+                        index,
+                        should_capture,
+                        avatar_capture_failed,
+                        association_uncertain,
+                    )
                 )
+
+            if partial_timeout:
+                break
+
+            if stop_after_identities and stop_after_identities.issubset(seen):
+                ended_by = "targets_found"
+                break
+
+            if not scrollable.count():
+                completed_bottom_reached = True
+                ended_by = "bottom_reached"
+                break
+            metrics = _scroll_metrics(scrollable)
+            if metrics["before"] >= metrics["maximum"]:
+                if not wait_for_bottom_growth:
+                    completed_bottom_reached = True
+                    ended_by = "bottom_reached"
+                    break
+                remaining_ms = (
+                    max(0, int((deadline - monotonic()) * 1000))
+                    if deadline is not None
+                    else _VIRTUAL_LIST_BOTTOM_GROWTH_MS
+                )
+                if _wait_for_virtual_list_growth_at_bottom(
+                    page,
+                    scrollable,
+                    previous_maximum=metrics["maximum"],
+                    timeout_ms=remaining_ms,
+                ):
+                    continue
+                completed_bottom_reached = True
+                ended_by = "bottom_reached"
+                break
+            scrollable.first.evaluate(
+                "(el, step) => { el.scrollTop += step; el.dispatchEvent(new Event('scroll')); }",
+                metrics["step"],
             )
-
-        if partial_timeout:
-            break
-
-        if stop_after_identities and stop_after_identities.issubset(seen):
-            break
-
-        if not scrollable.count():
-            completed_bottom_reached = True
-            break
-        metrics = _scroll_metrics(scrollable)
-        if metrics["before"] >= metrics["maximum"]:
-            remaining_ms = (
-                max(0, int((deadline - monotonic()) * 1000))
-                if deadline is not None
-                else _VIRTUAL_LIST_BOTTOM_GROWTH_MS
+            page.wait_for_timeout(250)
+    finally:
+        for index, future in avatar_futures:
+            try:
+                temporary, avatar_hash, avatar_capture_failed = future.result()
+            except Exception:
+                temporary, avatar_hash, avatar_capture_failed = None, None, True
+            items[index] = replace(
+                items[index],
+                temporary_avatar=temporary,
+                avatar_hash=avatar_hash,
+                avatar_capture_failed=avatar_capture_failed,
             )
-            if _wait_for_virtual_list_growth_at_bottom(
-                page,
-                scrollable,
-                previous_maximum=metrics["maximum"],
-                timeout_ms=remaining_ms,
-            ):
-                continue
-            completed_bottom_reached = True
-            break
-        scrollable.first.evaluate(
-            "(el, step) => { el.scrollTop += step; el.dispatchEvent(new Event('scroll')); }",
-            metrics["step"],
-        )
-        page.wait_for_timeout(250)
-    return items, partial_timeout, completed_bottom_reached
+        avatar_executor.shutdown(wait=True)
+    return items, partial_timeout, completed_bottom_reached, ended_by, rows_inspected
 
 
 def _avatar_needs_refresh(path: Path, now: datetime) -> bool:
@@ -544,32 +798,23 @@ def scan_friend_names(
     selectors: ChatSelectors,
     max_scrolls: int = 20,
 ) -> list[str]:
-    names_locator = page.locator(selectors.conversation_name)
-    scrollable = page.locator(selectors.conversation_list)
+    """Compatibility projection that reuses the sole conversation-list lane."""
+    with TemporaryDirectory(prefix="autody-scan-names-") as temporary:
+        items, _, _, _, _ = _scan_items(
+            page,
+            selectors,
+            Path(temporary),
+            max_scrolls=max_scrolls,
+            capture_avatar=lambda _identity: False,
+            initial_virtual_list_timeout_ms=0,
+            wait_for_bottom_growth=False,
+        )
     names: list[str] = []
     seen: set[str] = set()
-    for _ in range(max_scrolls + 1):
-        for raw_name in names_locator.all_inner_texts():
-            name = raw_name.strip()
-            if name and name not in seen:
-                seen.add(name)
-                names.append(name)
-        if not scrollable.count():
-            break
-        metrics = scrollable.first.evaluate(
-            """el => ({
-                before: el.scrollTop,
-                maximum: Math.max(0, el.scrollHeight - el.clientHeight),
-                step: Math.max(200, Math.floor(el.clientHeight * 0.7))
-            })"""
-        )
-        if metrics["before"] >= metrics["maximum"]:
-            break
-        scrollable.first.evaluate(
-            "(el, step) => { el.scrollTop += step; el.dispatchEvent(new Event('scroll')); }",
-            metrics["step"],
-        )
-        page.wait_for_timeout(250)
+    for item in items:
+        if item.name not in seen:
+            seen.add(item.name)
+            names.append(item.name)
     return names
 
 
@@ -625,7 +870,7 @@ def discover_friends(
             return True
         return identity_key not in fresh_avatar_identities
     started = monotonic()
-    scanned, partial_timeout, completed_bottom_reached = _scan_items(
+    scanned, partial_timeout, completed_bottom_reached, ended_by, rows_inspected = _scan_items(
         page,
         selectors,
         cache_dir,
@@ -801,6 +1046,8 @@ def discover_friends(
         "finished_at": scanned_at,
         "scan_id": scan_id,
         "candidates_found": len(scanned),
+        "rows_inspected": rows_inspected,
+        "ended_by": ended_by,
         "new_candidates": new_candidates,
         "configured_matched": configured_matched,
         "avatars_updated": avatars_updated,
@@ -898,7 +1145,7 @@ def refresh_configured_targets(
             cache_dir,
             refreshed_now,
         )
-        scanned, partial_timeout, completed_bottom_reached = _scan_items(
+        scanned, partial_timeout, completed_bottom_reached, ended_by, rows_inspected = _scan_items(
             page,
             selectors,
             cache_dir,
@@ -1002,7 +1249,9 @@ def refresh_configured_targets(
         "found_target_ids": sorted(found_ids),
         "missing_target_ids": missing_ids,
         "unresolved_target_ids": sorted(unresolved_ids),
-        "rows_examined": len(scanned),
+        "rows_examined": rows_inspected,
+        "rows_inspected": rows_inspected,
+        "ended_by": ended_by if eligible else "no_authoritative_targets",
         "completed_bottom_reached": completed_bottom_reached,
         "partial": partial_timeout,
     }
@@ -1038,7 +1287,7 @@ def refresh_configured_avatars(
     avatar_cache_dir: Path,
 ) -> AvatarRefreshResult:
     """Refresh only unambiguous configured-avatar associations; never edit names."""
-    scanned, _, _ = _scan_items(page, selectors, avatar_cache_dir)
+    scanned, _, _, _, _ = _scan_items(page, selectors, avatar_cache_dir)
     by_name: dict[str, list[_ScannedItem]] = defaultdict(list)
     for item in scanned:
         by_name[item.name].append(item)
@@ -1137,6 +1386,77 @@ def is_discovery_stale(scanned_at: str | None, now: datetime | None = None) -> b
     if scanned.tzinfo is not None and current.tzinfo is None:
         current = current.replace(tzinfo=scanned.tzinfo)
     return current - scanned > DISCOVERY_CACHE_TTL
+
+
+def targeted_refresh_cache_is_usable(
+    config: AppConfig,
+    output_path: Path,
+    now: datetime | None = None,
+) -> FriendDiscoveryResult | None:
+    """Return a fresh, account-compatible targeted snapshot without scanning.
+
+    A targeted snapshot is complete only when every enabled stable target has a
+    recorded terminal lookup result.  It intentionally does not infer that an
+    unbound target can be found by scrolling a conversation list.
+    """
+    cached = load_discovered_friends(output_path)
+    profile = load_account_profile(output_path.parent.parent)
+    if cached is None or profile is None or cached.account_scope != profile.account_profile_id:
+        return None
+    expected = {
+        target.stable_id: target
+        for target in config.targets
+        if target.enabled and target.stable_id
+    }
+    last_result = cached.last_result
+    full_snapshot_complete = (
+        isinstance(last_result, dict)
+        and last_result.get("completed_bottom_reached") is True
+        and last_result.get("partial") is not True
+        and not is_discovery_stale(cached.scanned_at, now)
+    )
+    if full_snapshot_complete:
+        current_identities = {
+            candidate.identity_key
+            for candidate in cached.candidates
+            if candidate.presence_status == "current" and candidate.identity_key
+        }
+        if all(
+            target.binding_identity_key
+            and target.binding_account_scope == profile.account_profile_id
+            and target.binding_identity_key in current_identities
+            for target in expected.values()
+        ):
+            return replace(
+                cached,
+                target_refresh={
+                    "status": "cached",
+                    "completed_at": cached.scanned_at,
+                    "account_scope": cached.account_scope,
+                    "requested_target_ids": sorted(expected),
+                    "found_target_ids": sorted(expected),
+                    "missing_target_ids": [],
+                    "unresolved_target_ids": [],
+                    "rows_inspected": 0,
+                    "ended_by": "cache",
+                    "partial": False,
+                },
+            )
+
+    refresh = cached.target_refresh
+    completed_at = refresh.get("completed_at") if isinstance(refresh, dict) else None
+    if not isinstance(completed_at, str) or is_discovery_stale(completed_at, now):
+        return None
+    if refresh.get("partial") is True:
+        return None
+    expected_ids = set(expected)
+    requested = set(refresh.get("requested_target_ids", []))
+    accounted = set(refresh.get("found_target_ids", []))
+    accounted.update(refresh.get("missing_target_ids", []))
+    accounted.update(refresh.get("unresolved_target_ids", []))
+    if not expected_ids.issubset(requested) or not expected_ids.issubset(accounted):
+        return None
+    return cached
 
 
 def _write_discovery_payload(path: Path, payload: dict[str, object]) -> None:

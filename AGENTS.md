@@ -21,6 +21,7 @@ git remote -v
 - Do not reset, clean, stash, or overwrite unrelated changes.
 - Confirm a local listener belongs to this AutoDy installation before restarting/stopping it; a port or PID alone is not ownership proof.
 - Use the project `.venv` for source development; do not silently use global Python.
+- The source repository is the local canonical runtime. After a code change that affects runtime behavior, switch or restart the local AutoDy instance from the current source, verify its canonical repository identity and `127.0.0.1:8765`, and perform minimum live acceptance. Unless the user explicitly requests a formal release, MSI/Portable builds are not the step that makes a local change effective.
 - Do not terminate unrelated Python, Chromium, Node.js, browser, or PowerShell processes.
 
 ## Safety

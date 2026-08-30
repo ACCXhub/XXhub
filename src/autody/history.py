@@ -37,6 +37,7 @@ class TaskRunRecord(BaseModel):
     error_summary: str | None = None
     failed_target_ids: list[str] = Field(default_factory=list)
     confirmation_results: dict[str, str] = Field(default_factory=dict)
+    confirmation_provenance: dict[str, str] = Field(default_factory=dict)
     target_failures: dict[str, FailureDetail] = Field(default_factory=dict)
 
 

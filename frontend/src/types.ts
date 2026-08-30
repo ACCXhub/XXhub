@@ -1,4 +1,4 @@
-export type FriendStatus = "success" | "failed" | "pending";
+export type FriendStatus = "success" | "failed" | "pending" | "unknown";
 
 export interface Friend {
   target_id?: string;
@@ -144,6 +144,16 @@ export interface RepairSummary {
   repaired: { id: string; label: string }[];
   manual: { id: string; label: string }[];
   checks: { id: string; label: string }[];
+  today_delivery?: {
+    outcomes: Record<string, "confirmed_sent" | "confirmed_missing" | "unknown">;
+    confirmed_sent: number;
+    confirmed_missing: number;
+    unknown: number;
+    pre_supplement_success_count: number;
+    pre_supplement_complete: boolean;
+    supplemented: number;
+    scan_count: number;
+  };
   summary: string;
 }
 

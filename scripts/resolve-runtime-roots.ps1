@@ -60,7 +60,7 @@ function Resolve-AutoDyLaunchContext {
     $DistributionMode = Get-AutoDyDistributionMode -ProgramRoot $ResolvedProgramRoot
     if ($DataRoot) {
         $ResolvedDataRoot = [IO.Path]::GetFullPath($DataRoot)
-    } elseif ($DistributionMode -in @("source", "portable")) {
+    } elseif ($DistributionMode -eq "portable") {
         $ResolvedDataRoot = $ResolvedProgramRoot
     } else {
         $Registration = Get-AutoDyRegistration

@@ -11,19 +11,25 @@ import random
 import time
 
 from autody.chat import (
+    DeliveryConfirmationProvenance,
     DeliveryResult,
     DeliveryStatus,
     FatalChatError,
+    TodayOutgoingStatus,
     conversation_candidate_id,
 )
 from autody.config import (
     AppConfig,
     MessageSuffixConfig,
     Target,
+    enabled_daily_targets,
     enabled_execution_targets,
     target_identity,
 )
-from autody.daily_status import effective_daily_target_statuses
+from autody.daily_status import (
+    effective_daily_target_statuses,
+    same_day_confirmed_target_ids,
+)
 from autody.account_profile import (
     bindings_revalidation_required,
     load_account_profile,
@@ -67,11 +73,31 @@ class RunResult:
     retry_count: int = 0
     confirmation_results: dict[str, str] = field(default_factory=dict)
     target_failures: dict[str, FailureDetail] = field(default_factory=dict)
+    confirmation_provenance: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class TodayTargetMessage:
     text: str
+
+
+@dataclass(frozen=True)
+class TodayDeliveryReconciliation:
+    outcomes: dict[str, str]
+    pre_supplement_success_count: int
+    pre_supplement_complete: bool
+    supplement_result: RunResult | None = None
+    live_audit_required: int = 0
+    evidence_sources: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TodayDeliveryReconciliationPlan:
+    """The immutable evidence plan for one repair invocation."""
+
+    outcomes: dict[str, str]
+    evidence_sources: dict[str, str]
+    live_audit_target_ids: tuple[str, ...]
 
 
 def _history_path(config: AppConfig):
@@ -104,14 +130,19 @@ def record_safe_pre_send_failure(config: AppConfig, reason: str, *, now: datetim
         persisted = outcomes.safe_failure(run_id, started, reason, max_retries=config.retry_count)
         status = RunStatus.RETRY_PENDING if persisted.outcome is TaskOutcome.RETRY_PENDING else RunStatus.FINAL_FAILED
         retries = persisted.retry_attempts
-    total = len(enabled_execution_targets(config))
+    total = len(enabled_daily_targets(config))
     return RunResult(status, total, 0, 0, total, reason, run_id=run_id, retry_count=retries)
 
 
 def _delivery_result(value) -> DeliveryResult:
     if isinstance(value, DeliveryResult):
         return value
-    return DeliveryResult(DeliveryStatus.CONFIRMED, send_attempts=1, confirmation_attempts=1)
+    return DeliveryResult(
+        DeliveryStatus.CONFIRMED,
+        send_attempts=1,
+        confirmation_attempts=1,
+        confirmation_provenance=DeliveryConfirmationProvenance.POST_SEND_OBSERVED,
+    )
 
 
 def _verified_conversation_ids(
@@ -238,7 +269,7 @@ def automatic_daily_run_gate(
     day = started.date()
     state = StateStore(config.state_file).load()
     daily = state.daily.get(day.isoformat(), {})
-    targets = enabled_execution_targets(config)
+    targets = enabled_daily_targets(config)
     statuses = effective_daily_target_statuses(config, state, day)
     pending = [
         target
@@ -254,6 +285,17 @@ def automatic_daily_run_gate(
             0,
             len(targets),
             0,
+            run_id=run_id,
+        )
+
+    if any(statuses.get(target_identity(target)) == "unknown" for target in pending):
+        return RunResult(
+            RunStatus.UNCERTAIN,
+            len(targets),
+            0,
+            len(targets) - len(pending),
+            len(pending),
+            "today_delivery_unknown",
             run_id=run_id,
         )
 
@@ -410,6 +452,7 @@ def _target_base_message(
     daily: dict,
     messages: list[str],
     day: date,
+    rotation_state,
     *,
     persist_catalog: bool = True,
 ) -> str:
@@ -420,8 +463,13 @@ def _target_base_message(
     )
     if not pack_id:
         return daily["message"]
+    selection = target.message_selection or config.message_selection
     target_id = target_identity(target)
-    key = f"pack:{target_id}"
+    key = (
+        f"pack:one-for-all:{pack_id}"
+        if selection == "one_for_all"
+        else f"pack:{target_id}"
+    )
     cached = daily.setdefault("messages_by_target", {}).get(key)
     if cached:
         return cached
@@ -432,7 +480,13 @@ def _target_base_message(
         pack_root,
         config.messages_file.parent,
     ).preview(pack_id, persist_catalog=persist_catalog).messages
-    selected = _selection_rng(day, "message-pack", target).choice(pack_messages) if (target.message_selection or config.message_selection) == "per_friend" else pack_messages[0]
+    selected = (
+        _selection_rng(day, "message-pack", target).choice(pack_messages)
+        if selection == "per_friend"
+        else MessageRotation(
+            _selection_rng(day, f"message-pack:{pack_id}")
+        ).peek(pack_messages, rotation_state)
+    )
     daily["messages_by_target"][key] = selected
     return selected
 
@@ -443,6 +497,7 @@ def _resolve_target_message(
     day: date,
     daily: dict,
     messages: list[str],
+    rotation_state,
     *,
     persist_catalog: bool = True,
 ) -> str:
@@ -453,6 +508,7 @@ def _resolve_target_message(
             daily,
             messages,
             day,
+            rotation_state,
             persist_catalog=persist_catalog,
         )
     elif (target.message_selection or config.message_selection) == "per_friend":
@@ -464,6 +520,10 @@ def _resolve_target_message(
             base = _selection_rng(day, "per-friend", target).choice(messages)
             per_target[key] = base
     else:
+        if not daily["message"]:
+            daily["message"] = MessageRotation(
+                _selection_rng(day, "daily")
+            ).peek(messages, rotation_state)
         base = daily["message"]
     return format_message_with_suffix(base, _target_suffix(target, config))
 
@@ -497,8 +557,274 @@ def preview_today_target_message(
             day,
             daily,
             messages,
+            state.rotation,
             persist_catalog=False,
         )
+    )
+
+
+_TODAY_RECONCILIATION_OUTCOMES = frozenset(
+    item.value for item in TodayOutgoingStatus
+)
+_TODAY_RECONCILIATION_EVIDENCE_SOURCES = frozenset(
+    {
+        "live_chat_audit",
+        "live_chat_audit_unavailable",
+        "binding_unavailable",
+        "same_day_delivery_confirmation",
+        "human_verified_today",
+    }
+)
+
+
+def apply_today_delivery_reconciliation(
+    config: AppConfig,
+    outcomes: dict[str, str],
+    today: date,
+    *,
+    evidence_sources: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Persist current-day delivery evidence and return effective statuses.
+
+    Reconciliation facts are intentionally small (target identity plus one of
+    three outcomes and an explicit evidence source) and take precedence over
+    stale local send records.  They never store message or conversation
+    content.
+    """
+    targets = enabled_daily_targets(config)
+    known = {target_identity(target): target for target in targets}
+    store = StateStore(config.state_file)
+    state = store.load()
+    daily = state.daily.setdefault(
+        today.isoformat(),
+        {
+            "message": "",
+            "succeeded": [],
+            "failures": {},
+            "confirmation_results": {},
+            "consumed": False,
+        },
+    )
+    daily.setdefault("confirmation_results", {})
+    daily.setdefault("confirmation_provenance", {})
+    daily.setdefault("target_failures", {})
+    facts = daily.setdefault("delivery_reconciliation", {})
+    recorded_evidence = daily.setdefault("delivery_reconciliation_evidence", {})
+    evidence_sources = evidence_sources or {}
+    name_counts: dict[str, int] = {}
+    for target in targets:
+        name_counts[target.name] = name_counts.get(target.name, 0) + 1
+    for target_id, outcome in outcomes.items():
+        target = known.get(target_id)
+        if target is None or outcome not in _TODAY_RECONCILIATION_OUTCOMES:
+            continue
+        evidence_source = evidence_sources.get(target_id, "live_chat_audit")
+        if evidence_source not in _TODAY_RECONCILIATION_EVIDENCE_SOURCES:
+            continue
+        facts[target_id] = outcome
+        recorded_evidence[target_id] = evidence_source
+        if outcome == TodayOutgoingStatus.CONFIRMED_SENT.value:
+            daily["confirmation_results"][target_id] = DeliveryStatus.CONFIRMED.value
+            daily["confirmation_provenance"][target_id] = evidence_source
+            daily["target_failures"].pop(target_id, None)
+            if name_counts[target.name] == 1:
+                if target.name not in daily["succeeded"]:
+                    daily["succeeded"].append(target.name)
+                daily["failures"].pop(target.name, None)
+        elif outcome == TodayOutgoingStatus.CONFIRMED_MISSING.value:
+            daily["confirmation_results"].pop(target_id, None)
+            daily["confirmation_provenance"].pop(target_id, None)
+            daily["target_failures"].pop(target_id, None)
+            if name_counts[target.name] == 1:
+                daily["succeeded"] = [
+                    item for item in daily["succeeded"] if item != target.name
+                ]
+                daily["failures"].pop(target.name, None)
+
+    statuses = effective_daily_target_statuses(config, state, today)
+    complete = bool(targets) and all(
+        statuses.get(target_identity(target)) == "success" for target in targets
+    )
+    if not complete:
+        daily["consumed"] = False
+    elif not daily.get("consumed"):
+        daily["consumed"] = True
+        if daily.get("message"):
+            MessageRotation(_selection_rng(today, "daily")).consume(
+                daily["message"], state.rotation
+            )
+    store.save(state)
+    return statuses
+
+
+def apply_today_human_verified_delivery_reconciliation(
+    config: AppConfig,
+    *,
+    confirmed_sent_ids: set[str],
+    confirmed_missing_ids: set[str],
+    today: date,
+) -> dict[str, str]:
+    """Persist an operator's explicit current-day delivery verification.
+
+    This is deliberately reconciliation evidence, not a fabricated AutoDy
+    post-send observation.  Normal sender safety and post-send provenance
+    remain required for every future send.
+    """
+    overlap = confirmed_sent_ids & confirmed_missing_ids
+    if overlap:
+        raise ValueError("a target cannot be both confirmed sent and missing")
+    outcomes = {
+        **{
+            target_id: TodayOutgoingStatus.CONFIRMED_SENT.value
+            for target_id in confirmed_sent_ids
+        },
+        **{
+            target_id: TodayOutgoingStatus.CONFIRMED_MISSING.value
+            for target_id in confirmed_missing_ids
+        },
+    }
+    return apply_today_delivery_reconciliation(
+        config,
+        outcomes,
+        today,
+        evidence_sources={
+            target_id: "human_verified_today" for target_id in outcomes
+        },
+    )
+
+
+def plan_today_delivery_reconciliation(
+    config: AppConfig,
+    today: date,
+) -> TodayDeliveryReconciliationPlan:
+    """Use strong AutoDy confirmation before considering a live chat audit.
+
+    A prior ``confirmed_missing`` fact conflicts with an older confirmation,
+    so it deliberately remains eligible for a fresh live audit.  Weak legacy
+    success/consumed state never appears in the strong set and is audited.
+    """
+    targets = enabled_daily_targets(config)
+    state = StateStore(config.state_file).load()
+    confirmed_ids = same_day_confirmed_target_ids(config, state, today)
+    reconciliation = state.daily.get(today.isoformat(), {}).get(
+        "delivery_reconciliation", {}
+    )
+    conflicting_ids = {
+        target_id
+        for target_id in confirmed_ids
+        if isinstance(reconciliation, dict)
+        and reconciliation.get(target_id)
+        == TodayOutgoingStatus.CONFIRMED_MISSING.value
+    }
+    direct_confirmation_ids = confirmed_ids - conflicting_ids
+    outcomes = {
+        target_id: TodayOutgoingStatus.CONFIRMED_SENT.value
+        for target_id in direct_confirmation_ids
+    }
+    evidence_sources = {
+        target_id: "same_day_delivery_confirmation"
+        for target_id in direct_confirmation_ids
+    }
+    live_audit_target_ids = tuple(
+        target_identity(target)
+        for target in targets
+        if target_identity(target) not in direct_confirmation_ids
+    )
+    return TodayDeliveryReconciliationPlan(
+        outcomes,
+        evidence_sources,
+        live_audit_target_ids,
+    )
+
+
+def reconcile_today_delivery(
+    config: AppConfig,
+    chat,
+    today: date,
+    *,
+    plan: TodayDeliveryReconciliationPlan | None = None,
+) -> TodayDeliveryReconciliation:
+    """Audit only targets lacking strong same-day delivery confirmation.
+
+    Discovery is deliberately not part of this operation.  Binding resolution
+    reads the repair invocation's existing authoritative snapshot; browser
+    navigation, history auditing and the normal sender then remain serialized
+    through the supplied ``chat`` session.
+    """
+    targets = enabled_daily_targets(config)
+    plan = plan or plan_today_delivery_reconciliation(config, today)
+    targets_by_id = {target_identity(target): target for target in targets}
+    live_targets = [
+        targets_by_id[target_id]
+        for target_id in plan.live_audit_target_ids
+        if target_id in targets_by_id
+    ]
+    resolutions = _binding_resolutions(config, live_targets)
+    outcomes = dict(plan.outcomes)
+    evidence_sources = dict(plan.evidence_sources)
+    supplement_ids: set[str] = set()
+    for target in live_targets:
+        target_id = target_identity(target)
+        try:
+            expected = preview_today_target_message(config, target, today).text
+        except (OSError, ValueError, MessagePackError):
+            outcomes[target_id] = TodayOutgoingStatus.UNKNOWN.value
+            evidence_sources[target_id] = "live_chat_audit_unavailable"
+            continue
+        resolution = resolutions.get(target.stable_id or "")
+        if resolution is None or not resolution.valid or not resolution.conversation_id:
+            outcomes[target_id] = TodayOutgoingStatus.UNKNOWN.value
+            evidence_sources[target_id] = "binding_unavailable"
+            continue
+        try:
+            identity = chat.open_conversation_identity(
+                target_id,
+                resolution.conversation_id,
+                target.name,
+                timeout_ms=config.friend_search_timeout_ms,
+            )
+            if not identity.identity_match:
+                outcomes[target_id] = TodayOutgoingStatus.UNKNOWN.value
+                evidence_sources[target_id] = "live_chat_audit_unavailable"
+                continue
+            audit = chat.audit_today_outgoing(expected, today)
+        except (FatalChatError, RuntimeError):
+            outcomes[target_id] = TodayOutgoingStatus.UNKNOWN.value
+            evidence_sources[target_id] = "live_chat_audit_unavailable"
+            continue
+        outcomes[target_id] = audit.status.value
+        evidence_sources[target_id] = "live_chat_audit"
+        if audit.status is TodayOutgoingStatus.CONFIRMED_MISSING:
+            supplement_ids.add(target_id)
+
+    statuses = apply_today_delivery_reconciliation(
+        config,
+        outcomes,
+        today,
+        evidence_sources=evidence_sources,
+    )
+    pre_supplement_success_count = sum(
+        status == "success" for status in statuses.values()
+    )
+    pre_supplement_complete = bool(targets) and all(
+        statuses.get(target_identity(target)) == "success" for target in targets
+    )
+    supplement_result = None
+    if supplement_ids:
+        supplement_result = run_daily(
+            config,
+            chat,
+            today,
+            trigger_source="manual",
+            target_ids=supplement_ids,
+        )
+    return TodayDeliveryReconciliation(
+        outcomes,
+        pre_supplement_success_count,
+        pre_supplement_complete,
+        supplement_result,
+        len(plan.live_audit_target_ids),
+        evidence_sources,
     )
 
 
@@ -531,6 +857,7 @@ def _record_history(
             error_summary=(result.error or "")[:240] or None,
             failed_target_ids=failed_target_ids,
             confirmation_results=result.confirmation_results,
+            confirmation_provenance=result.confirmation_provenance,
             target_failures=result.target_failures,
         )
     )
@@ -564,15 +891,18 @@ def run_daily(
             "succeeded": [],
             "failures": {},
             "confirmation_results": {},
+            "confirmation_provenance": {},
             "consumed": False,
         },
     )
     daily.setdefault("confirmation_results", {})
+    daily.setdefault("confirmation_provenance", {})
     daily.setdefault("target_failures", {})
     run_id = daily.setdefault(
         "task_run_id",
         _daily_run_id(today),
     )
+    required_targets = enabled_daily_targets(config)
     targets = enabled_execution_targets(config)
     if config.friend_order == "randomized":
         random.SystemRandom().shuffle(targets)
@@ -589,7 +919,7 @@ def run_daily(
         ]
     else:
         selected_targets = targets
-    binding_resolutions = _binding_resolutions(config, selected_targets)
+    binding_resolutions = _binding_resolutions(config, required_targets)
     conversation_ids = {
         target_id: resolution.conversation_id
         for target_id, resolution in binding_resolutions.items()
@@ -610,6 +940,14 @@ def run_daily(
         for target in selected_targets:
             target_id = target_identity(target)
             if effective_before_run.get(target_id) == "success":
+                continue
+            if (
+                daily.get("delivery_reconciliation", {}).get(target_id)
+                == TodayOutgoingStatus.CONFIRMED_MISSING.value
+            ):
+                # Browser history has already proven that this exact today's
+                # message is absent.  It is a safe supplemental send even if
+                # an old local record had claimed success rather than failure.
                 continue
             previous = stored_failures.get(target_id)
             if previous is not None and (
@@ -719,9 +1057,9 @@ def run_daily(
             )
             result = RunResult(
                 RunStatus.UNCERTAIN if unsafe else RunStatus.FINAL_FAILED,
-                len(targets),
+                len(required_targets),
                 0,
-                len(targets) - len(targeted_blocking_details),
+                len(required_targets) - len(targeted_blocking_details),
                 len(targeted_blocking_details),
                 next(iter(targeted_blocking_details.values())).reason_code,
                 run_id=run_id,
@@ -765,16 +1103,29 @@ def run_daily(
         discovered = load_discovered_friends(
             config.state_file.parent / "discovered_friends.json"
         )
-        for target in selected_targets:
+        for target in required_targets:
             target_id = target_identity(target)
             resolution = binding_resolutions.get(target.stable_id or "")
-            if resolution is None or resolution.valid:
+            if effective_before_run.get(target_id) == "success":
                 continue
-            detail = _binding_failure_detail(
-                target,
-                resolution,
-                run_id=run_id,
-                account_scope=discovered.account_scope if discovered else None,
+            if resolution is not None and resolution.valid:
+                continue
+            detail = (
+                _binding_failure_detail(
+                    target,
+                    resolution,
+                    run_id=run_id,
+                    account_scope=discovered.account_scope if discovered else None,
+                )
+                if resolution is not None
+                else failure_detail(
+                    "binding_missing",
+                    stage="target_binding_resolved",
+                    run_id=run_id,
+                    target_stable_id=target_id,
+                    binding_valid=False,
+                    account_scope_matches=True,
+                )
             )
             binding_blocked[target_id] = detail
             daily["failures"][target.name] = detail.reason_code
@@ -782,15 +1133,20 @@ def run_daily(
     pending = [
         target for target in selected_targets
         if effective_before_run.get(target_identity(target)) != "success"
+        and effective_before_run.get(target_identity(target)) != "unknown"
         and " ".join(target.name.split()).casefold() not in ambiguous_names
         and target_identity(target) not in binding_blocked
     ]
-    total = len(targets)
+    total = len(required_targets)
     skipped = total - len(pending)
     if not pending:
         status = (
             RunStatus.UNCERTAIN
             if ambiguous_targets
+            or any(
+                effective_before_run.get(target_identity(target)) == "unknown"
+                for target in selected_targets
+            )
             else RunStatus.FINAL_FAILED
             if binding_blocked
             else RunStatus.ALREADY_DONE
@@ -810,6 +1166,7 @@ def run_daily(
             run_id=run_id,
             target_failures=details,
         )
+        store.save(state)
         _record_history(
             config,
             started,
@@ -880,17 +1237,18 @@ def run_daily(
     outcome_store.start(run_id, started)
 
     messages = read_messages(config.messages_file)
-    if not daily["message"]:
-        daily["message"] = rotation.peek(messages, state.rotation)
-        store.save(state)
     daily.setdefault("messages_by_target", {})
 
     sent = 0
     retries = outcome.retry_attempts
     confirmation_results: dict[str, str] = {}
+    confirmation_provenance: dict[str, str] = {}
     safe_failure_reason: str | None = None
     unsafe_failure_reason: str | None = "blocked_ambiguous_target" if ambiguous_targets else None
-    blocking_failure_reason: str | None = None
+    blocking_failure_reason: str | None = next(
+        (detail.reason_code for detail in binding_blocked.values()),
+        None,
+    )
     if requested_target_ids is not None:
         for target_id, detail in _stored_target_failures(daily).items():
             if target_id in requested_target_ids:
@@ -920,35 +1278,33 @@ def run_daily(
         remaining = target.delay_offset_minutes * 60 - (time.monotonic() - run_started)
         if remaining > 0:
             time.sleep(remaining)
-        if target.message_pack is not None or config.default_message_pack:
-            try:
-                target_message = _resolve_target_message(target, config, today, daily, messages)
-            except MessagePackError as exc:
-                daily["failures"][target_name] = "send_failed_before_action"
-                target_id = target_identity(target)
-                detail = failure_detail(
-                    "message_pack_unavailable",
-                    stage="message_prepared",
-                    run_id=run_id,
-                    target_stable_id=target_id,
-                    binding_valid=bool(target.stable_id and target.candidate_id),
-                    account_scope_matches=True,
-                    diagnostic_details={"exception_type": type(exc).__name__},
-                )
-                daily["target_failures"][target_id] = detail.model_dump(
-                    mode="json"
-                )
-                blocking_failure_reason = (
-                    blocking_failure_reason or detail.reason_code
-                )
-                logger.warning("目标文案包不可用：%s：%s", target_name, exc)
-                store.save(state)
-                continue
-        elif (target.message_selection or config.message_selection) == "per_friend":
-            target_message = _resolve_target_message(target, config, today, daily, messages)
+        try:
+            target_message = _resolve_target_message(
+                target,
+                config,
+                today,
+                daily,
+                messages,
+                state.rotation,
+            )
+        except MessagePackError as exc:
+            daily["failures"][target_name] = "send_failed_before_action"
+            target_id = target_identity(target)
+            detail = failure_detail(
+                "message_pack_unavailable",
+                stage="message_prepared",
+                run_id=run_id,
+                target_stable_id=target_id,
+                binding_valid=bool(target.stable_id and target.candidate_id),
+                account_scope_matches=True,
+                diagnostic_details={"exception_type": type(exc).__name__},
+            )
+            daily["target_failures"][target_id] = detail.model_dump(mode="json")
+            blocking_failure_reason = blocking_failure_reason or detail.reason_code
+            logger.warning("目标文案包不可用：%s：%s", target_name, exc)
             store.save(state)
-        else:
-            target_message = _resolve_target_message(target, config, today, daily, messages)
+            continue
+        store.save(state)
         target_id = target_identity(target)
         try:
             delivery = _send_target(
@@ -965,12 +1321,17 @@ def run_daily(
             delivery = DeliveryResult(DeliveryStatus.SEND_FAILED, error=str(exc))
         confirmation_results[target_id] = delivery.status.value
         daily["confirmation_results"][target_id] = delivery.status.value
+        provenance = delivery.confirmation_provenance.value
+        confirmation_provenance[target_id] = provenance
+        daily["confirmation_provenance"][target_id] = provenance
         retries += max(0, delivery.confirmation_attempts - 1)
         error = delivery.error or delivery.status.value
         if delivery.successful:
             daily["succeeded"].append(target_name)
             daily["failures"].pop(target_name, None)
             daily["target_failures"].pop(target_id, None)
+            daily.get("delivery_reconciliation", {}).pop(target_id, None)
+            daily.get("delivery_reconciliation_evidence", {}).pop(target_id, None)
             sent += 1
             logger.info("发送已确认：%s（%s）", target_name, delivery.status.value)
         else:
@@ -1009,15 +1370,26 @@ def run_daily(
     )
     complete = all(
         effective_after_run.get(target_identity(target)) == "success"
-        for target in targets
+        for target in required_targets
     )
     if complete and not daily.get("consumed"):
-        rotation.consume(daily["message"], state.rotation)
+        rotated_messages = [
+            message
+            for message in [daily.get("message")]
+            if message
+        ]
+        rotated_messages.extend(
+            message
+            for key, message in daily.get("messages_by_target", {}).items()
+            if key.startswith("pack:one-for-all:") and message
+        )
+        for message in dict.fromkeys(rotated_messages):
+            rotation.consume(message, state.rotation)
         daily["consumed"] = True
         store.save(state)
     failed_targets = [
         target
-        for target in targets
+        for target in required_targets
         if effective_after_run.get(target_identity(target)) != "success"
     ]
     if complete:
@@ -1055,12 +1427,13 @@ def run_daily(
         unsafe_failure_reason or safe_failure_reason or blocking_failure_reason,
         run_id,
         retries,
-        confirmation_results,
-        {
+        confirmation_results=confirmation_results,
+        target_failures={
             target_id: detail
             for target_id, detail in _stored_target_failures(daily).items()
             if target_id in {target_identity(target) for target in failed_targets}
         },
+        confirmation_provenance=confirmation_provenance,
     )
     _record_history(
         config,

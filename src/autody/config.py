@@ -106,14 +106,19 @@ class AppConfig(BaseModel):
         return self
 
 
+def enabled_daily_targets(config: AppConfig) -> list[Target]:
+    """Return every enabled target required for daily completion."""
+    return [target for target in config.targets if target.enabled]
+
+
 def enabled_execution_targets(config: AppConfig) -> list[Target]:
-    """Return the enabled target set that a modern binding-aware run can use.
+    """Return the enabled target set that a modern binding-aware run may send to.
 
     Legacy name-only projects remain supported until at least one candidate
     binding exists. Once candidate bindings are present, partially migrated or
     detached records must not inflate planning counts or reach the sender.
     """
-    enabled = [target for target in config.targets if target.enabled]
+    enabled = enabled_daily_targets(config)
     if not any(target.candidate_id for target in config.targets):
         return enabled
     return [

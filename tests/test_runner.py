@@ -3,15 +3,18 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from autody.config import AppConfig, Target
 from autody.chat import (
+    DeliveryConfirmationProvenance,
     DeliveryResult,
     DeliveryStatus,
     FatalChatError,
     conversation_candidate_id,
+    TodayOutgoingStatus,
 )
 from autody import runner as runner_module
 from autody.failures import failure_detail
@@ -19,7 +22,11 @@ from autody.logging_setup import DailyAppendFileHandler
 from autody.message_packs import MessagePackService
 from autody.runner import (
     RunStatus,
+    apply_today_delivery_reconciliation,
+    apply_today_human_verified_delivery_reconciliation,
     automatic_daily_run_gate,
+    plan_today_delivery_reconciliation,
+    reconcile_today_delivery,
     record_safe_pre_send_failure,
     run_daily,
 )
@@ -153,7 +160,8 @@ def test_automatic_gate_stops_before_browser_when_all_targets_succeeded(
         "message": "",
         "succeeded": ["当前有效目标"],
         "failures": {},
-        "confirmation_results": {},
+        "confirmation_results": {"target-current": "confirmed"},
+        "confirmation_provenance": {"target-current": "post_send_observed"},
         "consumed": True,
     }
     store.save(state)
@@ -230,7 +238,7 @@ def test_automatic_gate_reopens_only_proven_safe_legacy_final_failure(
     assert resumed.next_attempt_at == datetime(2026, 8, 10, 8, 0)
 
 
-def test_modern_run_excludes_enabled_records_without_an_executable_binding(
+def test_modern_run_keeps_enabled_records_without_bindings_in_daily_denominator(
     tmp_path: Path,
 ):
     config = make_config(tmp_path)
@@ -248,9 +256,417 @@ def test_modern_run_excludes_enabled_records_without_an_executable_binding(
 
     result = run_daily(config, chat, date(2026, 7, 30))
 
-    assert result.total_targets == 1
+    assert result.status is RunStatus.FINAL_FAILED
+    assert result.total_targets == 2
     assert result.sent_count == 1
+    assert result.failed_count == 1
     assert [name for name, _message in chat.sent] == ["当前有效目标"]
+
+
+def test_binding_blocked_targets_prevent_false_daily_completion(tmp_path: Path):
+    config = make_config(tmp_path)
+    config.min_delay_seconds = 0
+    config.max_delay_seconds = 0
+    executable = [
+        Target(
+            name=f"可执行目标 {index}",
+            stable_id=f"target-{index}",
+            candidate_id=f"candidate-{index}",
+        )
+        for index in range(3)
+    ]
+    blocked = [Target(name=f"缺少绑定目标 {index}") for index in range(6)]
+    config.targets = executable + blocked
+    write_verified_retry_scope(
+        tmp_path,
+        [target.candidate_id for target in executable if target.candidate_id],
+    )
+    bind_authoritatively(config)
+
+    chat = FakeChat()
+    result = run_daily(config, chat, date(2026, 8, 10))
+    state = StateStore(config.state_file).load()
+    gated = automatic_daily_run_gate(
+        config,
+        now=datetime(2026, 8, 10, 8, 0),
+    )
+
+    assert result.status is RunStatus.FINAL_FAILED
+    assert result.total_targets == 9
+    assert result.sent_count == 3
+    assert result.failed_count == 6
+    assert [name for name, _message in chat.sent] == [target.name for target in executable]
+    assert state.daily["2026-08-10"]["consumed"] is False
+    assert gated is not None
+    assert gated.status is RunStatus.FINAL_FAILED
+    assert gated.total_targets == 9
+
+
+def test_reconciliation_missing_overrides_stale_success_and_keeps_full_denominator(tmp_path: Path):
+    config = make_config(tmp_path)
+    config.targets = [
+        Target(name=f"目标 {index}", stable_id=f"target-{index}")
+        for index in range(9)
+    ]
+    day = date(2026, 8, 30)
+    state = StateStore(config.state_file).load()
+    state.daily[day.isoformat()] = {
+        "message": "早安",
+        "succeeded": [target.name for target in config.targets],
+        "failures": {},
+        "confirmation_results": {},
+        "consumed": True,
+    }
+    StateStore(config.state_file).save(state)
+
+    statuses = apply_today_delivery_reconciliation(
+        config,
+        {
+            **{
+                target.stable_id: TodayOutgoingStatus.CONFIRMED_SENT.value
+                for target in config.targets[:3]
+            },
+            **{
+                target.stable_id: TodayOutgoingStatus.CONFIRMED_MISSING.value
+                for target in config.targets[3:]
+            },
+        },
+        day,
+    )
+    stored = StateStore(config.state_file).load().daily[day.isoformat()]
+
+    assert sum(status == "success" for status in statuses.values()) == 3
+    assert sum(status == "pending" for status in statuses.values()) == 6
+    assert len(statuses) == 9
+    assert stored["consumed"] is False
+
+
+def test_human_verified_today_is_explicit_reconciliation_evidence_not_post_send(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.targets = [
+        Target(name=f"目标 {index}", stable_id=f"target-{index}")
+        for index in range(9)
+    ]
+    day = date(2026, 8, 30)
+
+    statuses = apply_today_human_verified_delivery_reconciliation(
+        config,
+        confirmed_sent_ids={"target-0", "target-1", "target-2"},
+        confirmed_missing_ids={
+            "target-3", "target-4", "target-5", "target-6", "target-7", "target-8"
+        },
+        today=day,
+    )
+    stored = StateStore(config.state_file).load().daily[day.isoformat()]
+
+    assert sum(status == "success" for status in statuses.values()) == 3
+    assert sum(status == "pending" for status in statuses.values()) == 6
+    assert stored["consumed"] is False
+    assert set(stored["delivery_reconciliation"].values()) == {
+        "confirmed_sent",
+        "confirmed_missing",
+    }
+    assert set(stored["delivery_reconciliation_evidence"].values()) == {
+        "human_verified_today"
+    }
+    assert set(stored["confirmation_provenance"].values()) == {
+        "human_verified_today"
+    }
+
+
+def test_reconciliation_sent_corrects_stale_failure_without_resend(tmp_path: Path):
+    config = make_config(tmp_path)
+    config.targets = [Target(name="目标", stable_id="target-a")]
+    day = date(2026, 8, 30)
+    state = StateStore(config.state_file).load()
+    state.daily[day.isoformat()] = {
+        "message": "早安",
+        "succeeded": [],
+        "failures": {"目标": "conversation_not_found"},
+        "confirmation_results": {"target-a": "send_failed"},
+        "consumed": False,
+    }
+    StateStore(config.state_file).save(state)
+
+    statuses = apply_today_delivery_reconciliation(
+        config,
+        {"target-a": TodayOutgoingStatus.CONFIRMED_SENT.value},
+        day,
+    )
+    stored = StateStore(config.state_file).load().daily[day.isoformat()]
+
+    assert statuses == {"target-a": "success"}
+    assert "目标" not in stored["failures"]
+    assert stored["confirmation_results"]["target-a"] == "confirmed"
+
+
+def test_reconciliation_unknown_preserves_same_day_confirmed_delivery(tmp_path: Path):
+    config = make_config(tmp_path)
+    config.targets = [Target(name="目标", stable_id="target-a")]
+    day = date(2026, 8, 30)
+    state = StateStore(config.state_file).load()
+    state.daily[day.isoformat()] = {
+        "message": "早安",
+        "succeeded": [],
+        "failures": {},
+        "confirmation_results": {"target-a": "confirmed"},
+        "confirmation_provenance": {"target-a": "post_send_observed"},
+        "consumed": True,
+    }
+    StateStore(config.state_file).save(state)
+
+    statuses = apply_today_delivery_reconciliation(
+        config,
+        {"target-a": TodayOutgoingStatus.UNKNOWN.value},
+        day,
+    )
+
+    assert statuses == {"target-a": "success"}
+
+
+def test_reconciliation_unknown_does_not_trust_legacy_success(tmp_path: Path):
+    config = make_config(tmp_path)
+    config.targets = [Target(name="目标", stable_id="target-a")]
+    day = date(2026, 8, 30)
+    state = StateStore(config.state_file).load()
+    state.daily[day.isoformat()] = {
+        "message": "早安",
+        "succeeded": ["目标"],
+        "failures": {},
+        "confirmation_results": {},
+        "consumed": True,
+    }
+    StateStore(config.state_file).save(state)
+
+    statuses = apply_today_delivery_reconciliation(
+        config,
+        {"target-a": TodayOutgoingStatus.UNKNOWN.value},
+        day,
+    )
+    stored = StateStore(config.state_file).load().daily[day.isoformat()]
+
+    assert statuses == {"target-a": "unknown"}
+    assert stored["consumed"] is False
+
+
+def test_reconciliation_unknown_never_enters_the_sender(tmp_path: Path):
+    config = make_config(tmp_path)
+    config.targets = [
+        Target(name="目标", stable_id="target-a", candidate_id="candidate-a")
+    ]
+    write_verified_retry_scope(tmp_path, ["candidate-a"])
+    bind_authoritatively(config)
+
+    class UnknownChat:
+        sent = []
+
+        def open_conversation_identity(self, *_args, **_kwargs):
+            return SimpleNamespace(identity_match=True)
+
+        def audit_today_outgoing(self, *_args, **_kwargs):
+            return SimpleNamespace(status=TodayOutgoingStatus.UNKNOWN)
+
+        def send(self, *_args, **_kwargs):
+            raise AssertionError("unknown history must never be resent")
+
+    result = reconcile_today_delivery(config, UnknownChat(), date(2026, 8, 30))
+
+    assert result.outcomes == {"target-a": "unknown"}
+    assert result.supplement_result is None
+    assert automatic_daily_run_gate(
+        config, now=datetime(2026, 8, 30, 8, 0)
+    ).status is RunStatus.UNCERTAIN
+
+
+def test_reconciliation_uses_same_day_confirmations_without_live_chat_audit(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.targets = [
+        Target(name=f"目标 {index}", stable_id=f"target-{index}")
+        for index in range(9)
+    ]
+    day = date(2026, 8, 30)
+    state = StateStore(config.state_file).load()
+    state.daily[day.isoformat()] = {
+        "message": "早安",
+        "succeeded": [],
+        "failures": {},
+        "confirmation_results": {
+            target.stable_id: "confirmed" if index % 2 else "retry_confirmed"
+            for index, target in enumerate(config.targets)
+        },
+        "confirmation_provenance": {
+            target.stable_id: "post_send_observed"
+            for target in config.targets
+        },
+        "consumed": True,
+    }
+    StateStore(config.state_file).save(state)
+
+    class NoLiveChat:
+        def __getattr__(self, name):
+            raise AssertionError(f"strong confirmation must not access chat.{name}")
+
+    result = reconcile_today_delivery(config, NoLiveChat(), day)
+
+    assert set(result.outcomes) == {target.stable_id for target in config.targets}
+    assert set(result.outcomes.values()) == {"confirmed_sent"}
+    assert result.live_audit_required == 0
+    assert set(result.evidence_sources.values()) == {
+        "same_day_delivery_confirmation"
+    }
+    assert result.supplement_result is None
+
+
+def test_reconciliation_does_not_treat_unproven_same_text_confirmations_as_sent(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.targets = [
+        Target(name=f"目标 {index}", stable_id=f"target-{index}")
+        for index in range(9)
+    ]
+    day = date(2026, 8, 30)
+    state = StateStore(config.state_file).load()
+    state.daily[day.isoformat()] = {
+        "message": "早安",
+        "succeeded": [target.name for target in config.targets],
+        "failures": {},
+        "confirmation_results": {
+            target.stable_id: "confirmed" for target in config.targets
+        },
+        "consumed": True,
+    }
+    StateStore(config.state_file).save(state)
+
+    plan = plan_today_delivery_reconciliation(config, day)
+
+    assert plan.outcomes == {}
+    assert plan.evidence_sources == {}
+    assert set(plan.live_audit_target_ids) == {
+        target.stable_id for target in config.targets
+    }
+
+
+def test_unproven_pre_send_match_cannot_complete_nine_daily_targets(tmp_path: Path):
+    config = make_config(tmp_path)
+    config.targets = [Target(name=f"目标 {index}") for index in range(9)]
+
+    class PreSendMatchChat:
+        def send(self, _target, _message):
+            return DeliveryResult(DeliveryStatus.CONFIRMED, send_attempts=0)
+
+    result = run_daily(config, PreSendMatchChat(), date(2026, 8, 30))
+    state = StateStore(config.state_file).load()
+    statuses = runner_module.effective_daily_target_statuses(
+        config, state, date(2026, 8, 30)
+    )
+
+    assert result.sent_count == 0
+    assert result.status is not RunStatus.COMPLETED
+    assert sum(status == "success" for status in statuses.values()) == 0
+    assert state.daily["2026-08-30"]["consumed"] is False
+
+
+def test_reconciliation_only_live_audits_targets_without_strong_confirmation(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.targets = [
+        Target(name="已确认", stable_id="target-confirmed"),
+        Target(name="待核实", stable_id="target-live", candidate_id="candidate-live"),
+    ]
+    write_verified_retry_scope(tmp_path, ["candidate-live"])
+    bind_authoritatively(config)
+    day = date(2026, 8, 30)
+    state = StateStore(config.state_file).load()
+    state.daily[day.isoformat()] = {
+        "message": "早安",
+        "succeeded": [],
+        "failures": {},
+        "confirmation_results": {"target-confirmed": "confirmed"},
+        "confirmation_provenance": {
+            "target-confirmed": "post_send_observed"
+        },
+        "consumed": False,
+    }
+    StateStore(config.state_file).save(state)
+
+    class TargetedAuditChat:
+        def __init__(self):
+            self.opened: list[str] = []
+
+        def open_conversation_identity(self, target_id, *_args, **_kwargs):
+            self.opened.append(target_id)
+            return SimpleNamespace(identity_match=True)
+
+        def audit_today_outgoing(self, *_args, **_kwargs):
+            return SimpleNamespace(status=TodayOutgoingStatus.UNKNOWN)
+
+        def send(self, *_args, **_kwargs):
+            raise AssertionError("unknown history must never be resent")
+
+    chat = TargetedAuditChat()
+    result = reconcile_today_delivery(config, chat, day)
+
+    assert chat.opened == ["target-live"]
+    assert result.outcomes == {
+        "target-confirmed": "confirmed_sent",
+        "target-live": "unknown",
+    }
+    assert result.live_audit_required == 1
+    assert result.evidence_sources == {
+        "target-confirmed": "same_day_delivery_confirmation",
+        "target-live": "live_chat_audit",
+    }
+    assert result.supplement_result is None
+
+
+def test_reconciliation_supplement_uses_normal_confirmed_send_path(tmp_path: Path):
+    config = make_config(tmp_path)
+    config.min_delay_seconds = 0
+    config.max_delay_seconds = 0
+    config.targets = [
+        Target(name="目标", stable_id="target-a", candidate_id="candidate-a")
+    ]
+    write_verified_retry_scope(tmp_path, ["candidate-a"])
+    bind_authoritatively(config)
+
+    class MissingChat:
+        def __init__(self):
+            self.sent = []
+
+        def open_conversation_identity(self, *_args, **_kwargs):
+            return SimpleNamespace(identity_match=True)
+
+        def audit_today_outgoing(self, *_args, **_kwargs):
+            return SimpleNamespace(status=TodayOutgoingStatus.CONFIRMED_MISSING)
+
+        def send(self, target, message, **_kwargs):
+            self.sent.append((target, message))
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMED,
+                send_attempts=1,
+                confirmation_provenance=DeliveryConfirmationProvenance.POST_SEND_OBSERVED,
+            )
+
+    chat = MissingChat()
+    result = reconcile_today_delivery(config, chat, date(2026, 8, 30))
+    statuses = runner_module.effective_daily_target_statuses(
+        config, StateStore(config.state_file).load(), date(2026, 8, 30)
+    )
+
+    assert result.outcomes == {"target-a": "confirmed_missing"}
+    assert result.supplement_result is not None
+    assert result.supplement_result.status is RunStatus.COMPLETED
+    assert len(chat.sent) == 1
+    assert statuses == {"target-a": "success"}
+    stored = StateStore(config.state_file).load().daily["2026-08-30"]
+    assert "target-a" not in stored["delivery_reconciliation"]
+    assert "target-a" not in stored["delivery_reconciliation_evidence"]
 
 
 def test_running_denominator_is_immutable_and_next_run_uses_latest_targets(
@@ -315,7 +731,11 @@ def test_partial_pre_send_failure_retries_only_the_unconfirmed_target(tmp_path: 
                     send_attempts=0,
                     error="target not found",
                 )
-            return DeliveryResult(DeliveryStatus.CONFIRMED, send_attempts=1)
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMED,
+                send_attempts=1,
+                confirmation_provenance=DeliveryConfirmationProvenance.POST_SEND_OBSERVED,
+            )
 
     first_chat = PartialChat("目标8")
     first = run_daily(
@@ -373,7 +793,11 @@ def test_runner_passes_current_stable_binding_to_navigation(tmp_path: Path):
             self.calls.append(
                 (target, selected_target_id, expected_conversation_id)
             )
-            return DeliveryResult(DeliveryStatus.CONFIRMED, send_attempts=1)
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMED,
+                send_attempts=1,
+                confirmation_provenance=DeliveryConfirmationProvenance.POST_SEND_OBSERVED,
+            )
 
     chat = BindingAwareChat()
     result = run_daily(config, chat, date(2026, 7, 30))
@@ -412,7 +836,11 @@ def test_runner_uses_authoritative_identity_when_candidate_cache_key_is_stale(
 
         def send(self, _target, _message, *, expected_conversation_id=None, **_kwargs):
             self.expected_conversation_ids.append(expected_conversation_id)
-            return DeliveryResult(DeliveryStatus.CONFIRMED, send_attempts=1)
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMED,
+                send_attempts=1,
+                confirmation_provenance=DeliveryConfirmationProvenance.POST_SEND_OBSERVED,
+            )
 
     chat = BindingAwareChat()
     result = run_daily(config, chat, date(2026, 7, 30))
@@ -454,7 +882,11 @@ def test_runner_blocks_avatar_only_candidate_before_the_send_boundary(tmp_path: 
 
         def send(self, *args, **kwargs):
             self.calls.append((args, kwargs))
-            return DeliveryResult(DeliveryStatus.CONFIRMED, send_attempts=1)
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMED,
+                send_attempts=1,
+                confirmation_provenance=DeliveryConfirmationProvenance.POST_SEND_OBSERVED,
+            )
 
     chat = NoSendChat()
     result = run_daily(config, chat, date(2026, 8, 9), now=datetime(2026, 8, 9, 7, 30))
@@ -572,7 +1004,7 @@ def test_runner_resolves_account_scoped_bindings_to_current_conversation_identit
         trigger_source=trigger_source,
     )
 
-    assert result.total_targets == 8
+    assert result.total_targets == 9
     assert result.sent_count == 0
     assert len(chat.calls) == 8
     assert [call[1] for call in chat.calls] == [
@@ -871,6 +1303,62 @@ def test_default_message_pack_uses_the_canonical_stable_id(
     ]
 
 
+def test_one_for_all_message_pack_reuses_today_then_advances_after_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    config = make_config(tmp_path)
+    program_root = tmp_path / "program"
+    pack_dir = program_root / "message-packs"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "daily-greeting.txt").write_text("早呀\n早上好\n", encoding="utf-8")
+    (pack_dir / "index.json").write_text(
+        '{"packs":[{"id":"daily-greeting","name":"日常问候","description":"","version":"1","file":"daily-greeting.txt","count":2,"category":"daily"}]}',
+        encoding="utf-8",
+    )
+    config.default_message_pack = "daily-greeting"
+    monkeypatch.setenv("AUTODY_PROGRAM_ROOT", str(program_root))
+
+    class PartialChat:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, target, message):
+            self.sent.append((target, message))
+            if target == "小红":
+                return DeliveryResult(
+                    DeliveryStatus.SEND_FAILED,
+                    send_attempts=0,
+                    failure_stage="conversation_located",
+                    reason_code="conversation_not_found",
+                    error="target not found",
+                )
+
+    first_day_chat = PartialChat()
+    first_day = run_daily(config, first_day_chat, date(2026, 8, 30))
+    retry_chat = FakeChat()
+    same_day_retry = run_daily(
+        config,
+        retry_chat,
+        date(2026, 8, 30),
+        trigger_source="retry",
+        now=datetime(2026, 8, 30, 7, 31),
+        target_ids={runner_module.target_identity(config.targets[1])},
+    )
+    second_day_chat = FakeChat()
+    second_day = run_daily(config, second_day_chat, date(2026, 8, 31))
+
+    assert first_day.status is RunStatus.RETRY_PENDING
+    assert same_day_retry.status is RunStatus.RECOVERED
+    first_day_messages = [message for _target, message in first_day_chat.sent]
+    retry_messages = [message for _target, message in retry_chat.sent]
+    second_day_messages = [message for _target, message in second_day_chat.sent]
+    assert len(set(first_day_messages)) == 1
+    assert retry_messages == [first_day_messages[0]]
+    assert len(set(second_day_messages)) == 1
+    assert first_day_messages[0] != second_day_messages[0]
+    assert second_day.status is RunStatus.COMPLETED
+
+
 def test_target_pack_uses_managed_catalog_without_changing_selection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1018,7 +1506,11 @@ def test_targeted_retry_can_reopen_safe_target_without_retrying_uncertain_peer(
                     reason_code="conversation_not_found",
                     error="target not found",
                 )
-            return DeliveryResult(DeliveryStatus.CONFIRMED, send_attempts=1)
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMED,
+                send_attempts=1,
+                confirmation_provenance=DeliveryConfirmationProvenance.POST_SEND_OBSERVED,
+            )
 
     first = run_daily(config, FirstChat(), date(2026, 7, 30))
     assert first.status is RunStatus.UNCERTAIN
@@ -1028,7 +1520,11 @@ def test_targeted_retry_can_reopen_safe_target_without_retrying_uncertain_peer(
 
         def send(self, target, _message, **_kwargs):
             self.calls.append(target)
-            return DeliveryResult(DeliveryStatus.CONFIRMED, send_attempts=1)
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMED,
+                send_attempts=1,
+                confirmation_provenance=DeliveryConfirmationProvenance.POST_SEND_OBSERVED,
+            )
 
     retry_chat = RetryChat()
     retried = run_daily(
@@ -1120,7 +1616,11 @@ def test_targeted_retry_accepts_current_platform_digest_scope(
 
         def send(self, target, _message, **_kwargs):
             self.calls.append(target)
-            return DeliveryResult(DeliveryStatus.CONFIRMED, send_attempts=1)
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMED,
+                send_attempts=1,
+                confirmation_provenance=DeliveryConfirmationProvenance.POST_SEND_OBSERVED,
+            )
 
     chat = RetryChat()
     result = run_daily(

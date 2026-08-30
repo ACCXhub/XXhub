@@ -12,7 +12,7 @@ from datetime import date, timedelta
 
 from autody.config import (
     AppConfig,
-    enabled_execution_targets,
+    enabled_daily_targets,
     stable_target_id,
     target_identity,
 )
@@ -22,6 +22,14 @@ from autody.state import AppState
 
 SUCCESS_FINAL_STATUSES = {"completed", "already_done", "recovered"}
 SUCCESS_CONFIRMATIONS = {"confirmed", "retry_confirmed"}
+POST_SEND_CONFIRMATION_PROVENANCE = {"post_send_observed"}
+
+
+def is_post_send_confirmation(status: object, provenance: object) -> bool:
+    return (
+        status in SUCCESS_CONFIRMATIONS
+        and provenance in POST_SEND_CONFIRMATION_PROVENANCE
+    )
 
 
 def _daily_send_records_by_day(
@@ -32,6 +40,68 @@ def _daily_send_records_by_day(
         if record.task_type == "daily_send":
             grouped.setdefault(record.date, []).append(record)
     return grouped
+
+
+def _current_target_aliases(config: AppConfig) -> dict[str, str]:
+    """Map unambiguous historical target identities to current identities."""
+    aliases: dict[str, str] = {}
+    ambiguous_aliases: set[str] = set()
+    for target in enabled_daily_targets(config):
+        identity = target_identity(target)
+        for alias in {
+            target.stable_id,
+            target.candidate_id,
+            stable_target_id(target.name),
+        } - {None}:
+            previous = aliases.get(alias)
+            if previous is not None and previous != identity:
+                ambiguous_aliases.add(alias)
+                continue
+            aliases[alias] = identity
+    for alias in ambiguous_aliases:
+        aliases.pop(alias, None)
+    return aliases
+
+
+def same_day_confirmed_target_ids(
+    config: AppConfig,
+    state: AppState,
+    day: date,
+    records: Sequence[TaskRunRecord] | None = None,
+) -> set[str]:
+    """Return targets proven sent by AutoDy's normal same-day confirmation.
+
+    A strong confirmation must retain the post-send observation provenance.
+    Bare legacy status strings, ``succeeded`` names and consumed flags never
+    prove that this invocation actually crossed the send boundary.
+    """
+    aliases = _current_target_aliases(config)
+    confirmed: set[str] = set()
+    daily = state.daily.get(day.isoformat(), {})
+    provenance = daily.get("confirmation_provenance", {})
+    for historical_id, result in daily.get("confirmation_results", {}).items():
+        identity = aliases.get(historical_id)
+        if identity is not None and is_post_send_confirmation(
+            result,
+            provenance.get(historical_id) if isinstance(provenance, Mapping) else None,
+        ):
+            confirmed.add(identity)
+
+    if records is None:
+        records = TaskHistoryStore(
+            config.state_file.parent / "history" / "task-runs.jsonl"
+        ).query(start_date=day, end_date=day, page_size=100).items
+    for record in records:
+        if record.task_type != "daily_send" or record.date != day.isoformat():
+            continue
+        for historical_id, result in record.confirmation_results.items():
+            identity = aliases.get(historical_id)
+            if identity is not None and is_post_send_confirmation(
+                result,
+                record.confirmation_provenance.get(historical_id),
+            ):
+                confirmed.add(identity)
+    return confirmed
 
 
 def _day_is_success(
@@ -52,7 +122,10 @@ def _day_is_success(
         target_id
         for record in records
         for target_id, result in record.confirmation_results.items()
-        if result in SUCCESS_CONFIRMATIONS
+        if is_post_send_confirmation(
+            result,
+            record.confirmation_provenance.get(target_id),
+        )
     }
     return len(confirmed_target_ids) >= required_targets
 
@@ -118,50 +191,42 @@ def effective_daily_target_statuses(
 
     Historical execution identity, current persistent binding identity, and
     live DOM identity are separate concepts. Stored events are associated only
-    through explicit current aliases; later failures cannot downgrade a
-    confirmed success.
+    through explicit current aliases.  Current-day chat reconciliation is the
+    final authority when it proves a local record stale; inconclusive evidence
+    remains explicitly unknown rather than being treated as a send failure.
     """
-    targets = enabled_execution_targets(config)
+    targets = enabled_daily_targets(config)
     statuses = {target_identity(target): "pending" for target in targets}
-    aliases: dict[str, str] = {}
-    ambiguous_aliases: set[str] = set()
-    for target in targets:
-        identity = target_identity(target)
-        for alias in {
-            target.stable_id,
-            target.candidate_id,
-            stable_target_id(target.name),
-        } - {None}:
-            previous = aliases.get(alias)
-            if previous is not None and previous != identity:
-                ambiguous_aliases.add(alias)
-                continue
-            aliases[alias] = identity
-    for alias in ambiguous_aliases:
-        aliases.pop(alias, None)
+    aliases = _current_target_aliases(config)
 
     daily = state.daily.get(day.isoformat(), {})
-    succeeded_names = set(daily.get("succeeded", []))
     failed_names = set(daily.get("failures", {}))
-    for target in targets:
-        identity = target_identity(target)
-        if target.name in succeeded_names:
-            statuses[identity] = "success"
-        elif target.name in failed_names:
-            statuses[identity] = "failed"
-    for historical_id, result in daily.get("confirmation_results", {}).items():
-        identity = aliases.get(historical_id)
-        if identity is None:
-            continue
-        if result in {"confirmed", "retry_confirmed"}:
-            statuses[identity] = "success"
-        elif statuses[identity] != "success":
-            statuses[identity] = "failed"
-
     if records is None:
         records = TaskHistoryStore(
             config.state_file.parent / "history" / "task-runs.jsonl"
         ).query(start_date=day, end_date=day, page_size=100).items
+    strong_confirmations = same_day_confirmed_target_ids(
+        config, state, day, records
+    )
+    for target in targets:
+        identity = target_identity(target)
+        if target.name in failed_names:
+            statuses[identity] = "failed"
+    current_provenance = daily.get("confirmation_provenance", {})
+    for historical_id, result in daily.get("confirmation_results", {}).items():
+        identity = aliases.get(historical_id)
+        if identity is None:
+            continue
+        if is_post_send_confirmation(
+            result,
+            current_provenance.get(historical_id)
+            if isinstance(current_provenance, Mapping)
+            else None,
+        ):
+            statuses[identity] = "success"
+        elif result not in SUCCESS_CONFIRMATIONS and statuses[identity] != "success":
+            statuses[identity] = "failed"
+
     for record in sorted(records, key=lambda item: item.end_time):
         if record.task_type != "daily_send" or record.date != day.isoformat():
             continue
@@ -174,9 +239,22 @@ def effective_daily_target_statuses(
                 statuses[identity] = "failed"
         for historical_id, result in record.confirmation_results.items():
             identity = aliases.get(historical_id)
-            if identity is not None and result in {
-                "confirmed",
-                "retry_confirmed",
-            }:
+            if identity is not None and is_post_send_confirmation(
+                result,
+                record.confirmation_provenance.get(historical_id),
+            ):
                 statuses[identity] = "success"
+    reconciliation = daily.get("delivery_reconciliation", {})
+    if isinstance(reconciliation, dict):
+        for target in targets:
+            outcome = reconciliation.get(target_identity(target))
+            if outcome == "confirmed_sent":
+                statuses[target_identity(target)] = "success"
+            elif outcome == "confirmed_missing":
+                statuses[target_identity(target)] = "pending"
+            elif (
+                outcome == "unknown"
+                and target_identity(target) not in strong_confirmations
+            ):
+                statuses[target_identity(target)] = "unknown"
     return statuses

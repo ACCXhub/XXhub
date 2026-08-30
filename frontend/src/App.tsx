@@ -55,6 +55,14 @@ function accountRefreshErrorMessage(error: unknown): string {
   return "当前账号资料刷新失败，请检查 AutoDy 管理台连接。";
 }
 
+function manualRunFailureMessage(status: DashboardStatus): string | null {
+  const latestManualRun = status.history.find(
+    (item) => item.task_type === "daily_send" && item.trigger_source === "manual"
+  );
+  if (latestManualRun?.final_status !== "uncertain") return null;
+  return "发送状态不确定：系统无法验证今日消息的本次发送确认。为避免重复发送，已停止。请先人工核对聊天记录；不要自动重试。";
+}
+
 export default function App() {
   const [view, setView] = useState<ViewName | "test-center">("dashboard");
   const [status, setStatus] = useState<DashboardStatus | null>(null);
@@ -117,9 +125,11 @@ export default function App() {
       const finished = await api.waitForAction(job.id);
       const nextStatus = await refreshAll();
       if (finished.status === "failed") {
+        const manualRunFailure = name === "run" ? manualRunFailureMessage(nextStatus) : null;
         const failure = nextStatus.friends.find((friend) => friend.failure)?.failure;
         throw new Error(
-          failure?.user_summary_zh
+          manualRunFailure
+          || failure?.user_summary_zh
           || finished.failure?.user_summary_zh
           || `操作失败（诊断退出码 ${finished.exit_code ?? "未知"}）`
         );

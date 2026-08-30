@@ -190,7 +190,7 @@ def test_health_check_refreshes_fresh_candidate_snapshot_without_sending(
     assert len(calls) == 1
 
 
-def test_manual_account_refresh_always_runs_complete_friend_discovery(
+def test_manual_account_refresh_uses_targeted_configured_refresh(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -206,7 +206,7 @@ def test_manual_account_refresh_always_runs_complete_friend_discovery(
         def __exit__(self, *_args):
             return False
 
-    def discover(_loaded, page, *_args, **_kwargs):
+    def refresh(_loaded, page, *_args, **_kwargs):
         calls.append(page)
         return FriendDiscoveryResult(
             "2026-08-25T08:00:00",
@@ -220,7 +220,7 @@ def test_manual_account_refresh_always_runs_complete_friend_discovery(
         "autody.cli.resolve_account_profile",
         lambda *_args, **_kwargs: SimpleNamespace(switched=False),
     )
-    monkeypatch.setattr("autody.cli.discover_friends", discover)
+    monkeypatch.setattr("autody.cli.refresh_configured_targets", refresh)
     monkeypatch.setattr("autody.cli._complete_friend_discovery", lambda *_args, **_kwargs: None)
 
     result = runner.invoke(app, ["refresh-account-profile", "--config", str(config)])
@@ -468,7 +468,7 @@ def test_friend_scan_merges_bindings_without_reverting_concurrent_membership(
     assert restored.targets[0].candidate_id == "candidate-xiaoming"
 
 
-def test_login_success_starts_one_read_only_friend_scan(tmp_path: Path, monkeypatch):
+def test_login_success_starts_one_read_only_targeted_refresh(tmp_path: Path, monkeypatch):
     (tmp_path / "messages.txt").write_text("早安\n", encoding="utf-8")
     config = tmp_path / "config.yaml"
     config.write_text("targets: []\nmessages_file: messages.txt\n", encoding="utf-8")
@@ -478,22 +478,22 @@ def test_login_success_starts_one_read_only_friend_scan(tmp_path: Path, monkeypa
         calls.append(("login", home))
         on_ready(object())
 
-    def discover(_loaded, page, *_args, **_kwargs):
+    def refresh(_loaded, page, *_args, **_kwargs):
         calls.append(("scan", page))
         return FriendDiscoveryResult("2026-07-05T08:00:00", [], tmp_path / "data" / "discovered_friends.json")
 
     monkeypatch.setattr("autody.cli.browser_login", browser_login)
-    monkeypatch.setattr("autody.cli.discover_friends", discover)
+    monkeypatch.setattr("autody.cli.refresh_configured_targets", refresh)
 
     result = runner.invoke(app, ["login", "--config", str(config)])
 
     assert result.exit_code == 0
     assert [item[0] for item in calls] == ["login", "scan"]
     assert "登录状态已保存。" in result.stdout
-    assert "候选好友已刷新" in result.stdout
+    assert "配置目标已刷新" in result.stdout
 
 
-def test_login_keeps_success_when_automatic_scan_fails(tmp_path: Path, monkeypatch):
+def test_login_keeps_success_when_automatic_targeted_refresh_fails(tmp_path: Path, monkeypatch):
     (tmp_path / "messages.txt").write_text("早安\n", encoding="utf-8")
     config = tmp_path / "config.yaml"
     config.write_text("targets: []\nmessages_file: messages.txt\n", encoding="utf-8")
@@ -503,14 +503,17 @@ def test_login_keeps_success_when_automatic_scan_fails(tmp_path: Path, monkeypat
         on_ready(object())
 
     monkeypatch.setattr("autody.cli.browser_login", browser_login)
-    monkeypatch.setattr("autody.cli.discover_friends", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("scan failed")))
-    monkeypatch.setattr("autody.cli.record_discovery_failure", lambda *_args, **kwargs: failures.append(kwargs.get("error")))
+    monkeypatch.setattr("autody.cli.refresh_configured_targets", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("scan failed")))
+    monkeypatch.setattr(
+        "autody.cli.record_target_refresh_failure",
+        lambda *_args, **kwargs: failures.append(str(kwargs["error"])),
+    )
 
     result = runner.invoke(app, ["login", "--config", str(config)])
 
     assert result.exit_code == 0
     assert "登录状态已保存。" in result.stdout
-    assert "候选好友扫描失败" in result.stdout
+    assert "配置目标刷新失败" in result.stdout
     assert failures == ["scan failed"]
 
 

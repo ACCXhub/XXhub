@@ -15,6 +15,7 @@ def run(
     end_time: str | None = None,
     total_targets: int = 2,
     confirmation_results: dict[str, str] | None = None,
+    confirmation_provenance: dict[str, str] | None = None,
 ):
     return TaskRunRecord(
         run_id=day,
@@ -35,6 +36,7 @@ def run(
         retry_count=retries,
         final_status=status,
         confirmation_results=confirmation_results or {},
+        confirmation_provenance=confirmation_provenance or {},
     )
 
 
@@ -129,6 +131,7 @@ def test_partial_recovery_uses_explicit_historical_confirmations():
             success_count=1,
             failed_count=1,
             confirmation_results={"target-a": "confirmed"},
+            confirmation_provenance={"target-a": "post_send_observed"},
         ),
         run(
             "2026-07-13",
@@ -138,6 +141,7 @@ def test_partial_recovery_uses_explicit_historical_confirmations():
             skipped_count=1,
             end_time="2026-07-13T08:31:00",
             confirmation_results={"target-b": "retry_confirmed"},
+            confirmation_provenance={"target-b": "post_send_observed"},
         ),
     ]
 

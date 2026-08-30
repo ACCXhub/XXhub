@@ -15,6 +15,7 @@
 - 多账号本地 profile/snapshot 隔离；账号写操作与 browser action 互斥；
 - Scheduler 使用原交互用户 Principal、`RunLevel Limited`，Dashboard 常态非提升，写操作走一次性受约束 UAC；
 - 托盘以 service identity + 用户/路径/解释器/进程事实验证服务 ownership，端口冲突安全回退 8766–8799；
+- 本机 canonical runtime 是源码仓库：影响实际行为的源码修改完成后，直接切换或重启到当前源码，核验 repository identity、`127.0.0.1:8765` 并做最小运行验收；除非明确要求正式发布，MSI/Portable 不作为本地修改生效步骤；
 - watchdog 对 verified service 有界恢复：进程退出或约 15–20 秒连续 health failure、graceful first、exact PID 再验证、3 次/10 分钟熔断、manual full exit suppression；
 - MSI/Portable standalone runtime，MSI ProgramRoot/DataRoot 分离，普通卸载默认保留 DataRoot；
 - 普通 CI 与正式 Release validation 已分层。

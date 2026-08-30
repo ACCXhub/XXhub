@@ -2,11 +2,12 @@ from datetime import datetime
 from io import BytesIO
 import json
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 from PIL import Image
 
-from autody.chat import ChatSelectors
+from autody.chat import ChatSelectors, opaque_conversation_identity
 from autody.config import AppConfig, Target
 from autody.friend_discovery import (
     ScanProgress,
@@ -17,6 +18,7 @@ from autody.friend_discovery import (
     refresh_configured_targets,
     refresh_configured_avatars,
     scan_friend_names,
+    targeted_refresh_cache_is_usable,
 )
 
 
@@ -353,6 +355,7 @@ def test_targeted_refresh_updates_only_proven_targets_and_preserves_full_scan_fr
     assert refreshed.last_result == full.last_result
     assert refreshed.target_refresh["found_target_ids"] == ["target-a"]
     assert refreshed.target_refresh["rows_examined"] == 2
+    assert refreshed.target_refresh["ended_by"] == "targets_found"
     assert targeted_page.position == 0
     assert targeted_page.waits == []
     current = next(
@@ -360,6 +363,248 @@ def test_targeted_refresh_updates_only_proven_targets_and_preserves_full_scan_fr
     )
     assert current.configured_target_id == "target-a"
     assert current.last_seen_at == "2026-08-25T08:00:00"
+
+
+def test_targeted_refresh_stops_after_all_configured_identities_are_found(
+    tmp_path: Path,
+):
+    selectors = ChatSelectors.test_defaults()
+    output = tmp_path / "data" / "discovered_friends.json"
+    write_account_profile(tmp_path, "account-a")
+    identities = [f"participant-{index}" for index in range(9)]
+    config = AppConfig(
+        targets=[
+            Target(
+                name=f"目标 {index}",
+                stable_id=f"target-{index}",
+                candidate_id=f"candidate-{index}",
+                binding_identity_key=opaque_conversation_identity(
+                    "participant", identity
+                ),
+                binding_identity_source="participant_sec_user_id",
+                binding_account_scope="account-a",
+            )
+            for index, identity in enumerate(identities)
+        ]
+    )
+
+    class Scroll:
+        def __init__(self, page):
+            self.page = page
+
+        def count(self):
+            return 1
+
+        @property
+        def first(self):
+            return self
+
+        def wait_for(self, **_kwargs):
+            return None
+
+        def evaluate(self, expression, *_args):
+            if "scrollTop = 0" in expression:
+                self.page.position = 0
+            elif "before" in expression:
+                return {"before": self.page.position, "maximum": 1, "step": 1}
+            else:
+                self.page.position += 1
+
+    class Conversations:
+        def __init__(self, page):
+            self.page = page
+
+        def count(self):
+            return len(self.page.rows[self.page.position])
+
+        def evaluate_all(self, _script, _options):
+            return self.page.rows[self.page.position]
+
+        def nth(self, _index):
+            raise AssertionError("batched snapshots must not retain row Locators")
+
+    class Page:
+        def __init__(self):
+            self.position = 0
+            self.rows = [
+                [
+                    {
+                        "name": f"目标 {index}",
+                        "participant": identity,
+                        "conversation": f"conversation-{index}",
+                        "avatarSource": None,
+                        "attributes": {},
+                        "rowIndex": index,
+                    }
+                    for index, identity in enumerate(identities)
+                ],
+                [
+                    {
+                        "name": f"无关会话 {index}",
+                        "participant": f"other-{index}",
+                        "conversation": f"other-conversation-{index}",
+                        "avatarSource": None,
+                        "attributes": {},
+                        "rowIndex": index,
+                    }
+                    for index in range(71)
+                ],
+            ]
+            self.scroll = Scroll(self)
+            self.conversations = Conversations(self)
+
+        def locator(self, selector):
+            if selector == selectors.conversation:
+                return self.conversations
+            if selector == selectors.conversation_list:
+                return self.scroll
+            raise AssertionError(selector)
+
+        def wait_for_timeout(self, _delay):
+            return None
+
+    refreshed = refresh_configured_targets(
+        config,
+        Page(),
+        selectors,
+        output,
+        now=lambda: datetime(2026, 8, 25, 8, 0, 0),
+    )
+
+    assert refreshed.target_refresh["ended_by"] == "targets_found"
+    assert refreshed.target_refresh["rows_inspected"] == 9
+    assert refreshed.target_refresh["found_target_ids"] == [
+        f"target-{index}" for index in range(9)
+    ]
+    assert targeted_refresh_cache_is_usable(
+        config,
+        output,
+        datetime(2026, 8, 25, 8, 1, 0),
+    ) is not None
+
+
+def test_complete_account_compatible_snapshot_skips_targeted_scan(tmp_path: Path):
+    selectors = ChatSelectors.test_defaults()
+    output = tmp_path / "data" / "discovered_friends.json"
+    write_account_profile(tmp_path, "account-a")
+    full = discover_friends(
+        AppConfig(),
+        FakePage(
+            selectors,
+            rows=[[
+                RuntimeConversationItem(
+                    selectors,
+                    "已绑定目标",
+                    b"avatar",
+                    participant="participant-a",
+                    conversation="conversation-a",
+                )
+            ]],
+        ),
+        selectors,
+        output,
+        now=lambda: datetime(2026, 8, 25, 8, 0, 0),
+    )
+    candidate = full.candidates[0]
+    config = AppConfig(
+        targets=[
+            Target(
+                name="已绑定目标",
+                stable_id="target-a",
+                candidate_id=candidate.candidate_id,
+                binding_identity_key=candidate.identity_key,
+                binding_identity_source="participant_sec_user_id",
+                binding_account_scope="account-a",
+            )
+        ]
+    )
+
+    cached = targeted_refresh_cache_is_usable(
+        config,
+        output,
+        datetime(2026, 8, 25, 8, 1, 0),
+    )
+
+    assert cached is not None
+    assert cached.target_refresh["ended_by"] == "cache"
+    assert cached.target_refresh["rows_inspected"] == 0
+    assert cached.target_refresh["found_target_ids"] == ["target-a"]
+
+
+def test_batched_snapshots_fetch_avatars_without_live_row_locators(
+    tmp_path: Path,
+    monkeypatch,
+):
+    selectors = ChatSelectors.test_defaults()
+    thread_ids: list[int] = []
+    barrier = threading.Barrier(2)
+
+    def fetch(source, cache_dir, _timeout_ms):
+        thread_ids.append(threading.get_ident())
+        barrier.wait(timeout=2)
+        temporary = cache_dir / f".{source.rsplit('/', 1)[-1]}.png"
+        temporary.write_bytes(source.encode())
+        return temporary, source, False
+
+    monkeypatch.setattr("autody.friend_discovery._fetch_avatar_from_source", fetch)
+
+    class NoScroll:
+        def count(self):
+            return 0
+
+        @property
+        def first(self):
+            return self
+
+        def wait_for(self, **_kwargs):
+            return None
+
+    class Conversations:
+        def count(self):
+            return 2
+
+        def evaluate_all(self, _script, _options):
+            return [
+                {
+                    "name": "甲",
+                    "participant": "participant-a",
+                    "conversation": "conversation-a",
+                    "avatarSource": "https://avatar.example/a",
+                    "attributes": {},
+                    "rowIndex": 0,
+                },
+                {
+                    "name": "乙",
+                    "participant": "participant-b",
+                    "conversation": "conversation-b",
+                    "avatarSource": "https://avatar.example/b",
+                    "attributes": {},
+                    "rowIndex": 1,
+                },
+            ]
+
+        def nth(self, _index):
+            raise AssertionError("avatar workers must not use a row Locator")
+
+    class Page:
+        def locator(self, selector):
+            if selector == selectors.conversation:
+                return Conversations()
+            if selector == selectors.conversation_list:
+                return NoScroll()
+            raise AssertionError(selector)
+
+    result = discover_friends(
+        AppConfig(),
+        Page(),
+        selectors,
+        tmp_path / "data" / "discovered_friends.json",
+        avatar_cache_dir=tmp_path / "data" / "avatar-cache",
+        max_scrolls=0,
+    )
+
+    assert len(set(thread_ids)) == 2
+    assert all(candidate.avatar_status == "cached" for candidate in result.candidates)
 
 
 def test_targeted_refresh_skips_fresh_cached_target_avatar(tmp_path: Path):

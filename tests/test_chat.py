@@ -1,5 +1,6 @@
 from dataclasses import replace
 from pathlib import Path
+from datetime import date
 
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -12,6 +13,7 @@ from autody.chat import (
     DOUYIN_SELECTORS,
     DeliveryStatus,
     DouyinChat,
+    TodayOutgoingStatus,
     conversation_candidate_id,
     conversation_row_candidate_id,
     conversation_row_identity,
@@ -32,16 +34,19 @@ def fake_chat(page, tmp_path: Path):
 def test_send_confirms_exact_target_and_message(page, fake_chat):
     result = fake_chat.send("小明", "早安")
     assert result.status is DeliveryStatus.CONFIRMED
+    assert result.confirmation_provenance == "post_send_observed"
     assert page.locator('[data-e2e="message-text"]', has_text="早安").count() == 1
 
 
-def test_existing_latest_message_is_not_sent_twice(page, fake_chat):
+def test_pre_send_same_text_does_not_confirm_delivery(page, fake_chat):
     page.locator('[data-e2e="message-list"]').evaluate(
         "(el) => { const p=document.createElement('p'); p.dataset.e2e='message-text'; p.textContent='早安'; el.append(p); }"
     )
     result = fake_chat.send("小明", "早安")
-    assert result.send_attempts == 0
-    assert page.locator('[data-e2e="message-text"]', has_text="早安").count() == 1
+    assert result.status is DeliveryStatus.CONFIRMED
+    assert result.send_attempts == 1
+    assert result.confirmation_provenance == "post_send_observed"
+    assert page.locator('[data-e2e="message-text"]', has_text="早安").count() == 2
 
 
 def test_duplicate_names_are_rejected(page, fake_chat):
@@ -449,9 +454,8 @@ def test_confirmation_normalizes_whitespace_and_line_endings(page, tmp_path):
         "(el) => { const p=document.createElement('p'); p.dataset.e2e='message-text'; p.textContent='你好\\n  gpt小助手'; el.append(p); }"
     )
     chat = DouyinChat(page, ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0)
-    result = chat.send("小明", "你好\r\ngpt小助手")
-    assert result.status is DeliveryStatus.CONFIRMED
-    assert result.send_attempts == 0
+    assert chat._latest_matches("你好\r\ngpt小助手")
+    assert chat._matching_outgoing_count("你好\r\ngpt小助手") == 1
     assert normalize_message_text("你好\r\n gpt小助手") == "你好 gpt小助手"
 
 
@@ -468,6 +472,105 @@ def test_latest_outgoing_uses_visual_order_for_reversed_douyin_dom(page, tmp_pat
     chat = DouyinChat(page, ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0)
 
     assert chat._latest_outgoing_text() == "最新消息"
+
+
+def test_today_history_audit_confirms_expected_outgoing_message(page, tmp_path):
+    page.goto((Path("tests/fixtures/chat.html").resolve()).as_uri())
+    page.locator('[data-e2e="message-list"]').evaluate(
+        """el => {
+            const time = document.createElement('time');
+            time.textContent = '今天 08:00';
+            const message = document.createElement('p');
+            message.dataset.e2e = 'message-text'; message.textContent = '早安';
+            el.append(time, message);
+        }"""
+    )
+    chat = DouyinChat(page, ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0)
+
+    audit = chat.audit_today_outgoing("早安", date(2026, 8, 30))
+
+    assert audit.status is TodayOutgoingStatus.CONFIRMED_SENT
+    assert audit.reason == "expected_message_found"
+
+
+def test_today_history_audit_does_not_confirm_same_text_without_today_evidence(
+    page, tmp_path
+):
+    page.goto((Path("tests/fixtures/chat.html").resolve()).as_uri())
+    page.locator('[data-e2e="message-list"]').evaluate(
+        "(el) => { const p=document.createElement('p'); p.dataset.e2e='message-text'; p.textContent='早安'; el.append(p); }"
+    )
+    chat = DouyinChat(page, ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0)
+
+    audit = chat.audit_today_outgoing("早安", date(2026, 8, 30))
+
+    assert audit.status is TodayOutgoingStatus.UNKNOWN
+    assert audit.reason == "date_evidence_unavailable"
+
+
+def test_today_history_audit_requires_a_boundary_before_missing(page, tmp_path):
+    page.goto((Path("tests/fixtures/chat.html").resolve()).as_uri())
+    page.locator('[data-e2e="message-list"]').evaluate(
+        """el => {
+            const time = document.createElement('time');
+            time.textContent = '昨天 21:00';
+            const message = document.createElement('p');
+            message.dataset.e2e = 'message-text'; message.textContent = '旧消息';
+            el.append(time, message);
+        }"""
+    )
+    chat = DouyinChat(page, ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0)
+
+    audit = chat.audit_today_outgoing("早安", date(2026, 8, 30))
+
+    assert audit.status is TodayOutgoingStatus.CONFIRMED_MISSING
+    assert audit.boundary == "prior_day_marker"
+    assert audit.reason == "previous_day_boundary_reached"
+
+
+def test_today_history_audit_loads_older_history_until_a_previous_day_boundary(page, tmp_path):
+    page.goto((Path("tests/fixtures/chat.html").resolve()).as_uri())
+    page.locator('[data-e2e="message-list"]').evaluate(
+        """el => {
+            el.style.height = '80px'; el.style.overflow = 'auto';
+            const spacer = document.createElement('div'); spacer.style.height = '240px'; el.append(spacer);
+            let reachedBottom = false;
+            el.addEventListener('scroll', () => {
+              if (el.scrollTop > 1) reachedBottom = true;
+              if (reachedBottom && el.scrollTop <= 1 && !el.querySelector('time')) {
+                const time = document.createElement('time'); time.textContent = '昨天 21:00'; el.prepend(time);
+              }
+            });
+        }"""
+    )
+    chat = DouyinChat(page, ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0)
+
+    audit = chat.audit_today_outgoing("早安", date(2026, 8, 30))
+
+    assert audit.status is TodayOutgoingStatus.CONFIRMED_MISSING
+    assert audit.reason == "previous_day_boundary_reached"
+
+
+def test_today_history_audit_accepts_the_true_history_start_as_a_missing_boundary(page, tmp_path):
+    page.goto((Path("tests/fixtures/chat.html").resolve()).as_uri())
+    chat = DouyinChat(page, ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0)
+
+    audit = chat.audit_today_outgoing("早安", date(2026, 8, 30))
+
+    assert audit.status is TodayOutgoingStatus.CONFIRMED_MISSING
+    assert audit.boundary == "history_start"
+    assert audit.reason == "history_start_reached"
+
+
+def test_today_history_audit_returns_unknown_when_history_container_is_unavailable(page, tmp_path):
+    page.goto((Path("tests/fixtures/chat.html").resolve()).as_uri())
+    page.locator('[data-e2e="message-list"]').evaluate("el => el.remove()")
+    chat = DouyinChat(page, ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0)
+
+    audit = chat.audit_today_outgoing("早安", date(2026, 8, 30))
+
+    assert audit.status is TodayOutgoingStatus.UNKNOWN
+    assert audit.reason == "date_evidence_unavailable"
 
 
 def test_open_chat_bounds_page_load_and_closes_resources(monkeypatch, tmp_path: Path):

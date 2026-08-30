@@ -1,6 +1,6 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 import hashlib
 import re
@@ -117,10 +117,11 @@ class ChatSelectors:
 @dataclass(frozen=True)
 class ConfirmationSelectors:
     outgoing_message_text: str
+    history_container: str
 
     @classmethod
     def test_defaults(cls):
-        return cls('[data-e2e="message-text"]')
+        return cls('[data-e2e="message-text"]', '[data-e2e="message-list"]')
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,25 @@ class DeliveryStatus(str, Enum):
     BLOCKED = "blocked"
 
 
+class DeliveryConfirmationProvenance(str, Enum):
+    NONE = "none"
+    POST_SEND_OBSERVED = "post_send_observed"
+
+
+class TodayOutgoingStatus(str, Enum):
+    CONFIRMED_SENT = "confirmed_sent"
+    CONFIRMED_MISSING = "confirmed_missing"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class TodayOutgoingAudit:
+    status: TodayOutgoingStatus
+    boundary: str | None = None
+    reason: str = "date_evidence_unavailable"
+    rows_inspected: int = 0
+
+
 @dataclass(frozen=True)
 class DeliveryResult:
     status: DeliveryStatus
@@ -151,10 +171,17 @@ class DeliveryResult:
     error: str | None = None
     failure_stage: str | None = None
     reason_code: str | None = None
+    confirmation_provenance: DeliveryConfirmationProvenance = (
+        DeliveryConfirmationProvenance.NONE
+    )
 
     @property
     def successful(self) -> bool:
-        return self.status in {DeliveryStatus.CONFIRMED, DeliveryStatus.RETRY_CONFIRMED}
+        return (
+            self.status in {DeliveryStatus.CONFIRMED, DeliveryStatus.RETRY_CONFIRMED}
+            and self.confirmation_provenance
+            is DeliveryConfirmationProvenance.POST_SEND_OBSERVED
+        )
 
 
 @dataclass(frozen=True)
@@ -286,12 +313,73 @@ DOUYIN_SELECTORS = ChatSelectors(
 # Delivery confirmation selectors are deliberately isolated from navigation and
 # editor selectors. A Douyin page change here must not alter friend search/send.
 DOUYIN_CONFIRMATION_SELECTORS = ConfirmationSelectors(
-    outgoing_message_text=".componentsRightPanelwrapper .MessageBoxContentactiveClickArea .MessageItemTextisFromMe .TextMessageTextpureText"
+    outgoing_message_text=".componentsRightPanelwrapper .MessageBoxContentactiveClickArea .MessageItemTextisFromMe .TextMessageTextpureText",
+    history_container=".componentsRightPanelwrapper .MessageBoxContentactiveClickArea",
 )
 
 
 def normalize_message_text(value: str) -> str:
     return " ".join(value.replace("\r\n", "\n").replace("\r", "\n").split())
+
+
+_FULL_DATE_MARKER = re.compile(r"(?<!\d)(\d{4})[./年-](\d{1,2})[./月-](\d{1,2})(?:日)?")
+_SHORT_DATE_MARKER = re.compile(r"(?<!\d)(\d{1,2})[月/-](\d{1,2})(?:日)?")
+
+
+def _contains_current_day_marker(markers: list[object], today: date) -> bool:
+    """Return true only when the rendered history explicitly names today."""
+    for marker in markers:
+        text = str(marker or "").strip()
+        if not text:
+            continue
+        normalized = text.casefold()
+        if "今天" in text or "today" in normalized:
+            return True
+        for match in _FULL_DATE_MARKER.finditer(text):
+            try:
+                if datetime(
+                    int(match.group(1)), int(match.group(2)), int(match.group(3))
+                ).date() == today:
+                    return True
+            except ValueError:
+                continue
+        for match in _SHORT_DATE_MARKER.finditer(text):
+            try:
+                if (
+                    datetime(
+                        today.year, int(match.group(1)), int(match.group(2))
+                    ).date()
+                    == today
+                ):
+                    return True
+            except ValueError:
+                continue
+    return False
+
+
+def _contains_prior_day_marker(markers: list[object], today: date) -> bool:
+    """Return true only for explicit date evidence that predates ``today``."""
+    for marker in markers:
+        text = str(marker or "").strip()
+        if not text:
+            continue
+        normalized = text.casefold()
+        if "昨天" in text or "前天" in text or "yesterday" in normalized:
+            return True
+        for match in _FULL_DATE_MARKER.finditer(text):
+            try:
+                if datetime(int(match.group(1)), int(match.group(2)), int(match.group(3))).date() < today:
+                    return True
+            except ValueError:
+                continue
+        for match in _SHORT_DATE_MARKER.finditer(text):
+            try:
+                candidate = datetime(today.year, int(match.group(1)), int(match.group(2))).date()
+            except ValueError:
+                continue
+            if candidate < today:
+                return True
+    return False
 
 
 class DouyinChat:
@@ -337,11 +425,148 @@ class DouyinChat:
         latest = self._latest_outgoing_text()
         return latest is not None and normalize_message_text(latest) == normalize_message_text(message)
 
-    def _confirm_delivery(self, message: str) -> tuple[DeliveryStatus | None, int]:
+    def _matching_outgoing_count(self, message: str) -> int:
+        messages = self.page.locator(self.confirmation_selectors.outgoing_message_text)
+        return sum(
+            normalize_message_text(str(text)) == normalize_message_text(message)
+            for text in messages.all_text_contents()
+        )
+
+    def audit_today_outgoing(
+        self,
+        expected_message: str,
+        today: date,
+        *,
+        max_scrolls: int = 80,
+    ) -> TodayOutgoingAudit:
+        """Inspect one verified chat without writing to its composer.
+
+        A sent result is intentionally fail-closed: it requires an explicit
+        current-day marker in addition to the matching outgoing bubble. A
+        missing result requires a prior-day marker or the true history start.
+        A bubble beside an unresolved day boundary is never delivery evidence.
+        """
+        try:
+            history = self.page.locator(self.confirmation_selectors.history_container)
+            if history.count() != 1:
+                return TodayOutgoingAudit(
+                    TodayOutgoingStatus.UNKNOWN,
+                    reason="date_evidence_unavailable",
+                )
+            history = history.first
+            history.evaluate("element => { element.scrollTop = element.scrollHeight; }")
+            self.page.wait_for_timeout(100)
+            previous_top: int | None = None
+            inspected = 0
+            expected = normalize_message_text(expected_message)
+            for _ in range(max_scrolls):
+                snapshot = history.evaluate(
+                    """(element, outgoingSelector) => {
+                        const outgoing = Array.from(element.querySelectorAll(outgoingSelector))
+                          .map(node => node.innerText || node.textContent || '');
+                        const markers = Array.from(element.querySelectorAll(
+                          'time, [datetime], [data-e2e*="time" i], [data-e2e*="date" i], '
+                          + '[class*="time" i], [class*="date" i], [class*="timestamp" i]'
+                        )).map(node => [
+                          node.getAttribute('datetime'), node.getAttribute('title'),
+                          node.innerText || node.textContent || ''
+                        ].filter(Boolean).join(' '));
+                        return {
+                          outgoing,
+                          markers,
+                          scrollTop: Math.max(0, Math.round(element.scrollTop)),
+                          atTop: element.scrollTop <= 1
+                        };
+                    }""",
+                    self.confirmation_selectors.outgoing_message_text,
+                )
+                if not isinstance(snapshot, dict):
+                    return TodayOutgoingAudit(
+                        TodayOutgoingStatus.UNKNOWN,
+                        reason="date_evidence_unavailable",
+                        rows_inspected=inspected,
+                    )
+                texts = snapshot.get("outgoing", [])
+                if not isinstance(texts, list):
+                    return TodayOutgoingAudit(
+                        TodayOutgoingStatus.UNKNOWN,
+                        reason="date_evidence_unavailable",
+                        rows_inspected=inspected,
+                    )
+                inspected += len(texts)
+                boundary = _contains_prior_day_marker(snapshot.get("markers", []), today)
+                expected_seen = any(
+                    normalize_message_text(str(text)) == expected for text in texts
+                )
+                if boundary:
+                    # The viewport can contain both sides of a date divider.
+                    # Without per-bubble date ownership, either conclusion
+                    # would risk a false resend.
+                    return TodayOutgoingAudit(
+                        TodayOutgoingStatus.UNKNOWN if expected_seen else TodayOutgoingStatus.CONFIRMED_MISSING,
+                        boundary="prior_day_marker",
+                        reason="previous_day_boundary_reached",
+                        rows_inspected=inspected,
+                    )
+                if expected_seen:
+                    if not _contains_current_day_marker(
+                        snapshot.get("markers", []), today
+                    ):
+                        return TodayOutgoingAudit(
+                            TodayOutgoingStatus.UNKNOWN,
+                            reason="date_evidence_unavailable",
+                            rows_inspected=inspected,
+                        )
+                    return TodayOutgoingAudit(
+                        TodayOutgoingStatus.CONFIRMED_SENT,
+                        boundary="current_day_history",
+                        reason="expected_message_found",
+                        rows_inspected=inspected,
+                    )
+                scroll_top = snapshot.get("scrollTop")
+                if bool(snapshot.get("atTop")):
+                    return TodayOutgoingAudit(
+                        TodayOutgoingStatus.CONFIRMED_MISSING,
+                        boundary="history_start",
+                        reason="history_start_reached",
+                        rows_inspected=inspected,
+                    )
+                if not isinstance(scroll_top, int) or scroll_top == previous_top:
+                    return TodayOutgoingAudit(
+                        TodayOutgoingStatus.UNKNOWN,
+                        reason="history_load_stalled",
+                        rows_inspected=inspected,
+                    )
+                previous_top = scroll_top
+                history.evaluate(
+                    "element => { element.scrollTop = Math.max(0, element.scrollTop - Math.max(200, element.clientHeight * 0.8)); }"
+                )
+                self.page.wait_for_timeout(100)
+        except Exception:
+            return TodayOutgoingAudit(
+                TodayOutgoingStatus.UNKNOWN,
+                reason="date_evidence_unavailable",
+                rows_inspected=inspected if "inspected" in locals() else 0,
+            )
+        return TodayOutgoingAudit(
+            TodayOutgoingStatus.UNKNOWN,
+            reason="history_load_stalled",
+            rows_inspected=inspected,
+        )
+
+    def _confirm_delivery(
+        self,
+        message: str,
+        *,
+        pre_send_match_count: int,
+    ) -> tuple[DeliveryStatus | None, int]:
         for attempt in range(1, self.confirmation_retries + 2):
             if self.confirmation_delay_ms:
                 self.page.wait_for_timeout(self.confirmation_delay_ms)
-            if self._latest_matches(message):
+            if (
+                self._latest_matches(message)
+                and self._matching_outgoing_count(message) > pre_send_match_count
+            ):
                 status = DeliveryStatus.CONFIRMED if attempt == 1 else DeliveryStatus.RETRY_CONFIRMED
                 return status, attempt
         return None, self.confirmation_retries + 1
@@ -719,12 +944,7 @@ class DouyinChat:
                     )
             else:
                 self.open_verified_conversation(target)
-            if self._latest_matches(message):
-                return DeliveryResult(
-                    DeliveryStatus.CONFIRMED,
-                    send_attempts=0,
-                    confirmation_attempts=1,
-                )
+            pre_send_match_count = self._matching_outgoing_count(message)
             editor = self.composer_editor()
             editor.fill(message)
             # Treat the outcome as potentially sent from the moment Enter is
@@ -732,9 +952,19 @@ class DouyinChat:
             # failures happen before this boundary and remain safe to retry.
             send_attempted = True
             editor.press("Enter")
-            status, attempts = self._confirm_delivery(message)
+            status, attempts = self._confirm_delivery(
+                message,
+                pre_send_match_count=pre_send_match_count,
+            )
             if status:
-                return DeliveryResult(status, send_attempts=1, confirmation_attempts=attempts)
+                return DeliveryResult(
+                    status,
+                    send_attempts=1,
+                    confirmation_attempts=attempts,
+                    confirmation_provenance=(
+                        DeliveryConfirmationProvenance.POST_SEND_OBSERVED
+                    ),
+                )
             screenshot = self.screenshot("confirmation-failed")
             return DeliveryResult(
                 DeliveryStatus.CONFIRMATION_FAILED,

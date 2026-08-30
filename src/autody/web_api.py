@@ -27,12 +27,25 @@ from autody.config import (
     AppConfig,
     MessageSuffixConfig,
     Target,
+    enabled_daily_targets,
     enabled_execution_targets,
     load_config,
     save_config,
     target_identity,
 )
-from autody.daily_status import dashboard_statistics, effective_daily_target_statuses
+from autody.chat import (
+    DOUYIN_CONFIRMATION_SELECTORS,
+    DOUYIN_SELECTORS,
+    AuthenticationError,
+    DouyinChat,
+    FatalChatError,
+    open_chat,
+)
+from autody.daily_status import (
+    dashboard_statistics,
+    effective_daily_target_statuses,
+    is_post_send_confirmation,
+)
 from autody.account_profile import (
     bindings_revalidation_required,
     clear_managed_authentication,
@@ -65,7 +78,13 @@ from autody.modules import (
 from autody.messages import read_messages
 from autody.locking import SingleInstanceLock, TaskAlreadyRunning
 from autody.preflight import PreflightStore
-from autody.runner import preview_today_target_message
+from autody.runner import (
+    TodayDeliveryReconciliation,
+    apply_today_delivery_reconciliation,
+    plan_today_delivery_reconciliation,
+    preview_today_target_message,
+    reconcile_today_delivery,
+)
 from autody.state import StateStore
 from autody.scheduler import ScheduleSettings, SchedulerService
 from autody.test_center_dry_run import (
@@ -599,7 +618,10 @@ def _history_failure_views(
     confirmed_at_by_day: dict[str, dict[str, str]] = defaultdict(dict)
     for record in records:
         for target_id, result in record.confirmation_results.items():
-            if result not in {"confirmed", "retry_confirmed"}:
+            if not is_post_send_confirmation(
+                result,
+                record.confirmation_provenance.get(target_id),
+            ):
                 continue
             previous = confirmed_at_by_day[record.date].get(target_id)
             confirmed_at_by_day[record.date][target_id] = max(
@@ -634,14 +656,15 @@ def _history_failure_views(
 def _today_plan(config: AppConfig, state, day: date, overrides: dict[str, dict] | None = None) -> dict:
     daily = state.daily.get(day.isoformat(), {})
     failures = daily.get("failures", {})
+    required = enabled_daily_targets(config)
     executable = enabled_execution_targets(config)
     effective_statuses = effective_daily_target_statuses(config, state, day)
     executable_ids = {id(target) for target in executable}
     normalized: dict[str, int] = defaultdict(int)
-    for target in executable:
+    for target in required:
         normalized[" ".join(target.name.split()).casefold()] += 1
     base = datetime.combine(day, datetime.strptime(config.daily_send_time, "%H:%M").time())
-    enabled = [target for target in config.targets if target.enabled]
+    enabled = required
     ordered = sorted(
         enumerate(enabled),
         key=lambda row: ((overrides or {}).get(target_identity(row[1]), {}).get("send_order") is None, (overrides or {}).get(target_identity(row[1]), {}).get("send_order", row[0]), row[0]),
@@ -681,7 +704,7 @@ def _today_plan(config: AppConfig, state, day: date, overrides: dict[str, dict] 
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "configuration_source": "current",
         "main_scheduled_time": config.daily_send_time,
-        "enabled_target_count": len(executable),
+        "enabled_target_count": len(required),
         "completed_count": sum(row["status"] == "success" for row in rows),
         "pending_count": sum(row["status"] == "pending" for row in rows),
         "blocked_count": blocked,
@@ -694,7 +717,7 @@ def _failed_targets(config: AppConfig, state, day: date) -> dict:
     daily = state.daily.get(day.isoformat(), {})
     effective_statuses = effective_daily_target_statuses(config, state, day)
     rows = []
-    for target in enabled_execution_targets(config):
+    for target in enabled_daily_targets(config):
         identity = target_identity(target)
         if effective_statuses.get(identity) != "failed":
             continue
@@ -853,6 +876,7 @@ def create_app(
     now_provider=None,
     account_logout_runner=None,
     startup_refresh_enabled: bool = False,
+    today_reconciler=None,
 ) -> FastAPI:
     config_path = config_path.resolve()
     root = config_path.parent
@@ -1115,6 +1139,124 @@ def create_app(
             time.sleep(0.25)
         return {**job, "status": "failed", "exit_code": None}
 
+    def reconcile_repair_today_delivery(
+        config: AppConfig,
+        today: date,
+    ) -> tuple[TodayDeliveryReconciliation | None, str | None]:
+        """Run one serialized chat audit and supplemental send, if warranted.
+
+        This deliberately consumes the already persisted targeted discovery
+        snapshot.  It never invokes friend discovery itself.
+        """
+        required = enabled_daily_targets(config)
+        if not required:
+            return TodayDeliveryReconciliation({}, 0, False), None
+        plan = plan_today_delivery_reconciliation(config, today)
+
+        def unresolved_live_audit(
+            source: str,
+        ) -> TodayDeliveryReconciliation:
+            outcomes = {
+                **plan.outcomes,
+                **{
+                    target_id: "unknown"
+                    for target_id in plan.live_audit_target_ids
+                },
+            }
+            evidence_sources = {
+                **plan.evidence_sources,
+                **{
+                    target_id: source
+                    for target_id in plan.live_audit_target_ids
+                },
+            }
+            statuses = apply_today_delivery_reconciliation(
+                config,
+                outcomes,
+                today,
+                evidence_sources=evidence_sources,
+            )
+            return TodayDeliveryReconciliation(
+                outcomes,
+                sum(status == "success" for status in statuses.values()),
+                bool(required)
+                and all(
+                    statuses.get(target_identity(target)) == "success"
+                    for target in required
+                ),
+                live_audit_required=len(plan.live_audit_target_ids),
+                evidence_sources=evidence_sources,
+            )
+
+        if not plan.live_audit_target_ids:
+            statuses = apply_today_delivery_reconciliation(
+                config,
+                plan.outcomes,
+                today,
+                evidence_sources=plan.evidence_sources,
+            )
+            return (
+                TodayDeliveryReconciliation(
+                    plan.outcomes,
+                    sum(status == "success" for status in statuses.values()),
+                    bool(required)
+                    and all(
+                        statuses.get(target_identity(target)) == "success"
+                        for target in required
+                    ),
+                    live_audit_required=0,
+                    evidence_sources=plan.evidence_sources,
+                ),
+                None,
+            )
+
+        live_audit_ids = set(plan.live_audit_target_ids)
+        live_audit_targets = [
+            target
+            for target in required
+            if target_identity(target) in live_audit_ids
+        ]
+        discovered = load_discovered_friends(
+            config.state_file.parent / "discovered_friends.json"
+        )
+        profile = load_account_profile(config.state_file.parent.parent)
+        guarded = bindings_revalidation_required(config.state_file.parent)
+        if not any(
+            resolve_stable_binding(
+                target,
+                discovered,
+                profile,
+                revalidation_required=guarded,
+                now=current_time(),
+            ).valid
+            for target in live_audit_targets
+        ):
+            return unresolved_live_audit("binding_unavailable"), None
+        try:
+            with SingleInstanceLock(config.lock_file):
+                with open_chat(
+                    config.profile_dir,
+                    config.page_load_timeout_ms,
+                    config.headless,
+                    config.artifact_dir,
+                    home=root,
+                ) as page:
+                    chat = DouyinChat(
+                        page,
+                        DOUYIN_SELECTORS,
+                        config.artifact_dir,
+                        DOUYIN_CONFIRMATION_SELECTORS,
+                        confirmation_delay_ms=max(
+                            250, config.confirmation_timeout_ms // 3
+                        ),
+                        friend_search_timeout_ms=config.friend_search_timeout_ms,
+                    )
+                    return reconcile_today_delivery(
+                        config, chat, today, plan=plan
+                    ), None
+        except (TaskAlreadyRunning, AuthenticationError, FatalChatError, RuntimeError) as exc:
+            return unresolved_live_audit("live_chat_audit_unavailable"), type(exc).__name__
+
     @app.get("/api/service-identity")
     def service_identity():
         package_path = Path(__file__).resolve().parent
@@ -1257,6 +1399,62 @@ def create_app(
         else:
             checks.append({"id": "bindings", "label": "目标稳定绑定正常"})
 
+        config = load_config(config_path)
+        reconciliation, reconciliation_error = (
+            today_reconciler(config, current_time().date())
+            if today_reconciler is not None
+            else reconcile_repair_today_delivery(config, current_time().date())
+        )
+        evidence_counts: dict[str, int] = defaultdict(int)
+        if reconciliation:
+            for source in reconciliation.evidence_sources.values():
+                evidence_counts[source] += 1
+        today_delivery = {
+            "outcomes": reconciliation.outcomes if reconciliation else {},
+            "confirmed_sent": sum(
+                outcome == "confirmed_sent"
+                for outcome in (reconciliation.outcomes.values() if reconciliation else [])
+            ),
+            "confirmed_missing": sum(
+                outcome == "confirmed_missing"
+                for outcome in (reconciliation.outcomes.values() if reconciliation else [])
+            ),
+            "unknown": sum(
+                outcome == "unknown"
+                for outcome in (reconciliation.outcomes.values() if reconciliation else [])
+            ),
+            "pre_supplement_success_count": (
+                reconciliation.pre_supplement_success_count if reconciliation else 0
+            ),
+            "pre_supplement_complete": (
+                reconciliation.pre_supplement_complete if reconciliation else False
+            ),
+            "supplemented": (
+                reconciliation.supplement_result.sent_count
+                if reconciliation and reconciliation.supplement_result
+                else 0
+            ),
+            "scan_count": 0,
+            "live_audit_required": (
+                reconciliation.live_audit_required if reconciliation else 0
+            ),
+            "evidence": dict(evidence_counts),
+        }
+        if reconciliation_error:
+            manual.append({
+                "id": "today_delivery",
+                "label": "今日聊天记录待核实，未自动补发",
+            })
+        elif today_delivery["confirmed_missing"]:
+            repaired.append({
+                "id": "today_delivery",
+                "label": f"已按聊天记录补发 {today_delivery['supplemented']} 位好友",
+            })
+        elif today_delivery["unknown"]:
+            checks.append({"id": "today_delivery", "label": "今日投递记录待核实，未自动补发"})
+        else:
+            checks.append({"id": "today_delivery", "label": "今日投递记录已核对"})
+
         repaired_count = len(repaired)
         manual_count = len(manual)
         summary = f"已修复 {repaired_count} 项"
@@ -1268,6 +1466,7 @@ def create_app(
             "repaired": repaired,
             "manual": manual,
             "checks": checks,
+            "today_delivery": today_delivery,
             "summary": summary,
         }
 
@@ -1279,6 +1478,7 @@ def create_app(
         daily = state.daily.get(
             key, {"message": "", "succeeded": [], "failures": {}, "consumed": False}
         )
+        required_targets = enabled_daily_targets(config)
         executable_targets = enabled_execution_targets(config)
         history_store = TaskHistoryStore(
             config.state_file.parent / "history" / "task-runs.jsonl"
@@ -1311,7 +1511,8 @@ def create_app(
             for candidate in (discovered.candidates if discovered else [])
         }
         cache_dir = config.state_file.parent / "avatar-cache"
-        for target in executable_targets:
+        executable_ids = {id(target) for target in executable_targets}
+        for target in required_targets:
             target_id = target_identity(target)
             effective_status = effective_statuses.get(target_id)
             detail = (
@@ -1319,7 +1520,14 @@ def create_app(
                 if effective_status == "failed"
                 else None
             )
-            friend_status = effective_status or "pending"
+            friend_status = (
+                "blocked"
+                if id(target) not in executable_ids
+                else effective_status or "pending"
+            )
+            reconciliation_outcome = daily.get("delivery_reconciliation", {}).get(
+                target_id
+            )
             resolution = resolve_stable_binding(
                 target,
                 discovered,
@@ -1354,6 +1562,8 @@ def create_app(
                     "error": (
                         detail.user_summary_zh
                         if detail is not None
+                        else "今日聊天记录不足，待核实。"
+                        if reconciliation_outcome == "unknown"
                         else None
                     ),
                     "failure": (
@@ -1580,7 +1790,7 @@ def create_app(
             "failed_today": len(executable_failures),
             "configured_friend_count": len(config.targets),
             "enabled_friend_count": (
-                0 if binding_guarded else len(executable_targets)
+                0 if binding_guarded else len(required_targets)
             ),
             "local_message_count": message_count,
             "active_message_pack_count": pack_count,
@@ -1595,9 +1805,9 @@ def create_app(
                 "message": daily.get("message", ""),
                 "succeeded": len(executable_succeeded),
                 "failed": len(executable_failures),
-                "total": len(executable_targets),
-                "complete": bool(executable_targets)
-                and len(executable_succeeded) == len(executable_targets),
+                "total": len(required_targets),
+                "complete": bool(required_targets)
+                and len(executable_succeeded) == len(required_targets),
             },
             "friends": friends,
             "history": history[:30],

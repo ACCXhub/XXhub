@@ -66,6 +66,23 @@ test("uses resolved avatar metadata and keeps operational sections in priority o
   expect(labels).toEqual(["核心状态", "需要处理", "好友状态", "运行统计"]);
 });
 
+test("shows inconclusive today delivery as 待核实 without offering a resend", () => {
+  const currentStatus = {
+    ...status,
+    friends: [{
+      target_id: "target-unknown", name: "待核实目标", status: "unknown" as const,
+      error: "今日聊天记录不足，待核实。",
+      current_health: { status: "healthy" as const, reason_code: "binding_valid", summary_zh: "绑定有效" }
+    }]
+  };
+
+  render(<DashboardPage status={currentStatus} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} />);
+
+  expect(screen.getByText("待核实")).toBeInTheDocument();
+  expect(screen.getByText("今日聊天记录不足，待核实。")).toBeInTheDocument();
+  expect(screen.queryByText("安全补发")).not.toBeInTheDocument();
+});
+
 test("removes run-by-run history and retry-count noise from the dashboard", () => {
   render(<DashboardPage status={status} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} />);
 
