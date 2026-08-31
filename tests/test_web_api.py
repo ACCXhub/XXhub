@@ -122,6 +122,37 @@ def test_status_returns_dashboard_summary(tmp_path: Path):
     assert data["login"]["status"] == "unknown"
 
 
+def test_status_projects_post_send_uncertain_as_unknown_with_current_detail(tmp_path: Path):
+    config_path = make_project(tmp_path)
+    target = load_config(config_path).targets[0]
+    target_id = stable_target_id(target.name)
+    state_path = tmp_path / "data" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    daily = state["daily"]["2026-06-24"]
+    daily["failures"] = {target.name: "conversation_not_found"}
+    daily["confirmation_results"] = {target_id: "confirmation_failed"}
+    daily["confirmation_provenance"] = {target_id: "none"}
+    daily["target_failures"] = {
+        target_id: failure_detail(
+            "confirmation_failed_uncertain",
+            stage="confirmation_observed",
+            send_attempts=1,
+            target_stable_id=target_id,
+        ).model_dump(mode="json")
+    }
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+    client = TestClient(create_app(config_path))
+    status = client.get("/api/status?today=2026-06-24").json()
+    failed_targets = client.get("/api/failed-targets?today=2026-06-24").json()
+    friend = next(item for item in status["friends"] if item["target_id"] == target_id)
+
+    assert friend["status"] == "unknown"
+    assert friend["failure"]["reason_code"] == "confirmation_failed_uncertain"
+    assert friend["error"] == "消息发送状态无法确认，为防止重复发送已停止"
+    assert failed_targets["items"][0]["reason_code"] == "confirmation_failed_uncertain"
+
+
 def test_overview_friends_follow_the_enabled_target_set_after_batch_mutation(
     tmp_path: Path,
 ):

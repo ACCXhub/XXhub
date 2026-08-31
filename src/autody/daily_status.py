@@ -244,6 +244,18 @@ def effective_daily_target_statuses(
                 record.confirmation_provenance.get(historical_id),
             ):
                 statuses[identity] = "success"
+    current_failures = daily.get("target_failures", {})
+    if isinstance(current_failures, Mapping):
+        for target in targets:
+            identity = target_identity(target)
+            detail = current_failures.get(identity)
+            if (
+                identity not in strong_confirmations
+                and isinstance(detail, Mapping)
+                and bool(detail.get("uncertain_send"))
+                and int(detail.get("send_attempts", 0) or 0) > 0
+            ):
+                statuses[identity] = "unknown"
     reconciliation = daily.get("delivery_reconciliation", {})
     if isinstance(reconciliation, dict):
         for target in targets:

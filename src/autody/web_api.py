@@ -719,7 +719,7 @@ def _failed_targets(config: AppConfig, state, day: date) -> dict:
     rows = []
     for target in enabled_daily_targets(config):
         identity = target_identity(target)
-        if effective_statuses.get(identity) != "failed":
+        if effective_statuses.get(identity) not in {"failed", "unknown"}:
             continue
         detail = _daily_failure_detail(config, target, daily)
         if detail is None:
@@ -1503,7 +1503,7 @@ def create_app(
             effective_status = effective_statuses.get(target_id)
             detail = (
                 _daily_failure_detail(config, target, daily)
-                if effective_status == "failed"
+                if effective_status in {"failed", "unknown"}
                 else None
             )
             friend_status = (
@@ -1689,7 +1689,7 @@ def create_app(
         current_failure_friends = [
             friend
             for friend in friends
-            if friend["status"] == "failed"
+            if friend["status"] in {"failed", "unknown"}
             and friend["failure"] is not None
             and friend["failure"].get("resolved") is not True
         ]

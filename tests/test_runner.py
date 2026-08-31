@@ -13,6 +13,7 @@ from autody.chat import (
     DeliveryResult,
     DeliveryStatus,
     FatalChatError,
+    TodayOutgoingAudit,
     conversation_candidate_id,
     TodayOutgoingStatus,
 )
@@ -1034,6 +1035,72 @@ def test_unknown_outcome_is_reaudited_before_any_future_send(tmp_path: Path):
 
     assert result.status is RunStatus.RECOVERED
     assert (chat.navigations, chat.audits, chat.sent) == (1, 1, 1)
+
+
+def test_post_send_uncertain_replaces_stale_pre_send_failure_with_unknown(tmp_path: Path):
+    config = make_config(tmp_path)
+    config.min_delay_seconds = 0
+    config.max_delay_seconds = 0
+    config.targets = [
+        Target(name="目标", stable_id="target-a", candidate_id="candidate-a")
+    ]
+    write_verified_retry_scope(tmp_path, ["candidate-a"])
+    bind_authoritatively(config)
+    day = date(2026, 8, 30)
+    state = StateStore(config.state_file).load()
+    state.daily[day.isoformat()] = {
+        "message": "早安",
+        "succeeded": [],
+        "failures": {"目标": "conversation_not_found"},
+        "confirmation_results": {"target-a": "send_failed"},
+        "confirmation_provenance": {"target-a": "none"},
+        "target_failures": {
+            "target-a": failure_detail(
+                "conversation_not_found",
+                stage="conversation_located",
+                send_attempts=0,
+                target_stable_id="target-a",
+            ).model_dump(mode="json")
+        },
+        "consumed": False,
+    }
+    StateStore(config.state_file).save(state)
+
+    class UncertainAfterEnterChat:
+        def open_conversation_identity(self, *_args, **_kwargs):
+            return SimpleNamespace(identity_match=True)
+
+        def audit_today_outgoing(self, _today):
+            return TodayOutgoingAudit(TodayOutgoingStatus.CONFIRMED_MISSING)
+
+        def send(self, *_args, conversation_verified=False, **_kwargs):
+            assert conversation_verified is True
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMATION_FAILED,
+                send_attempts=1,
+                confirmation_attempts=1,
+                error="post-send observation unavailable",
+                failure_stage="confirmation_observed",
+                reason_code="confirmation_failed_uncertain",
+            )
+
+    result = run_daily(
+        config,
+        UncertainAfterEnterChat(),
+        day,
+        now=datetime(2026, 8, 30, 8, 0),
+    )
+    daily = StateStore(config.state_file).load().daily[day.isoformat()]
+
+    assert result.status is RunStatus.UNCERTAIN
+    assert daily["target_failures"]["target-a"]["reason_code"] == (
+        "confirmation_failed_uncertain"
+    )
+    assert daily["target_failures"]["target-a"]["send_attempts"] == 1
+    assert daily["failures"]["目标"] == "post-send observation unavailable"
+    assert runner_module.effective_daily_target_statuses(
+        config, StateStore(config.state_file).load(), day
+    ) == {"target-a": "unknown"}
 
 
 def test_running_denominator_is_immutable_and_next_run_uses_latest_targets(

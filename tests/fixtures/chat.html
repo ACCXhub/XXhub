@@ -10,11 +10,13 @@
     <div data-e2e="message-list"></div>
   </main>
   <script>
+    let nextMessageId = 1;
     document.querySelector('[data-e2e="chat-input"]').addEventListener('keydown', event => {
       if (event.key === 'Enter') {
         event.preventDefault();
         const item = document.createElement('p');
         item.className = 'MessageItemTextcontainer MessageItemTextisFromMe';
+        item.dataset.messageId = `test-message-${nextMessageId++}`;
         const text = document.createElement('span');
         text.className = 'TextMessageTextpureText';
         text.dataset.e2e = 'message-text';

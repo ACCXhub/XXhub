@@ -215,6 +215,8 @@ def _send_target(
     *,
     expected_conversation_id: str | None = None,
     conversation_verified: bool = False,
+    pre_send_audit: TodayOutgoingAudit | None = None,
+    delivery_day: date | None = None,
 ) -> DeliveryResult:
     """Pass stable binding evidence when the sender supports it.
 
@@ -239,6 +241,16 @@ def _send_target(
             for item in parameters.values()
         ):
             send_kwargs["conversation_verified"] = conversation_verified
+        if "pre_send_audit" in parameters or any(
+            item.kind is inspect.Parameter.VAR_KEYWORD
+            for item in parameters.values()
+        ):
+            send_kwargs["pre_send_audit"] = pre_send_audit
+        if "delivery_day" in parameters or any(
+            item.kind is inspect.Parameter.VAR_KEYWORD
+            for item in parameters.values()
+        ):
+            send_kwargs["delivery_day"] = delivery_day
         return _delivery_result(
             chat.send(
                 target.name,
@@ -324,6 +336,8 @@ def _execute_today_target(
             message,
             expected_conversation_id=expected_conversation_id,
             conversation_verified=True,
+            pre_send_audit=audit,
+            delivery_day=today,
         ),
     )
 

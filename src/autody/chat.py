@@ -441,12 +441,54 @@ class DouyinChat:
         latest = self._latest_outgoing_text()
         return latest is not None and normalize_message_text(latest) == normalize_message_text(message)
 
-    def _matching_outgoing_count(self, message: str) -> int:
+    def _outgoing_message_identities(self) -> dict[str, str]:
+        """Return stable identities for visible outgoing bubbles when exposed.
+
+        The chat history is virtualized, so element count and DOM position are
+        deliberately excluded. Only a message-specific attribute, timestamp,
+        or React list key can prove that a post-Enter bubble is new.
+        """
         messages = self.page.locator(self.confirmation_selectors.outgoing_message_text)
-        return sum(
-            normalize_message_text(str(text)) == normalize_message_text(message)
-            for text in messages.all_text_contents()
-        )
+        if messages.count() == 0:
+            return {}
+        try:
+            observed = messages.evaluate_all(
+                """elements => {
+                    const attributeNames = [
+                      'data-message-id', 'data-messageid', 'data-msg-id',
+                      'data-msgid', 'data-message-key', 'data-key',
+                      'data-timestamp', 'data-time', 'datetime'
+                    ];
+                    const stableIdentity = element => {
+                      for (let node = element, level = 0; node && level < 8; level += 1, node = node.parentElement) {
+                        for (const name of attributeNames) {
+                          const value = node.getAttribute(name);
+                          if (value) return `attribute:${name}:${value}`;
+                        }
+                        for (const property of Object.getOwnPropertyNames(node)) {
+                          if (!property.startsWith('__reactFiber$')) continue;
+                          for (let fiber = node[property], depth = 0; fiber && depth < 16; depth += 1, fiber = fiber.return) {
+                            if (fiber.key != null && String(fiber.key)) return `react-key:${String(fiber.key)}`;
+                          }
+                        }
+                      }
+                      return null;
+                    };
+                    return elements.map(element => ({
+                      identity: stableIdentity(element),
+                      text: element.innerText || element.textContent || ''
+                    })).filter(item => item.identity);
+                }"""
+            )
+        except Exception:
+            return {}
+        if not isinstance(observed, list):
+            return {}
+        return {
+            str(item["identity"]): normalize_message_text(str(item.get("text", "")))
+            for item in observed
+            if isinstance(item, dict) and item.get("identity")
+        }
 
     def audit_today_outgoing(
         self,
@@ -636,15 +678,26 @@ class DouyinChat:
         self,
         message: str,
         *,
-        pre_send_match_count: int,
+        pre_send_identities: dict[str, str],
+        pre_send_audit: TodayOutgoingAudit | None,
+        delivery_day: date | None,
     ) -> tuple[DeliveryStatus | None, int]:
         for attempt in range(1, self.confirmation_retries + 2):
             if self.confirmation_delay_ms:
                 self.page.wait_for_timeout(self.confirmation_delay_ms)
-            if (
-                self._latest_matches(message)
-                and self._matching_outgoing_count(message) > pre_send_match_count
-            ):
+            matching_identity_observed = any(
+                identity not in pre_send_identities
+                and text == normalize_message_text(message)
+                for identity, text in self._outgoing_message_identities().items()
+            )
+            missing_to_sent = (
+                pre_send_audit is not None
+                and pre_send_audit.status is TodayOutgoingStatus.CONFIRMED_MISSING
+                and delivery_day is not None
+                and self.audit_today_outgoing(delivery_day).status
+                is TodayOutgoingStatus.CONFIRMED_SENT
+            )
+            if matching_identity_observed or missing_to_sent:
                 status = DeliveryStatus.CONFIRMED if attempt == 1 else DeliveryStatus.RETRY_CONFIRMED
                 return status, attempt
         return None, self.confirmation_retries + 1
@@ -1023,6 +1076,8 @@ class DouyinChat:
         selected_target_id: str | None = None,
         expected_conversation_id: str | None = None,
         conversation_verified: bool = False,
+        pre_send_audit: TodayOutgoingAudit | None = None,
+        delivery_day: date | None = None,
     ) -> DeliveryResult:
         send_attempted = False
         try:
@@ -1055,9 +1110,9 @@ class DouyinChat:
                     )
             else:
                 self.open_verified_conversation(target)
-            pre_send_match_count = self._matching_outgoing_count(message)
             editor = self.composer_editor()
             editor.fill(message)
+            pre_send_identities = self._outgoing_message_identities()
             # Treat the outcome as potentially sent from the moment Enter is
             # requested. Navigation, identity verification, and composer setup
             # failures happen before this boundary and remain safe to retry.
@@ -1065,7 +1120,9 @@ class DouyinChat:
             editor.press("Enter")
             status, attempts = self._confirm_delivery(
                 message,
-                pre_send_match_count=pre_send_match_count,
+                pre_send_identities=pre_send_identities,
+                pre_send_audit=pre_send_audit,
+                delivery_day=delivery_day,
             )
             if status:
                 return DeliveryResult(
@@ -1082,7 +1139,7 @@ class DouyinChat:
                 send_attempts=1,
                 confirmation_attempts=attempts,
                 screenshot_path=screenshot,
-                error="latest outgoing message did not match the final sent message",
+                error="post-send observation unavailable",
                 failure_stage="confirmation_observed",
                 reason_code="confirmation_failed_uncertain",
             )

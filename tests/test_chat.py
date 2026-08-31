@@ -13,6 +13,7 @@ from autody.chat import (
     DOUYIN_SELECTORS,
     DeliveryStatus,
     DouyinChat,
+    TodayOutgoingAudit,
     TodayOutgoingStatus,
     conversation_candidate_id,
     conversation_row_candidate_id,
@@ -47,6 +48,77 @@ def test_pre_send_same_text_does_not_confirm_delivery(page, fake_chat):
     assert result.send_attempts == 1
     assert result.confirmation_provenance == "post_send_observed"
     assert page.locator('[data-e2e="message-text"]', has_text="早安").count() == 2
+
+
+def test_confirmation_accepts_new_message_identity_when_virtual_dom_replaces_same_text(
+    page, fake_chat
+):
+    page.locator('[data-e2e="message-list"]').evaluate(
+        """el => {
+            const historical = document.createElement('p');
+            historical.dataset.e2e = 'message-text';
+            historical.dataset.messageId = 'historical-same-text';
+            historical.textContent = '早安';
+            el.append(historical);
+        }"""
+    )
+    page.locator('[data-e2e="chat-input"]').evaluate(
+        """editor => editor.addEventListener('keydown', event => {
+            if (event.key !== 'Enter') return;
+            const messages = document.querySelector('[data-e2e="message-list"]');
+            messages.querySelector('[data-message-id="historical-same-text"]')?.remove();
+        })"""
+    )
+
+    result = fake_chat.send("小明", "早安")
+
+    assert result.status is DeliveryStatus.CONFIRMED
+    assert page.locator('[data-e2e="message-text"]', has_text="早安").count() == 1
+
+
+def test_confirmation_uses_missing_to_sent_transition_without_message_identity(
+    page, fake_chat
+):
+    page.locator('[data-e2e="chat-input"]').evaluate(
+        """editor => editor.addEventListener('keydown', event => {
+            if (event.key !== 'Enter') return;
+            const message = document.querySelector('[data-e2e="message-list"] p:last-child');
+            message?.removeAttribute('data-message-id');
+            const marker = document.createElement('time');
+            marker.textContent = '今天 08:00';
+            document.querySelector('[data-e2e="message-list"]').append(marker);
+        })"""
+    )
+
+    result = fake_chat.send(
+        "小明",
+        "早安",
+        pre_send_audit=TodayOutgoingAudit(TodayOutgoingStatus.CONFIRMED_MISSING),
+        delivery_day=date(2026, 8, 30),
+    )
+
+    assert result.status is DeliveryStatus.CONFIRMED
+
+
+def test_historical_same_text_without_a_new_identity_never_confirms(page, fake_chat):
+    page.locator('[data-e2e="message-list"]').evaluate(
+        """el => {
+            const historical = document.createElement('p');
+            historical.dataset.e2e = 'message-text';
+            historical.dataset.messageId = 'historical-same-text';
+            historical.textContent = '早安';
+            el.append(historical);
+        }"""
+    )
+
+    status, _attempts = fake_chat._confirm_delivery(
+        "早安",
+        pre_send_identities=fake_chat._outgoing_message_identities(),
+        pre_send_audit=None,
+        delivery_day=None,
+    )
+
+    assert status is None
 
 
 def test_duplicate_names_are_rejected(page, fake_chat):
@@ -542,7 +614,6 @@ def test_confirmation_normalizes_whitespace_and_line_endings(page, tmp_path):
     )
     chat = DouyinChat(page, ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0)
     assert chat._latest_matches("你好\r\ngpt小助手")
-    assert chat._matching_outgoing_count("你好\r\ngpt小助手") == 1
     assert normalize_message_text("你好\r\n gpt小助手") == "你好 gpt小助手"
 
 
