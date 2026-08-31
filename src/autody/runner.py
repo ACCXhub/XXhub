@@ -37,7 +37,7 @@ from autody.account_profile import (
 )
 from autody.binding_recovery import StableBindingResolution, resolve_stable_binding
 from autody.failures import FailureDetail, failure_detail
-from autody.friend_discovery import load_discovered_friends
+from autody.friend_discovery import load_discovered_friends, refresh_configured_targets
 from autody.history import (
     TaskHistoryStore,
     TaskRunRecord,
@@ -295,13 +295,22 @@ def _execute_today_target(
         timeout_ms=getattr(chat, "friend_search_timeout_ms", None),
     )
     if not identity.identity_match:
+        reason = getattr(identity, "identity_match_reason", None)
         return TodayTargetExecution(
             delivery=DeliveryResult(
                 DeliveryStatus.BLOCKED,
                 send_attempts=0,
-                error=getattr(identity, "identity_match_reason", None),
-                failure_stage="identity_verified",
-                reason_code="identity_verification_failed",
+                error=reason,
+                failure_stage=(
+                    "conversation_located"
+                    if reason == "conversation_not_found"
+                    else "identity_verified"
+                ),
+                reason_code=(
+                    "conversation_not_found"
+                    if reason == "conversation_not_found"
+                    else "identity_verification_failed"
+                ),
             )
         )
     audit = chat.audit_today_outgoing(today)
@@ -317,6 +326,50 @@ def _execute_today_target(
             conversation_verified=True,
         ),
     )
+
+
+def _is_conversation_locator_miss(execution: TodayTargetExecution) -> bool:
+    """Whether a pre-send open failed only because its current locator is absent."""
+    delivery = execution.delivery
+    return bool(
+        delivery is not None
+        and not delivery.successful
+        and delivery.send_attempts == 0
+        and delivery.reason_code == "conversation_not_found"
+    )
+
+
+def _refresh_conversation_locators(
+    config: AppConfig,
+    chat,
+    targets: list[Target],
+) -> dict[str, str]:
+    """Refresh one batch of stale locators through the existing DOM lane.
+
+    Durable identity remains the only join key.  Adapters without a live page
+    keep the normal safe ``conversation_not_found`` result instead of trying a
+    second discovery implementation.
+    """
+    target_ids = {target.stable_id for target in targets if target.stable_id}
+    page = getattr(chat, "page", None)
+    selectors = getattr(chat, "selectors", None)
+    if not target_ids or page is None or selectors is None:
+        return {}
+    try:
+        refresh_configured_targets(
+            config,
+            page,
+            selectors,
+            config.state_file.parent / "discovered_friends.json",
+            target_ids=target_ids,
+            overall_timeout_ms=config.friend_scan_overall_timeout_ms,
+            max_scrolls=config.friend_scan_max_rounds,
+            avatar_timeout_ms=config.avatar_capture_timeout_ms,
+        )
+    except Exception:
+        logger.warning("会话定位刷新失败，保留原有安全定位失败结果。", exc_info=True)
+        return {}
+    return _verified_conversation_ids(config, targets)
 
 
 def _target_suffix(target: Target, config: AppConfig) -> MessageSuffixConfig:
@@ -1388,7 +1441,130 @@ def run_daily(
                 blocking_failure_reason = (
                     blocking_failure_reason or detail.reason_code
                 )
+    def execute_target(target: Target, message: str, expected_conversation_id: str | None):
+        try:
+            return _execute_today_target(
+                chat,
+                target,
+                message,
+                today,
+                expected_conversation_id=expected_conversation_id,
+                allow_send=not audit_only,
+            )
+        except FatalChatError as exc:
+            return (
+                TodayTargetExecution(
+                    audit=TodayOutgoingAudit(
+                        TodayOutgoingStatus.UNKNOWN,
+                        reason="live_chat_audit_unavailable",
+                    )
+                )
+                if _supports_today_target_pipeline(chat)
+                else TodayTargetExecution(
+                    delivery=DeliveryResult(DeliveryStatus.BLOCKED, error=str(exc))
+                )
+            )
+        except RuntimeError as exc:
+            return (
+                TodayTargetExecution(
+                    audit=TodayOutgoingAudit(
+                        TodayOutgoingStatus.UNKNOWN,
+                        reason="live_chat_audit_unavailable",
+                    )
+                )
+                if _supports_today_target_pipeline(chat)
+                else TodayTargetExecution(
+                    delivery=DeliveryResult(DeliveryStatus.SEND_FAILED, error=str(exc))
+                )
+            )
+
+    def apply_execution(target: Target, execution: TodayTargetExecution) -> None:
+        nonlocal sent, retries, safe_failure_reason, unsafe_failure_reason
+        nonlocal blocking_failure_reason
+        target_id = target_identity(target)
+        target_name = target.name
+        audit = execution.audit
+        if audit is not None:
+            today_audit_outcomes[target_id] = audit.status.value
+            if audit.status is TodayOutgoingStatus.CONFIRMED_SENT:
+                daily["delivery_reconciliation"][target_id] = audit.status.value
+                daily["delivery_reconciliation_evidence"][target_id] = "live_chat_audit"
+                confirmation_results[target_id] = DeliveryStatus.CONFIRMED.value
+                confirmation_provenance[target_id] = "live_chat_audit"
+                daily["confirmation_results"][target_id] = DeliveryStatus.CONFIRMED.value
+                daily["confirmation_provenance"][target_id] = "live_chat_audit"
+                if target_name not in daily["succeeded"]:
+                    daily["succeeded"].append(target_name)
+                daily["failures"].pop(target_name, None)
+                daily["target_failures"].pop(target_id, None)
+                store.save(state)
+                return
+            daily["delivery_reconciliation"][target_id] = audit.status.value
+            daily["delivery_reconciliation_evidence"][target_id] = "live_chat_audit"
+            if audit.status is TodayOutgoingStatus.UNKNOWN:
+                unsafe_failure_reason = unsafe_failure_reason or "today_delivery_unknown"
+                store.save(state)
+                return
+            daily["confirmation_results"].pop(target_id, None)
+            daily["confirmation_provenance"].pop(target_id, None)
+            daily["succeeded"] = [
+                name for name in daily["succeeded"] if name != target_name
+            ]
+            daily["failures"].pop(target_name, None)
+            daily["target_failures"].pop(target_id, None)
+            if audit_only:
+                audit_missing_ids.add(target_id)
+                store.save(state)
+                return
+            # MISSING is only this invocation's send predicate. Do not leave it
+            # as a long-lived truth after proceeding to the composer boundary.
+            daily["delivery_reconciliation"].pop(target_id, None)
+            daily["delivery_reconciliation_evidence"].pop(target_id, None)
+        delivery = execution.delivery
+        if delivery is None:
+            unsafe_failure_reason = unsafe_failure_reason or "today_delivery_unknown"
+            store.save(state)
+            return
+        confirmation_results[target_id] = delivery.status.value
+        daily["confirmation_results"][target_id] = delivery.status.value
+        provenance = delivery.confirmation_provenance.value
+        confirmation_provenance[target_id] = provenance
+        daily["confirmation_provenance"][target_id] = provenance
+        retries += max(0, delivery.confirmation_attempts - 1)
+        error = delivery.error or delivery.status.value
+        if delivery.successful:
+            daily["succeeded"].append(target_name)
+            daily["failures"].pop(target_name, None)
+            daily["target_failures"].pop(target_id, None)
+            daily.get("delivery_reconciliation", {}).pop(target_id, None)
+            daily.get("delivery_reconciliation_evidence", {}).pop(target_id, None)
+            sent += 1
+            logger.info("发送已确认：%s（%s）", target_name, delivery.status.value)
+        else:
+            daily["failures"][target_name] = error
+            detail = _detail_for_delivery(target, delivery, run_id=run_id)
+            daily["target_failures"][target_id] = detail.model_dump(mode="json")
+            if detail.uncertain_send or detail.send_attempts > 0:
+                unsafe_failure_reason = unsafe_failure_reason or detail.reason_code
+            elif detail.retryable:
+                safe_failure_reason = safe_failure_reason or error
+            else:
+                blocking_failure_reason = blocking_failure_reason or detail.reason_code
+            logger.warning(
+                "目标失败：%s；阶段：%s；原因：%s；建议：%s；"
+                "诊断：reason_code=%s send_attempts=%s target_id=%s",
+                target_name,
+                detail.stage,
+                detail.user_summary_zh,
+                detail.suggested_action_zh,
+                detail.reason_code,
+                detail.send_attempts,
+                target_id,
+            )
+        store.save(state)
+
     run_started = time.monotonic()
+    locator_misses: list[tuple[Target, str, TodayTargetExecution]] = []
     for target_index, target in enumerate(pending):
         target_name = target.name
         remaining = target.delay_offset_minutes * 60 - (time.monotonic() - run_started)
@@ -1421,129 +1597,34 @@ def run_daily(
             store.save(state)
             continue
         store.save(state)
-        target_id = target_identity(target)
-        try:
-            execution = _execute_today_target(
-                chat,
-                target,
-                target_message,
-                today,
-                expected_conversation_id=conversation_ids.get(
-                    target.stable_id or ""
-                ),
-                allow_send=not audit_only,
-            )
-        except FatalChatError as exc:
-            execution = (
-                TodayTargetExecution(
-                    audit=TodayOutgoingAudit(
-                        TodayOutgoingStatus.UNKNOWN,
-                        reason="live_chat_audit_unavailable",
-                    )
-                )
-                if _supports_today_target_pipeline(chat)
-                else TodayTargetExecution(
-                    delivery=DeliveryResult(DeliveryStatus.BLOCKED, error=str(exc))
-                )
-            )
-        except RuntimeError as exc:
-            execution = (
-                TodayTargetExecution(
-                    audit=TodayOutgoingAudit(
-                        TodayOutgoingStatus.UNKNOWN,
-                        reason="live_chat_audit_unavailable",
-                    )
-                )
-                if _supports_today_target_pipeline(chat)
-                else TodayTargetExecution(
-                    delivery=DeliveryResult(DeliveryStatus.SEND_FAILED, error=str(exc))
-                )
-            )
-        audit = execution.audit
-        if audit is not None:
-            today_audit_outcomes[target_id] = audit.status.value
-            if audit.status is TodayOutgoingStatus.CONFIRMED_SENT:
-                daily["delivery_reconciliation"][target_id] = audit.status.value
-                daily["delivery_reconciliation_evidence"][target_id] = "live_chat_audit"
-                confirmation_results[target_id] = DeliveryStatus.CONFIRMED.value
-                confirmation_provenance[target_id] = "live_chat_audit"
-                daily["confirmation_results"][target_id] = DeliveryStatus.CONFIRMED.value
-                daily["confirmation_provenance"][target_id] = "live_chat_audit"
-                if target_name not in daily["succeeded"]:
-                    daily["succeeded"].append(target_name)
-                daily["failures"].pop(target_name, None)
-                daily["target_failures"].pop(target_id, None)
-                store.save(state)
-                continue
-            daily["delivery_reconciliation"][target_id] = audit.status.value
-            daily["delivery_reconciliation_evidence"][target_id] = "live_chat_audit"
-            if audit.status is TodayOutgoingStatus.UNKNOWN:
-                unsafe_failure_reason = unsafe_failure_reason or "today_delivery_unknown"
-                store.save(state)
-                continue
-            daily["confirmation_results"].pop(target_id, None)
-            daily["confirmation_provenance"].pop(target_id, None)
-            daily["succeeded"] = [
-                name for name in daily["succeeded"] if name != target_name
-            ]
-            daily["failures"].pop(target_name, None)
-            daily["target_failures"].pop(target_id, None)
-            if audit_only:
-                audit_missing_ids.add(target_id)
-                store.save(state)
-                continue
-            # MISSING is only this invocation's send predicate. Do not leave it
-            # as a long-lived truth after proceeding to the composer boundary.
-            daily["delivery_reconciliation"].pop(target_id, None)
-            daily["delivery_reconciliation_evidence"].pop(target_id, None)
-        delivery = execution.delivery
-        if delivery is None:
-            unsafe_failure_reason = unsafe_failure_reason or "today_delivery_unknown"
-            store.save(state)
+        execution = execute_target(
+            target,
+            target_message,
+            conversation_ids.get(target.stable_id or ""),
+        )
+        if _is_conversation_locator_miss(execution):
+            locator_misses.append((target, target_message, execution))
             continue
-        confirmation_results[target_id] = delivery.status.value
-        daily["confirmation_results"][target_id] = delivery.status.value
-        provenance = delivery.confirmation_provenance.value
-        confirmation_provenance[target_id] = provenance
-        daily["confirmation_provenance"][target_id] = provenance
-        retries += max(0, delivery.confirmation_attempts - 1)
-        error = delivery.error or delivery.status.value
-        if delivery.successful:
-            daily["succeeded"].append(target_name)
-            daily["failures"].pop(target_name, None)
-            daily["target_failures"].pop(target_id, None)
-            daily.get("delivery_reconciliation", {}).pop(target_id, None)
-            daily.get("delivery_reconciliation_evidence", {}).pop(target_id, None)
-            sent += 1
-            logger.info("发送已确认：%s（%s）", target_name, delivery.status.value)
-        else:
-            daily["failures"][target_name] = error
-            detail = _detail_for_delivery(target, delivery, run_id=run_id)
-            daily["target_failures"][target_id] = detail.model_dump(mode="json")
-            if detail.uncertain_send or detail.send_attempts > 0:
-                unsafe_failure_reason = (
-                    unsafe_failure_reason or detail.reason_code
-                )
-            elif detail.retryable:
-                safe_failure_reason = safe_failure_reason or error
-            else:
-                blocking_failure_reason = (
-                    blocking_failure_reason or detail.reason_code
-                )
-            logger.warning(
-                "目标失败：%s；阶段：%s；原因：%s；建议：%s；"
-                "诊断：reason_code=%s send_attempts=%s target_id=%s",
-                target_name,
-                detail.stage,
-                detail.user_summary_zh,
-                detail.suggested_action_zh,
-                detail.reason_code,
-                detail.send_attempts,
-                target_id,
-            )
-        store.save(state)
+        apply_execution(target, execution)
         if target_index < len(pending) - 1:
             time.sleep(random.uniform(config.min_delay_seconds, config.max_delay_seconds))
+
+    if locator_misses:
+        refreshed_ids = _refresh_conversation_locators(
+            config,
+            chat,
+            [target for target, _, _ in locator_misses],
+        )
+        for target_index, (target, target_message, initial) in enumerate(locator_misses):
+            expected_id = refreshed_ids.get(target.stable_id or "")
+            execution = (
+                execute_target(target, target_message, expected_id)
+                if expected_id
+                else initial
+            )
+            apply_execution(target, execution)
+            if target_index < len(locator_misses) - 1:
+                time.sleep(random.uniform(config.min_delay_seconds, config.max_delay_seconds))
 
     effective_after_run = effective_daily_target_statuses(
         config,

@@ -65,6 +65,8 @@ _VOLATILE_AVATAR_QUERY_KEYS = {
     "auth_key", "expires", "signature", "timestamp", "ts", "x-expires",
     "x-signature", "x-tos-signature", "x-bce-date", "x-bce-expire", "x-bce-signature",
 }
+_CONVERSATION_LIST_GROWTH_POLL_MS = 250
+_CONVERSATION_LIST_BOTTOM_GROWTH_MS = 3_000
 
 
 class FatalChatError(RuntimeError):
@@ -701,6 +703,12 @@ class DouyinChat:
                 })"""
             )
             if position["before"] >= position["maximum"]:
+                if self._wait_for_conversation_list_growth(
+                    scrollable,
+                    previous_maximum=position["maximum"],
+                    deadline=deadline,
+                ):
+                    continue
                 break
             if time.monotonic() >= deadline:
                 break
@@ -712,6 +720,32 @@ class DouyinChat:
         if expected_conversation_id:
             return conversations, 0
         return matches, matches.count()
+
+    def _wait_for_conversation_list_growth(
+        self,
+        scrollable,
+        *,
+        previous_maximum: int | float,
+        deadline: float,
+    ) -> bool:
+        """Wait briefly when Douyin lazily appends another list segment."""
+        growth_deadline = min(
+            deadline,
+            time.monotonic() + _CONVERSATION_LIST_BOTTOM_GROWTH_MS / 1000,
+        )
+        while time.monotonic() < growth_deadline:
+            remaining_ms = max(1, int((growth_deadline - time.monotonic()) * 1000))
+            self.page.wait_for_timeout(
+                min(_CONVERSATION_LIST_GROWTH_POLL_MS, remaining_ms)
+            )
+            position = scrollable.first.evaluate(
+                """el => ({
+                    maximum: Math.max(0, el.scrollHeight - el.clientHeight)
+                })"""
+            )
+            if position["maximum"] > previous_maximum:
+                return True
+        return False
 
     def _visible_conversation(self) -> tuple[str | None, str | None]:
         header = self.page.locator(self.selectors.header_name)

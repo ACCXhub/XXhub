@@ -883,6 +883,102 @@ def test_daily_pipeline_skips_eight_sent_targets_and_audits_then_sends_once(
     assert StateStore(config.state_file).load().daily[day.isoformat()]["consumed"] is True
 
 
+def test_daily_pipeline_recovers_stale_conversation_locators_in_one_targeted_refresh(
+    tmp_path: Path,
+    monkeypatch,
+):
+    config = make_config(tmp_path)
+    config.min_delay_seconds = 0
+    config.max_delay_seconds = 0
+    config.targets = [
+        Target(
+            name=f"目标 {index}",
+            stable_id=f"target-{index}",
+            candidate_id=f"candidate-{index}",
+        )
+        for index in range(9)
+    ]
+    write_verified_retry_scope(
+        tmp_path, [target.candidate_id for target in config.targets]
+    )
+    bind_authoritatively(config)
+    day = date(2026, 8, 30)
+    state = StateStore(config.state_file).load()
+    state.daily[day.isoformat()] = {
+        "message": "早安",
+        "succeeded": [target.name for target in config.targets[:5]],
+        "failures": {},
+        "confirmation_results": {
+            target.stable_id: "confirmed" for target in config.targets[:5]
+        },
+        "confirmation_provenance": {
+            target.stable_id: "post_send_observed"
+            for target in config.targets[:5]
+        },
+        "consumed": False,
+    }
+    StateStore(config.state_file).save(state)
+
+    refreshes: list[set[str]] = []
+
+    def refresh_locators(_config, _page, _selectors, output_path, *, target_ids, **_kwargs):
+        refreshes.append(set(target_ids))
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+        for candidate in payload["candidates"]:
+            candidate["conversation_id"] = f"conversation-{candidate['candidate_id']}"
+        payload["target_refresh"] = {
+            "status": "completed",
+            "account_scope": "account-" + "a" * 24,
+            "requested_target_ids": sorted(target_ids),
+            "found_target_ids": sorted(target_ids),
+            "missing_target_ids": [],
+            "unresolved_target_ids": [],
+            "partial": False,
+        }
+        output_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    monkeypatch.setattr(runner_module, "refresh_configured_targets", refresh_locators)
+
+    class LocatorRecoveryChat:
+        page = object()
+        selectors = object()
+        friend_search_timeout_ms = 1
+
+        def __init__(self):
+            self.open_attempts: dict[str, int] = {}
+            self.verified_targets: list[str] = []
+            self.audits = 0
+
+        def open_conversation_identity(self, target_id, expected_id, *_args, **_kwargs):
+            self.open_attempts[target_id] = self.open_attempts.get(target_id, 0) + 1
+            if expected_id == f"conversation-candidate-{target_id.split('-')[-1]}":
+                self.verified_targets.append(target_id)
+                return SimpleNamespace(identity_match=True)
+            return SimpleNamespace(
+                identity_match=False,
+                identity_match_reason="conversation_not_found",
+            )
+
+        def audit_today_outgoing(self, _today):
+            self.audits += 1
+            return SimpleNamespace(status=TodayOutgoingStatus.CONFIRMED_SENT)
+
+        def send(self, *_args, **_kwargs):
+            raise AssertionError("live-audited target must not be sent")
+
+    chat = LocatorRecoveryChat()
+    missed_ids = {f"target-{index}" for index in range(5, 9)}
+    result = run_daily(config, chat, day, target_ids=missed_ids)
+
+    assert refreshes == [missed_ids]
+    assert set(chat.verified_targets) == missed_ids
+    assert chat.audits == 4
+    assert all(chat.open_attempts[target_id] == 2 for target_id in missed_ids)
+    assert all(f"target-{index}" not in chat.open_attempts for index in range(5))
+    assert result.sent_count == 0
+    assert result.status is RunStatus.COMPLETED
+
+
 def test_unknown_outcome_is_reaudited_before_any_future_send(tmp_path: Path):
     config = make_config(tmp_path)
     config.min_delay_seconds = 0

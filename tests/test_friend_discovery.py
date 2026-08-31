@@ -365,6 +365,60 @@ def test_targeted_refresh_updates_only_proven_targets_and_preserves_full_scan_fr
     assert current.last_seen_at == "2026-08-25T08:00:00"
 
 
+def test_targeted_refresh_limits_the_scan_to_requested_stable_targets(
+    tmp_path: Path,
+):
+    selectors = ChatSelectors.test_defaults()
+    output = tmp_path / "data" / "discovered_friends.json"
+    write_account_profile(tmp_path, "account-a")
+    rows = [[
+        FakeConversationItem(selectors, "测试好友甲", b"avatar-a", row_id="row-a"),
+        FakeConversationItem(selectors, "测试好友乙", b"avatar-b", row_id="row-b"),
+    ]]
+    full = discover_friends(
+        AppConfig(),
+        FakePage(selectors, rows=rows),
+        selectors,
+        output,
+        now=lambda: datetime(2026, 8, 24, 8, 0, 0),
+    )
+    by_name = {candidate.display_name: candidate for candidate in full.candidates}
+    config = AppConfig(
+        targets=[
+            Target(
+                name="旧显示名甲",
+                stable_id="target-a",
+                candidate_id=by_name["测试好友甲"].candidate_id,
+                binding_identity_key=by_name["测试好友甲"].identity_key,
+                binding_identity_source=by_name["测试好友甲"].identity_source,
+                binding_account_scope="account-a",
+            ),
+            Target(
+                name="旧显示名乙",
+                stable_id="target-b",
+                candidate_id=by_name["测试好友乙"].candidate_id,
+                binding_identity_key=by_name["测试好友乙"].identity_key,
+                binding_identity_source=by_name["测试好友乙"].identity_source,
+                binding_account_scope="account-a",
+            ),
+        ]
+    )
+
+    refreshed = refresh_configured_targets(
+        config,
+        FakePage(selectors, rows=rows),
+        selectors,
+        output,
+        target_ids={"target-a"},
+        now=lambda: datetime(2026, 8, 25, 8, 0, 0),
+    )
+
+    assert refreshed.target_refresh["requested_target_ids"] == ["target-a"]
+    assert refreshed.target_refresh["found_target_ids"] == ["target-a"]
+    assert refreshed.target_refresh["missing_target_ids"] == []
+    assert refreshed.target_refresh["ended_by"] == "targets_found"
+
+
 def test_targeted_refresh_stops_after_all_configured_identities_are_found(
     tmp_path: Path,
 ):

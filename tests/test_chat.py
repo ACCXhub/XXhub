@@ -94,6 +94,90 @@ def test_stable_binding_navigation_is_used_before_composer(page, fake_chat):
     assert result.successful
 
 
+def test_locator_open_waits_for_lazy_conversation_list_growth(fake_chat):
+    class Row:
+        def __init__(self, participant: str, conversation: str):
+            self.participant = participant
+            self.conversation = conversation
+
+        def evaluate(self, _script):
+            return {
+                "participantSecUserId": self.participant,
+                "conversationId": self.conversation,
+                "conversationShortId": None,
+            }
+
+        def get_attribute(self, _attribute):
+            return None
+
+    class Conversations:
+        def __init__(self, page):
+            self.page = page
+
+        def count(self):
+            return len(self.page.rows[self.page.position])
+
+        def nth(self, index):
+            return self.page.rows[self.page.position][index]
+
+    class ConversationList:
+        def __init__(self, page):
+            self.page = page
+
+        def count(self):
+            return 1
+
+        @property
+        def first(self):
+            return self
+
+        def evaluate(self, script, *_args):
+            if "scrollTop = 0" in script:
+                self.page.position = 0
+                return None
+            if "before" in script:
+                return {
+                    "before": self.page.position,
+                    "maximum": 2 if self.page.waited_ms >= 500 else 1,
+                    "step": 1,
+                }
+            if "maximum" in script:
+                return {"maximum": 2 if self.page.waited_ms >= 500 else 1}
+            self.page.position = min(self.page.position + 1, 2)
+            return None
+
+    class LazyPage:
+        def __init__(self, selectors, target):
+            self.selectors = selectors
+            self.position = 0
+            self.waited_ms = 0
+            other = Row("other-proof", "other-conversation")
+            self.rows = [[other], [other], [target]]
+            self.conversations = Conversations(self)
+            self.conversation_list = ConversationList(self)
+
+        def locator(self, selector):
+            if selector == self.selectors.conversation:
+                return self.conversations
+            if selector == self.selectors.conversation_list:
+                return self.conversation_list
+            raise AssertionError(f"unexpected selector: {selector}")
+
+        def wait_for_timeout(self, delay):
+            self.waited_ms += delay
+
+    target = Row("target-proof", "fresh-conversation")
+    page = LazyPage(fake_chat.selectors, target)
+    fake_chat.page = page
+    expected = conversation_row_candidate_id(target)
+
+    found, count = fake_chat._find_conversation("target", expected)
+
+    assert count == 1
+    assert found is target
+    assert page.waited_ms >= 500
+
+
 def test_runtime_model_separates_friend_identity_from_conversation_locator(
     page, fake_chat
 ):

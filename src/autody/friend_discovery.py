@@ -1096,6 +1096,7 @@ def refresh_configured_targets(
     avatar_timeout_ms: int = 2_000,
     monotonic: Callable[[], float] = time.monotonic,
     progress: Callable[[str, int, int | None], None] | None = None,
+    target_ids: set[str] | None = None,
 ) -> FriendDiscoveryResult:
     """Refresh only configured targets without claiming a full account scan.
 
@@ -1111,7 +1112,12 @@ def refresh_configured_targets(
     refreshed_at = refreshed_now.isoformat(timespec="seconds")
     cache_dir = avatar_cache_dir or output_path.parent / "avatar-cache"
     authoritative_sources = {"participant_sec_user_id", "row_attribute"}
-    requested_targets = [target for target in config.targets if target.enabled]
+    requested_targets = [
+        target
+        for target in config.targets
+        if target.enabled
+        and (target_ids is None or target.stable_id in target_ids)
+    ]
     eligible_candidates = [
         target
         for target in requested_targets
