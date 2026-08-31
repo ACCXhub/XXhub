@@ -452,7 +452,7 @@ def test_repair_summary_reports_overall_delivery_evidence(tmp_path: Path, monkey
     }
 
 
-def test_repair_supplements_a_persisted_live_confirmed_missing_target(
+def test_repair_does_not_send_a_persisted_missing_target_without_binding(
     tmp_path: Path, monkeypatch
 ):
     config_path = make_project(tmp_path)
@@ -500,9 +500,8 @@ def test_repair_supplements_a_persisted_live_confirmed_missing_target(
     response = client.post("/api/repair")
 
     assert response.status_code == 200
-    assert observed and observed[0][0] is None
-    assert observed[0][2] == ("target-missing",)
-    assert response.json()["today_delivery"]["supplemented"] == 1
+    assert not observed
+    assert response.json()["today_delivery"]["supplemented"] == 0
 
 
 def test_scheduler_route_uses_sid_captured_from_normal_dashboard_process(
@@ -2000,10 +1999,11 @@ def test_status_marks_only_authoritatively_resolved_target_failures(
             start_time="2026-06-24T08:00:00",
             end_time="2026-06-24T08:01:00",
             total_targets=1,
-            success_count=1,
-            final_status="completed",
-            confirmation_results={"target-one": "retry_confirmed"},
-        )
+                success_count=1,
+                final_status="completed",
+                confirmation_results={"target-one": "retry_confirmed"},
+                confirmation_provenance={"target-one": "post_send_observed"},
+            )
     )
 
     client = TestClient(create_app(config_path))
@@ -2102,6 +2102,18 @@ def test_status_uses_target_failure_instead_of_legacy_technical_notification(
     daily = state["daily"]["2026-06-24"]
     daily["succeeded"] = ["小红"]
     daily["failures"] = {"小明": "target not found"}
+    daily["confirmation_results"] = {}
+    daily["confirmation_provenance"] = {}
+    daily["target_failures"] = {
+        "target-one": failure_detail(
+            "conversation_not_found",
+            stage="conversation_located",
+            run_id="run-safe-failure",
+            target_stable_id="target-one",
+            binding_valid=True,
+            account_scope_matches=True,
+        ).model_dump(mode="json")
+    }
     state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
     notice = tmp_path / "data" / "notifications" / "need-attention.txt"
     notice.parent.mkdir(parents=True)

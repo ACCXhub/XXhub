@@ -15,6 +15,7 @@ from autody.chat import (
     DeliveryResult,
     DeliveryStatus,
     FatalChatError,
+    TodayOutgoingAudit,
     TodayOutgoingStatus,
     conversation_candidate_id,
 )
@@ -74,6 +75,7 @@ class RunResult:
     confirmation_results: dict[str, str] = field(default_factory=dict)
     target_failures: dict[str, FailureDetail] = field(default_factory=dict)
     confirmation_provenance: dict[str, str] = field(default_factory=dict)
+    today_audit_outcomes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -212,6 +214,7 @@ def _send_target(
     message: str,
     *,
     expected_conversation_id: str | None = None,
+    conversation_verified: bool = False,
 ) -> DeliveryResult:
     """Pass stable binding evidence when the sender supports it.
 
@@ -227,15 +230,93 @@ def _send_target(
         )
     )
     if supports_binding:
+        send_kwargs = {
+            "selected_target_id": target.stable_id,
+            "expected_conversation_id": expected_conversation_id,
+        }
+        if "conversation_verified" in parameters or any(
+            item.kind is inspect.Parameter.VAR_KEYWORD
+            for item in parameters.values()
+        ):
+            send_kwargs["conversation_verified"] = conversation_verified
         return _delivery_result(
             chat.send(
                 target.name,
                 message,
-                selected_target_id=target.stable_id,
-                expected_conversation_id=expected_conversation_id,
+                **send_kwargs,
             )
         )
     return _delivery_result(chat.send(target.name, message))
+
+
+@dataclass(frozen=True)
+class TodayTargetExecution:
+    """The sole audit-to-send boundary for a target in one chat session."""
+
+    audit: TodayOutgoingAudit | None = None
+    delivery: DeliveryResult | None = None
+
+
+def _supports_today_target_pipeline(chat) -> bool:
+    return callable(getattr(chat, "open_conversation_identity", None)) and callable(
+        getattr(chat, "audit_today_outgoing", None)
+    )
+
+
+def _execute_today_target(
+    chat,
+    target: Target,
+    message: str,
+    today: date,
+    *,
+    expected_conversation_id: str | None,
+    allow_send: bool = True,
+) -> TodayTargetExecution:
+    """Audit a verified conversation and, only when missing, send in place.
+
+    Production chat adapters always use this pipeline.  The small legacy fake
+    senders retained by older unit tests do not expose read-only audit methods;
+    they stay on their existing in-memory path and never represent a browser
+    execution path.
+    """
+    if not _supports_today_target_pipeline(chat) or not expected_conversation_id:
+        return TodayTargetExecution(
+            delivery=_send_target(
+                chat,
+                target,
+                message,
+                expected_conversation_id=expected_conversation_id,
+            )
+        )
+    identity = chat.open_conversation_identity(
+        target_identity(target),
+        expected_conversation_id,
+        target.name,
+        timeout_ms=getattr(chat, "friend_search_timeout_ms", None),
+    )
+    if not identity.identity_match:
+        return TodayTargetExecution(
+            delivery=DeliveryResult(
+                DeliveryStatus.BLOCKED,
+                send_attempts=0,
+                error=getattr(identity, "identity_match_reason", None),
+                failure_stage="identity_verified",
+                reason_code="identity_verification_failed",
+            )
+        )
+    audit = chat.audit_today_outgoing(today)
+    if audit.status is not TodayOutgoingStatus.CONFIRMED_MISSING or not allow_send:
+        return TodayTargetExecution(audit=audit)
+    return TodayTargetExecution(
+        audit=audit,
+        delivery=_send_target(
+            chat,
+            target,
+            message,
+            expected_conversation_id=expected_conversation_id,
+            conversation_verified=True,
+        ),
+    )
 
 
 def _target_suffix(target: Target, config: AppConfig) -> MessageSuffixConfig:
@@ -286,17 +367,6 @@ def automatic_daily_run_gate(
             0,
             len(targets),
             0,
-            run_id=run_id,
-        )
-
-    if any(statuses.get(target_identity(target)) == "unknown" for target in pending):
-        return RunResult(
-            RunStatus.UNCERTAIN,
-            len(targets),
-            0,
-            len(targets) - len(pending),
-            len(pending),
-            "today_delivery_unknown",
             run_id=run_id,
         )
 
@@ -609,6 +679,8 @@ def apply_today_delivery_reconciliation(
     daily.setdefault("confirmation_results", {})
     daily.setdefault("confirmation_provenance", {})
     daily.setdefault("target_failures", {})
+    daily.setdefault("delivery_reconciliation", {})
+    daily.setdefault("delivery_reconciliation_evidence", {})
     facts = daily.setdefault("delivery_reconciliation", {})
     recorded_evidence = daily.setdefault("delivery_reconciliation_evidence", {})
     evidence_sources = evidence_sources or {}
@@ -778,59 +850,11 @@ def reconcile_today_delivery(
     plan: TodayDeliveryReconciliationPlan | None = None,
     supplement: bool = True,
 ) -> TodayDeliveryReconciliation:
-    """Audit only targets lacking strong same-day delivery confirmation.
-
-    Discovery is deliberately not part of this operation.  Binding resolution
-    reads the repair invocation's existing authoritative snapshot; browser
-    navigation, history auditing and the normal sender then remain serialized
-    through the supplied ``chat`` session.
-    """
+    """Reuse the canonical daily target pipeline for repair and recovery."""
     targets = enabled_daily_targets(config)
     plan = plan or plan_today_delivery_reconciliation(config, today)
-    targets_by_id = {target_identity(target): target for target in targets}
-    live_targets = [
-        targets_by_id[target_id]
-        for target_id in plan.live_audit_target_ids
-        if target_id in targets_by_id
-    ]
-    resolutions = _binding_resolutions(config, live_targets)
     outcomes = dict(plan.outcomes)
     evidence_sources = dict(plan.evidence_sources)
-    supplement_ids = set(plan.confirmed_missing_target_ids)
-    for target in live_targets:
-        target_id = target_identity(target)
-        try:
-            expected = preview_today_target_message(config, target, today).text
-        except (OSError, ValueError, MessagePackError):
-            outcomes[target_id] = TodayOutgoingStatus.UNKNOWN.value
-            evidence_sources[target_id] = "live_chat_audit_unavailable"
-            continue
-        resolution = resolutions.get(target.stable_id or "")
-        if resolution is None or not resolution.valid or not resolution.conversation_id:
-            outcomes[target_id] = TodayOutgoingStatus.UNKNOWN.value
-            evidence_sources[target_id] = "binding_unavailable"
-            continue
-        try:
-            identity = chat.open_conversation_identity(
-                target_id,
-                resolution.conversation_id,
-                target.name,
-                timeout_ms=config.friend_search_timeout_ms,
-            )
-            if not identity.identity_match:
-                outcomes[target_id] = TodayOutgoingStatus.UNKNOWN.value
-                evidence_sources[target_id] = "live_chat_audit_unavailable"
-                continue
-            audit = chat.audit_today_outgoing(expected, today)
-        except (FatalChatError, RuntimeError):
-            outcomes[target_id] = TodayOutgoingStatus.UNKNOWN.value
-            evidence_sources[target_id] = "live_chat_audit_unavailable"
-            continue
-        outcomes[target_id] = audit.status.value
-        evidence_sources[target_id] = "live_chat_audit"
-        if audit.status is TodayOutgoingStatus.CONFIRMED_MISSING:
-            supplement_ids.add(target_id)
-
     statuses = apply_today_delivery_reconciliation(
         config,
         outcomes,
@@ -843,31 +867,47 @@ def reconcile_today_delivery(
     pre_supplement_complete = bool(targets) and all(
         statuses.get(target_identity(target)) == "success" for target in targets
     )
-    resendable_ids = {
-        target_id
-        for target_id in supplement_ids
-        if evidence_sources.get(target_id) == "live_chat_audit"
-    }
-    remaining_ids = {
-        target_id
-        for target_id, status in statuses.items()
-        if status != "success"
-    }
-    if resendable_ids and remaining_ids == resendable_ids:
-        daily = StateStore(config.state_file).load().daily.get(today.isoformat(), {})
-        run_id = str(daily.get("task_run_id") or _daily_run_id(today))
-        outcome_store = TaskOutcomeStore(_outcome_path(config))
-        if outcome_store.get(run_id) is not None:
-            outcome_store.resume_confirmed_missing(run_id, datetime.now())
     supplement_result = None
-    if supplement and supplement_ids:
-        supplement_result = run_daily(
+    target_ids = set(plan.live_audit_target_ids) | set(
+        plan.confirmed_missing_target_ids
+    )
+    if chat is not None and target_ids:
+        execution_result = run_daily(
             config,
             chat,
             today,
             trigger_source="manual",
-            target_ids=supplement_ids,
+            target_ids=target_ids,
+            audit_only=not supplement,
         )
+        if supplement and execution_result.sent_count:
+            supplement_result = execution_result
+        outcomes.update(execution_result.today_audit_outcomes)
+        evidence_sources.update(
+            {
+                target_id: "live_chat_audit"
+                for target_id in execution_result.today_audit_outcomes
+            }
+        )
+        daily = StateStore(config.state_file).load().daily.get(today.isoformat(), {})
+        reconciliation = daily.get("delivery_reconciliation", {})
+        evidence = daily.get("delivery_reconciliation_evidence", {})
+        if isinstance(reconciliation, dict):
+            outcomes.update(
+                {
+                    target_id: outcome
+                    for target_id, outcome in reconciliation.items()
+                    if target_id in target_ids
+                }
+            )
+        if isinstance(evidence, dict):
+            evidence_sources.update(
+                {
+                    target_id: source
+                    for target_id, source in evidence.items()
+                    if target_id in target_ids
+                }
+            )
     return TodayDeliveryReconciliation(
         outcomes,
         pre_supplement_success_count,
@@ -921,6 +961,7 @@ def run_daily(
     trigger_source: str = "manual",
     now: datetime | None = None,
     target_ids: set[str] | None = None,
+    audit_only: bool = False,
 ) -> RunResult:
     if trigger_source not in RUN_TRIGGER_SOURCES:
         raise ValueError(f"unsupported daily-send trigger source: {trigger_source}")
@@ -948,6 +989,8 @@ def run_daily(
     daily.setdefault("confirmation_results", {})
     daily.setdefault("confirmation_provenance", {})
     daily.setdefault("target_failures", {})
+    daily.setdefault("delivery_reconciliation", {})
+    daily.setdefault("delivery_reconciliation_evidence", {})
     run_id = daily.setdefault(
         "task_run_id",
         _daily_run_id(today),
@@ -990,6 +1033,21 @@ def run_daily(
         for target in selected_targets:
             target_id = target_identity(target)
             if effective_before_run.get(target_id) == "success":
+                continue
+            if _supports_today_target_pipeline(chat):
+                resolution = binding_resolutions.get(target.stable_id or "")
+                if resolution is not None and not resolution.valid:
+                    detail = _binding_failure_detail(
+                        target,
+                        resolution,
+                        run_id=run_id,
+                        account_scope=discovered.account_scope if discovered else None,
+                    )
+                    targeted_blocking_details[target_id] = detail
+                    daily["failures"][target.name] = detail.reason_code
+                    daily["target_failures"][target_id] = detail.model_dump(mode="json")
+                # A live audit is now the only authority that can decide
+                # whether a previous target-level failure remains resendable.
                 continue
             if (
                 daily.get("delivery_reconciliation", {}).get(target_id)
@@ -1183,7 +1241,6 @@ def run_daily(
     pending = [
         target for target in selected_targets
         if effective_before_run.get(target_identity(target)) != "success"
-        and effective_before_run.get(target_identity(target)) != "unknown"
         and " ".join(target.name.split()).casefold() not in ambiguous_names
         and target_identity(target) not in binding_blocked
     ]
@@ -1237,7 +1294,13 @@ def run_daily(
         TaskOutcome.UNCERTAIN: RunStatus.UNCERTAIN,
         TaskOutcome.CANCELLED: RunStatus.CANCELLED,
     }
-    if outcome.outcome in terminal_statuses and requested_target_ids is None:
+    can_reaudit = _supports_today_target_pipeline(chat) and bool(pending)
+    reopened_terminal = can_reaudit and outcome.outcome in terminal_statuses
+    if (
+        outcome.outcome in terminal_statuses
+        and requested_target_ids is None
+        and not can_reaudit
+    ):
         result = RunResult(
             terminal_statuses[outcome.outcome],
             total,
@@ -1284,7 +1347,8 @@ def run_daily(
             [target_identity(target) for target in pending],
         )
         return result
-    outcome_store.start(run_id, started)
+    if not audit_only:
+        outcome_store.start(run_id, started)
 
     messages = read_messages(config.messages_file)
     daily.setdefault("messages_by_target", {})
@@ -1293,6 +1357,8 @@ def run_daily(
     retries = outcome.retry_attempts
     confirmation_results: dict[str, str] = {}
     confirmation_provenance: dict[str, str] = {}
+    today_audit_outcomes: dict[str, str] = {}
+    audit_missing_ids: set[str] = set()
     safe_failure_reason: str | None = None
     unsafe_failure_reason: str | None = "blocked_ambiguous_target" if ambiguous_targets else None
     blocking_failure_reason: str | None = next(
@@ -1357,18 +1423,84 @@ def run_daily(
         store.save(state)
         target_id = target_identity(target)
         try:
-            delivery = _send_target(
+            execution = _execute_today_target(
                 chat,
                 target,
                 target_message,
+                today,
                 expected_conversation_id=conversation_ids.get(
                     target.stable_id or ""
                 ),
+                allow_send=not audit_only,
             )
         except FatalChatError as exc:
-            delivery = DeliveryResult(DeliveryStatus.BLOCKED, error=str(exc))
+            execution = (
+                TodayTargetExecution(
+                    audit=TodayOutgoingAudit(
+                        TodayOutgoingStatus.UNKNOWN,
+                        reason="live_chat_audit_unavailable",
+                    )
+                )
+                if _supports_today_target_pipeline(chat)
+                else TodayTargetExecution(
+                    delivery=DeliveryResult(DeliveryStatus.BLOCKED, error=str(exc))
+                )
+            )
         except RuntimeError as exc:
-            delivery = DeliveryResult(DeliveryStatus.SEND_FAILED, error=str(exc))
+            execution = (
+                TodayTargetExecution(
+                    audit=TodayOutgoingAudit(
+                        TodayOutgoingStatus.UNKNOWN,
+                        reason="live_chat_audit_unavailable",
+                    )
+                )
+                if _supports_today_target_pipeline(chat)
+                else TodayTargetExecution(
+                    delivery=DeliveryResult(DeliveryStatus.SEND_FAILED, error=str(exc))
+                )
+            )
+        audit = execution.audit
+        if audit is not None:
+            today_audit_outcomes[target_id] = audit.status.value
+            if audit.status is TodayOutgoingStatus.CONFIRMED_SENT:
+                daily["delivery_reconciliation"][target_id] = audit.status.value
+                daily["delivery_reconciliation_evidence"][target_id] = "live_chat_audit"
+                confirmation_results[target_id] = DeliveryStatus.CONFIRMED.value
+                confirmation_provenance[target_id] = "live_chat_audit"
+                daily["confirmation_results"][target_id] = DeliveryStatus.CONFIRMED.value
+                daily["confirmation_provenance"][target_id] = "live_chat_audit"
+                if target_name not in daily["succeeded"]:
+                    daily["succeeded"].append(target_name)
+                daily["failures"].pop(target_name, None)
+                daily["target_failures"].pop(target_id, None)
+                store.save(state)
+                continue
+            daily["delivery_reconciliation"][target_id] = audit.status.value
+            daily["delivery_reconciliation_evidence"][target_id] = "live_chat_audit"
+            if audit.status is TodayOutgoingStatus.UNKNOWN:
+                unsafe_failure_reason = unsafe_failure_reason or "today_delivery_unknown"
+                store.save(state)
+                continue
+            daily["confirmation_results"].pop(target_id, None)
+            daily["confirmation_provenance"].pop(target_id, None)
+            daily["succeeded"] = [
+                name for name in daily["succeeded"] if name != target_name
+            ]
+            daily["failures"].pop(target_name, None)
+            daily["target_failures"].pop(target_id, None)
+            if audit_only:
+                audit_missing_ids.add(target_id)
+                store.save(state)
+                continue
+            # MISSING is only this invocation's send predicate. Do not leave it
+            # as a long-lived truth after proceeding to the composer boundary.
+            daily["delivery_reconciliation"].pop(target_id, None)
+            daily["delivery_reconciliation_evidence"].pop(target_id, None)
+        delivery = execution.delivery
+        if delivery is None:
+            unsafe_failure_reason = unsafe_failure_reason or "today_delivery_unknown"
+            store.save(state)
+            continue
         confirmation_results[target_id] = delivery.status.value
         daily["confirmation_results"][target_id] = delivery.status.value
         provenance = delivery.confirmation_provenance.value
@@ -1442,8 +1574,19 @@ def run_daily(
         for target in required_targets
         if effective_after_run.get(target_identity(target)) != "success"
     ]
-    if complete:
-        status = RunStatus.RECOVERED if outcome.retry_attempts else RunStatus.COMPLETED
+    if audit_only and audit_missing_ids:
+        resumed = outcome_store.resume_confirmed_missing(run_id, started)
+        status = (
+            RunStatus.RETRY_PENDING
+            if resumed.outcome is TaskOutcome.RETRY_PENDING
+            else RunStatus.FINAL_FAILED
+        )
+    elif complete:
+        status = (
+            RunStatus.RECOVERED
+            if outcome.retry_attempts or reopened_terminal
+            else RunStatus.COMPLETED
+        )
         if status is RunStatus.RECOVERED:
             outcome_store.recover(run_id, started)
         else:
@@ -1484,6 +1627,7 @@ def run_daily(
             if target_id in {target_identity(target) for target in failed_targets}
         },
         confirmation_provenance=confirmation_provenance,
+        today_audit_outcomes=today_audit_outcomes,
     )
     _record_history(
         config,

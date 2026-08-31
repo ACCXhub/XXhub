@@ -7,7 +7,7 @@ AutoDy 是面向 Windows 的本机 Douyin 私信工作流管理台，用于管�
 ## 当前版本状态
 
 - 当前源码版本线：**v1.5.2**。
-- 当前源码 Master 已完成 daily denominator、好友扫描性能、reconciliation、发送确认 provenance、`one_for_all` 每日轮换和源码直运行收敛。
+- 当前源码 Master 已完成 daily denominator、好友扫描性能、统一 today-delivery pipeline、发送确认 provenance、`one_for_all` 每日轮换和源码直运行收敛。
 - `v1.5.0` tag 的正式 workflow 在 MSI lifecycle acceptance 阶段失败且没有 GitHub Release；该标签保留为不可变历史。
 - `v1.5.1` lifecycle 失败候选保留为不可变历史。
 - 当前没有正式发布的 v1.5.2 GitHub Release；在新的正式发布明确执行并完成资产验证前，最后已确认公开稳定基线仍是 **v1.4.4**。
@@ -20,9 +20,9 @@ AutoDy 是面向 Windows 的本机 Douyin 私信工作流管理台，用于管�
 - 好友 durable identity、账号范围、discovery candidate 与 conversation locator 分层；失效绑定通过显式重新关联恢复，不按昵称/头像猜测。
 - 好友 discovery 使用单一串行 DOM lane 获取真实列表，可见行批量 snapshot；targeted scan 找齐配置目标即可结束，新鲜完整 snapshot 命中时无需重复扫描。
 - 每日任务分母以全部 enabled 目标为准；目标暂时不可安全执行只影响本次发送资格，不会把任务提前算成完成。
-- 发送成功必须来自本次真实发送边界之后的新 outgoing observation；历史同文案气泡、旧 `confirmed` 字符串、旧 `succeeded/consumed` 都不能单独证明今天已经发送。
+- 发送成功必须来自本次真实发送边界之后的新 outgoing observation；文本匹配只用于这一步 post-send confirmation，历史同文案气泡、旧 `confirmed` 字符串、旧 `succeeded/consumed` 都不能单独证明今天已经发送。
 - 当历史证据不足时 Dashboard 显示“待核实”，运行进入 `uncertain` 并安全停止；`human_verified_today` 仅保留为旧版本污染数据的一次性迁移 evidence，不伪造成自动发送确认，也不是日常流程。
-- reconciliation 会以只读 live chat audit 将当日事实区分为 `confirmed_sent`、`confirmed_missing`、`unknown`；只对可证明缺失且绑定有效的目标复用正常发送/确认链，`unknown` 不自动补发，但可由“一键诊断与修复”重新 audit，reconciliation 本身不重复扫描好友。
+- 所有发送入口共用同一 today-delivery pipeline：本地强 `SENT` 事实直接跳过会话；其余目标只打开一次已验证会话并只读 audit 今天是否存在任意我方 outgoing。`SENT` 跳过，`MISSING` 在同一会话继续既有安全发送/确认链，`UNKNOWN` 不发送、下次可重新 audit。已 `SENT` 目标零会话导航，未解决目标最多一次导航，audit 后发送不重复打开好友。
 - `one_for_all` 文案包每天持久化选择一条 canonical 文案，当天所有目标及 retry/reconciliation 复用同一条；当天完整完成后才推进既有 `MessageRotation`。
 - 只读发送前自检（Preflight）：可打开会话和检查 DOM，但不输入、不准备、不发送消息。
 - 多账号本地隔离：账号级目标、计划、受管 browser profile 和 runtime snapshot。

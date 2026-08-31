@@ -1188,13 +1188,15 @@ def create_app(
                 evidence_sources=evidence_sources,
             )
 
-        if not plan.live_audit_target_ids:
+        if not plan.live_audit_target_ids and not plan.confirmed_missing_target_ids:
             return (
                 reconcile_today_delivery(config, None, today, plan=plan),
                 None,
             )
 
-        live_audit_ids = set(plan.live_audit_target_ids)
+        live_audit_ids = set(plan.live_audit_target_ids) | set(
+            plan.confirmed_missing_target_ids
+        )
         live_audit_targets = [
             target
             for target in required

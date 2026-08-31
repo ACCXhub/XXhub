@@ -817,6 +817,129 @@ def test_live_audit_sent_remains_success_and_is_not_selected_for_resend(
     ) == {"target-a": "success"}
 
 
+def test_daily_pipeline_skips_eight_sent_targets_and_audits_then_sends_once(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.min_delay_seconds = 0
+    config.max_delay_seconds = 0
+    config.targets = [
+        Target(
+            name=f"目标 {index}",
+            stable_id=f"target-{index}",
+            candidate_id=f"candidate-{index}",
+        )
+        for index in range(9)
+    ]
+    write_verified_retry_scope(tmp_path, [target.candidate_id for target in config.targets])
+    bind_authoritatively(config)
+    day = date(2026, 8, 30)
+    state = StateStore(config.state_file).load()
+    state.daily[day.isoformat()] = {
+        "message": "早安",
+        "succeeded": [target.name for target in config.targets[:-1]],
+        "failures": {},
+        "confirmation_results": {
+            target.stable_id: "confirmed" for target in config.targets[:-1]
+        },
+        "confirmation_provenance": {
+            target.stable_id: "post_send_observed" for target in config.targets[:-1]
+        },
+        "consumed": False,
+    }
+    StateStore(config.state_file).save(state)
+
+    class PipelineChat:
+        def __init__(self):
+            self.navigations = []
+            self.audits = 0
+            self.sent = []
+
+        def open_conversation_identity(self, target_id, *_args, **_kwargs):
+            self.navigations.append(target_id)
+            return SimpleNamespace(identity_match=True)
+
+        def audit_today_outgoing(self, _today):
+            self.audits += 1
+            return SimpleNamespace(status=TodayOutgoingStatus.CONFIRMED_MISSING)
+
+        def send(self, target, message, *, conversation_verified=False, **_kwargs):
+            assert conversation_verified is True
+            self.sent.append((target, message))
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMED,
+                send_attempts=1,
+                confirmation_provenance=DeliveryConfirmationProvenance.POST_SEND_OBSERVED,
+            )
+
+    chat = PipelineChat()
+    result = run_daily(config, chat, day)
+
+    assert result.status is RunStatus.COMPLETED
+    assert result.sent_count == 1
+    assert len(chat.navigations) == 1
+    assert chat.audits == 1
+    assert len(chat.sent) == 1
+    assert StateStore(config.state_file).load().daily[day.isoformat()]["consumed"] is True
+
+
+def test_unknown_outcome_is_reaudited_before_any_future_send(tmp_path: Path):
+    config = make_config(tmp_path)
+    config.min_delay_seconds = 0
+    config.max_delay_seconds = 0
+    config.targets = [
+        Target(name="目标", stable_id="target-a", candidate_id="candidate-a")
+    ]
+    write_verified_retry_scope(tmp_path, ["candidate-a"])
+    bind_authoritatively(config)
+    day = date(2026, 8, 30)
+    run_id = runner_module._daily_run_id(day)
+    state = StateStore(config.state_file).load()
+    state.daily[day.isoformat()] = {
+        "message": "早安",
+        "succeeded": [],
+        "failures": {},
+        "confirmation_results": {},
+        "confirmation_provenance": {},
+        "delivery_reconciliation": {"target-a": "unknown"},
+        "delivery_reconciliation_evidence": {"target-a": "live_chat_audit"},
+        "task_run_id": run_id,
+        "consumed": False,
+    }
+    StateStore(config.state_file).save(state)
+    outcomes = TaskOutcomeStore(tmp_path / "history" / "task-outcomes.json")
+    outcomes.schedule(run_id, day.isoformat(), datetime(2026, 8, 30, 23, 59))
+    outcomes.uncertain(run_id, datetime(2026, 8, 30, 19, 0), "legacy_uncertain")
+
+    class ReauditChat:
+        navigations = 0
+        audits = 0
+        sent = 0
+
+        def open_conversation_identity(self, *_args, **_kwargs):
+            self.navigations += 1
+            return SimpleNamespace(identity_match=True)
+
+        def audit_today_outgoing(self, _today):
+            self.audits += 1
+            return SimpleNamespace(status=TodayOutgoingStatus.CONFIRMED_MISSING)
+
+        def send(self, *_args, conversation_verified=False, **_kwargs):
+            assert conversation_verified is True
+            self.sent += 1
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMED,
+                send_attempts=1,
+                confirmation_provenance=DeliveryConfirmationProvenance.POST_SEND_OBSERVED,
+            )
+
+    chat = ReauditChat()
+    result = run_daily(config, chat, day, now=datetime(2026, 8, 30, 20, 0))
+
+    assert result.status is RunStatus.RECOVERED
+    assert (chat.navigations, chat.audits, chat.sent) == (1, 1, 1)
+
+
 def test_running_denominator_is_immutable_and_next_run_uses_latest_targets(
     tmp_path: Path,
 ):

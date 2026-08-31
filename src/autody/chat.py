@@ -160,6 +160,8 @@ class TodayOutgoingAudit:
     boundary: str | None = None
     reason: str = "date_evidence_unavailable"
     rows_inspected: int = 0
+    snapshots: int = 0
+    scrolls: int = 0
 
 
 @dataclass(frozen=True)
@@ -382,6 +384,18 @@ def _contains_prior_day_marker(markers: list[object], today: date) -> bool:
     return False
 
 
+def _timestamp_matches_day(value: object, today: date) -> bool:
+    """Recognize reliable numeric message timestamps without guessing text."""
+    try:
+        raw = str(value or "").strip()
+        if raw.isdigit() and len(raw) >= 10:
+            seconds = int(raw) / (1000 if len(raw) >= 13 else 1)
+            return datetime.fromtimestamp(seconds).date() == today
+    except (OSError, OverflowError, ValueError):
+        pass
+    return False
+
+
 class DouyinChat:
     def __init__(
         self,
@@ -434,15 +448,14 @@ class DouyinChat:
 
     def audit_today_outgoing(
         self,
-        expected_message: str,
         today: date,
         *,
         max_scrolls: int = 80,
     ) -> TodayOutgoingAudit:
         """Inspect one verified chat without writing to its composer.
 
-        A sent result is intentionally fail-closed: it requires an explicit
-        current-day marker in addition to the matching outgoing bubble. A
+        A sent result is intentionally content-independent: it requires an
+        explicit current-day marker in addition to any outgoing bubble. A
         missing result requires a prior-day marker or the true history start.
         A bubble beside an unresolved day boundary is never delivery evidence.
         """
@@ -455,15 +468,22 @@ class DouyinChat:
                 )
             history = history.first
             history.evaluate("element => { element.scrollTop = element.scrollHeight; }")
-            self.page.wait_for_timeout(100)
             previous_top: int | None = None
             inspected = 0
-            expected = normalize_message_text(expected_message)
+            snapshots = 0
+            scrolls = 0
             for _ in range(max_scrolls):
                 snapshot = history.evaluate(
                     """(element, outgoingSelector) => {
                         const outgoing = Array.from(element.querySelectorAll(outgoingSelector))
-                          .map(node => node.innerText || node.textContent || '');
+                          .map(node => {
+                            const row = node.closest('[data-timestamp], [data-time], [datetime], [data-e2e*="message" i]') || node.parentElement;
+                            const timestamp = [node, row].flatMap(item => item ? [
+                              item.getAttribute('data-timestamp'), item.getAttribute('data-time'),
+                              item.getAttribute('datetime'), item.getAttribute('title')
+                            ] : []).filter(Boolean);
+                            return { text: node.innerText || node.textContent || '', timestamp };
+                          });
                         const markers = Array.from(element.querySelectorAll(
                           'time, [datetime], [data-e2e*="time" i], [data-e2e*="date" i], '
                           + '[class*="time" i], [class*="date" i], [class*="timestamp" i]'
@@ -485,6 +505,8 @@ class DouyinChat:
                         TodayOutgoingStatus.UNKNOWN,
                         reason="date_evidence_unavailable",
                         rows_inspected=inspected,
+                        snapshots=snapshots,
+                        scrolls=scrolls,
                     )
                 texts = snapshot.get("outgoing", [])
                 if not isinstance(texts, list):
@@ -492,66 +514,120 @@ class DouyinChat:
                         TodayOutgoingStatus.UNKNOWN,
                         reason="date_evidence_unavailable",
                         rows_inspected=inspected,
+                        snapshots=snapshots,
+                        scrolls=scrolls,
                     )
+                snapshots += 1
                 inspected += len(texts)
-                boundary = _contains_prior_day_marker(snapshot.get("markers", []), today)
-                expected_seen = any(
-                    normalize_message_text(str(text)) == expected for text in texts
+                markers = snapshot.get("markers", [])
+                prior_boundary = _contains_prior_day_marker(markers, today)
+                current_day = _contains_current_day_marker(markers, today)
+                outgoing_seen = bool(texts)
+                timestamp_today = any(
+                    isinstance(item, dict)
+                    and any(_timestamp_matches_day(value, today) for value in item.get("timestamp", []))
+                    for item in texts
                 )
-                if boundary:
-                    # The viewport can contain both sides of a date divider.
-                    # Without per-bubble date ownership, either conclusion
-                    # would risk a false resend.
+                timestamp_prior = any(
+                    isinstance(item, dict)
+                    and _contains_prior_day_marker(item.get("timestamp", []), today)
+                    for item in texts
+                )
+                if timestamp_today:
                     return TodayOutgoingAudit(
-                        TodayOutgoingStatus.UNKNOWN if expected_seen else TodayOutgoingStatus.CONFIRMED_MISSING,
+                        TodayOutgoingStatus.CONFIRMED_SENT,
+                        boundary="message_timestamp",
+                        reason="today_outgoing_timestamp_found",
+                        rows_inspected=inspected,
+                        snapshots=snapshots,
+                        scrolls=scrolls,
+                    )
+                if timestamp_prior and prior_boundary:
+                    return TodayOutgoingAudit(
+                        TodayOutgoingStatus.CONFIRMED_MISSING,
                         boundary="prior_day_marker",
                         reason="previous_day_boundary_reached",
                         rows_inspected=inspected,
+                        snapshots=snapshots,
+                        scrolls=scrolls,
                     )
-                if expected_seen:
-                    if not _contains_current_day_marker(
-                        snapshot.get("markers", []), today
-                    ):
+                if current_day and prior_boundary:
+                    # The viewport crosses a day divider. Its outgoing nodes
+                    # cannot be assigned to either day with enough confidence.
+                    return TodayOutgoingAudit(
+                        TodayOutgoingStatus.UNKNOWN,
+                        reason="date_boundary_ambiguous",
+                        rows_inspected=inspected,
+                        snapshots=snapshots,
+                        scrolls=scrolls,
+                    )
+                if current_day and outgoing_seen:
+                    return TodayOutgoingAudit(
+                        TodayOutgoingStatus.CONFIRMED_SENT,
+                        boundary="current_day_history",
+                        reason="today_outgoing_found",
+                        rows_inspected=inspected,
+                        snapshots=snapshots,
+                        scrolls=scrolls,
+                    )
+                if prior_boundary:
+                    # The viewport can contain both sides of a date divider.
+                    return TodayOutgoingAudit(
+                        TodayOutgoingStatus.CONFIRMED_MISSING,
+                        boundary="prior_day_marker",
+                        reason="previous_day_boundary_reached",
+                        rows_inspected=inspected,
+                        snapshots=snapshots,
+                        scrolls=scrolls,
+                    )
+                scroll_top = snapshot.get("scrollTop")
+                if bool(snapshot.get("atTop")):
+                    if outgoing_seen:
                         return TodayOutgoingAudit(
                             TodayOutgoingStatus.UNKNOWN,
                             reason="date_evidence_unavailable",
                             rows_inspected=inspected,
+                            snapshots=snapshots,
+                            scrolls=scrolls,
                         )
-                    return TodayOutgoingAudit(
-                        TodayOutgoingStatus.CONFIRMED_SENT,
-                        boundary="current_day_history",
-                        reason="expected_message_found",
-                        rows_inspected=inspected,
-                    )
-                scroll_top = snapshot.get("scrollTop")
-                if bool(snapshot.get("atTop")):
                     return TodayOutgoingAudit(
                         TodayOutgoingStatus.CONFIRMED_MISSING,
                         boundary="history_start",
                         reason="history_start_reached",
                         rows_inspected=inspected,
+                        snapshots=snapshots,
+                        scrolls=scrolls,
                     )
                 if not isinstance(scroll_top, int) or scroll_top == previous_top:
                     return TodayOutgoingAudit(
                         TodayOutgoingStatus.UNKNOWN,
                         reason="history_load_stalled",
                         rows_inspected=inspected,
+                        snapshots=snapshots,
+                        scrolls=scrolls,
                     )
                 previous_top = scroll_top
                 history.evaluate(
                     "element => { element.scrollTop = Math.max(0, element.scrollTop - Math.max(200, element.clientHeight * 0.8)); }"
                 )
-                self.page.wait_for_timeout(100)
+                scrolls += 1
+                # Wait only when the scroll action actually requests lazy
+                # history. Normal newest-region and divider exits stay hot.
+                self.page.wait_for_timeout(25)
         except Exception:
             return TodayOutgoingAudit(
                 TodayOutgoingStatus.UNKNOWN,
                 reason="date_evidence_unavailable",
                 rows_inspected=inspected if "inspected" in locals() else 0,
+                snapshots=snapshots if "snapshots" in locals() else 0,
+                scrolls=scrolls if "scrolls" in locals() else 0,
             )
         return TodayOutgoingAudit(
             TodayOutgoingStatus.UNKNOWN,
             reason="history_load_stalled",
             rows_inspected=inspected,
+            snapshots=snapshots,
+            scrolls=scrolls,
         )
 
     def _confirm_delivery(
@@ -912,10 +988,11 @@ class DouyinChat:
         *,
         selected_target_id: str | None = None,
         expected_conversation_id: str | None = None,
+        conversation_verified: bool = False,
     ) -> DeliveryResult:
         send_attempted = False
         try:
-            if expected_conversation_id is not None:
+            if expected_conversation_id is not None and not conversation_verified:
                 identity = self.open_conversation_identity(
                     selected_target_id or "",
                     expected_conversation_id,

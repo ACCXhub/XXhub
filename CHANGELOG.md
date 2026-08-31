@@ -11,7 +11,7 @@
 - 本机维护方式收敛为源码仓库 canonical runtime：影响运行行为的源码修改完成后直接重启当前仓库实例并做最小运行验收；源码模式默认使用 `%LOCALAPPDATA%\AutoDy` 作为 DataRoot，Scheduler 与现有启动入口统一指向仓库，不再要求先构建 MSI/Portable 才能让本地修改生效。
 - 每日任务分母统一使用全部 enabled 目标；safely executable 只决定当次是否可发送，不再让可执行子集提前触发 `complete`、`consumed` 或 `ALREADY_DONE`。
 - 好友 discovery 收敛为单一串行 DOM lane：可见行批量 snapshot，头像只在 immutable URL 快照后并行处理；targeted scan 找齐配置目标即可提前结束，新鲜完整 snapshot 命中时无需扫描，一键修复也不按好友重复扫描。
-- reconciliation 的当天事实统一为 `confirmed_sent`、`confirmed_missing`、`unknown`；只有可证明缺失且 binding 有效的目标才复用既有 `run_daily(..., target_ids=...)` 发送链，`unknown` 不自动补发，人工核验使用独立 `human_verified_today` evidence source。
+- reconciliation 的当天事实统一为 `confirmed_sent`、`confirmed_missing`、`unknown`；自动只读 live chat audit 只有在可证明缺失且 binding 有效时才复用既有 `run_daily(..., target_ids=...)` 发送链，`unknown` 不自动补发。
 - `one_for_all` 文案包每天只选择并持久化一条 canonical 文案，当天所有目标及 retry/reconciliation 复用同一条；当天完整完成后才推进既有 `MessageRotation`，不再永久固定 `pack_messages[0]`。
 - Dashboard 增加“待核实”发送状态；手动运行进入 `uncertain` 时直接说明无法验证本次发送确认并安全停止，不再压缩为泛化“操作未完成”。
 - Release workflow 将 hosted-runner MSI lifecycle 保留为非阻断诊断，并继续保存 JSON/Markdown 报告；正式发布能力仍保留 source/build、MSI、Portable、privacy/package、checksum 与 manifest 验证，但只有明确需要公开分发时才执行。
@@ -26,6 +26,7 @@
 
 - 恢复自动发送 reconciliation 闭环：AutoDy 以只读 live chat audit 独立判断当天 `confirmed_sent`、`confirmed_missing` 或 `unknown`；只对明确未发送的目标恢复既有安全发送链，已发送不重发、无法确认不盲目重发。
 - live audit 确认缺失时会清理该目标当天陈旧的 terminal retry 投影并恢复可重试状态；后续“一键诊断与修复”会重新 audit `unknown`，而非要求用户维护发送 truth。`human_verified_today` 仅保留为旧版本污染数据的一次性迁移 evidence。
+- 所有 daily/recovery/reconciliation 入口现在共用同一 today-delivery target pipeline：可靠本地 `SENT` 事实零会话导航；其余目标只打开一次已验证会话，按今天是否存在任意我方 outgoing audit，`MISSING` 在该会话直接进入既有 send confirmation，`UNKNOWN` 保持不发送且下次可重新 audit。audit 从最新区域开始，在已发送或前一天边界处提前结束，不再按每次滚动固定等待，也不再把文案文本用于 pre-send 历史判断。
 
 ## [1.5.1] - 2026-08-28
 

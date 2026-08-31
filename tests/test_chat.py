@@ -477,7 +477,7 @@ def test_latest_outgoing_uses_visual_order_for_reversed_douyin_dom(page, tmp_pat
     assert chat._latest_outgoing_text() == "最新消息"
 
 
-def test_today_history_audit_confirms_expected_outgoing_message(page, tmp_path):
+def test_today_history_audit_confirms_any_current_day_outgoing(page, tmp_path):
     page.goto((Path("tests/fixtures/chat.html").resolve()).as_uri())
     page.locator('[data-e2e="message-list"]').evaluate(
         """el => {
@@ -490,10 +490,47 @@ def test_today_history_audit_confirms_expected_outgoing_message(page, tmp_path):
     )
     chat = DouyinChat(page, ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0)
 
-    audit = chat.audit_today_outgoing("早安", date(2026, 8, 30))
+    audit = chat.audit_today_outgoing(date(2026, 8, 30))
 
     assert audit.status is TodayOutgoingStatus.CONFIRMED_SENT
-    assert audit.reason == "expected_message_found"
+    assert audit.reason == "today_outgoing_found"
+
+
+def test_today_history_audit_ignores_text_and_stops_at_newest_snapshot(page, tmp_path):
+    page.goto((Path("tests/fixtures/chat.html").resolve()).as_uri())
+    page.locator('[data-e2e="message-list"]').evaluate(
+        """el => {
+            const time = document.createElement('time'); time.textContent = '今天 08:00';
+            const outgoing = document.createElement('p'); outgoing.dataset.e2e = 'message-text'; outgoing.textContent = '不同文案';
+            const incoming = document.createElement('p'); incoming.textContent = '收到';
+            el.append(time, outgoing, incoming);
+        }"""
+    )
+    chat = DouyinChat(page, ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0)
+
+    audit = chat.audit_today_outgoing(date(2026, 8, 30))
+
+    assert audit.status is TodayOutgoingStatus.CONFIRMED_SENT
+    assert audit.snapshots == 1
+    assert audit.scrolls == 0
+
+
+def test_today_history_audit_prefers_message_timestamp_over_date_separator(page, tmp_path):
+    page.goto((Path("tests/fixtures/chat.html").resolve()).as_uri())
+    page.locator('[data-e2e="message-list"]').evaluate(
+        """el => {
+            const separator = document.createElement('time'); separator.textContent = '昨天 21:00';
+            const outgoing = document.createElement('p'); outgoing.dataset.e2e = 'message-text';
+            outgoing.dataset.timestamp = String(Date.UTC(2026, 7, 30, 8, 0, 0)); outgoing.textContent = '不同文案';
+            el.append(separator, outgoing);
+        }"""
+    )
+    chat = DouyinChat(page, ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0)
+
+    audit = chat.audit_today_outgoing(date(2026, 8, 30))
+
+    assert audit.status is TodayOutgoingStatus.CONFIRMED_SENT
+    assert audit.boundary == "message_timestamp"
 
 
 def test_today_history_audit_does_not_confirm_same_text_without_today_evidence(
@@ -505,7 +542,7 @@ def test_today_history_audit_does_not_confirm_same_text_without_today_evidence(
     )
     chat = DouyinChat(page, ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0)
 
-    audit = chat.audit_today_outgoing("早安", date(2026, 8, 30))
+    audit = chat.audit_today_outgoing(date(2026, 8, 30))
 
     assert audit.status is TodayOutgoingStatus.UNKNOWN
     assert audit.reason == "date_evidence_unavailable"
@@ -518,17 +555,35 @@ def test_today_history_audit_requires_a_boundary_before_missing(page, tmp_path):
             const time = document.createElement('time');
             time.textContent = '昨天 21:00';
             const message = document.createElement('p');
-            message.dataset.e2e = 'message-text'; message.textContent = '旧消息';
+            message.dataset.e2e = 'message-text'; message.textContent = '早安';
             el.append(time, message);
         }"""
     )
     chat = DouyinChat(page, ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0)
 
-    audit = chat.audit_today_outgoing("早安", date(2026, 8, 30))
+    audit = chat.audit_today_outgoing(date(2026, 8, 30))
 
     assert audit.status is TodayOutgoingStatus.CONFIRMED_MISSING
     assert audit.boundary == "prior_day_marker"
     assert audit.reason == "previous_day_boundary_reached"
+
+
+def test_today_history_audit_returns_unknown_when_one_snapshot_crosses_dates(page, tmp_path):
+    page.goto((Path("tests/fixtures/chat.html").resolve()).as_uri())
+    page.locator('[data-e2e="message-list"]').evaluate(
+        """el => {
+            const today = document.createElement('time'); today.textContent = '今天 08:00';
+            const yesterday = document.createElement('time'); yesterday.textContent = '昨天 21:00';
+            const outgoing = document.createElement('p'); outgoing.dataset.e2e = 'message-text'; outgoing.textContent = '早安';
+            el.append(today, outgoing, yesterday);
+        }"""
+    )
+    chat = DouyinChat(page, ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0)
+
+    audit = chat.audit_today_outgoing(date(2026, 8, 30))
+
+    assert audit.status is TodayOutgoingStatus.UNKNOWN
+    assert audit.reason == "date_boundary_ambiguous"
 
 
 def test_today_history_audit_loads_older_history_until_a_previous_day_boundary(page, tmp_path):
@@ -548,7 +603,7 @@ def test_today_history_audit_loads_older_history_until_a_previous_day_boundary(p
     )
     chat = DouyinChat(page, ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0)
 
-    audit = chat.audit_today_outgoing("早安", date(2026, 8, 30))
+    audit = chat.audit_today_outgoing(date(2026, 8, 30))
 
     assert audit.status is TodayOutgoingStatus.CONFIRMED_MISSING
     assert audit.reason == "previous_day_boundary_reached"
@@ -558,7 +613,7 @@ def test_today_history_audit_accepts_the_true_history_start_as_a_missing_boundar
     page.goto((Path("tests/fixtures/chat.html").resolve()).as_uri())
     chat = DouyinChat(page, ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0)
 
-    audit = chat.audit_today_outgoing("早安", date(2026, 8, 30))
+    audit = chat.audit_today_outgoing(date(2026, 8, 30))
 
     assert audit.status is TodayOutgoingStatus.CONFIRMED_MISSING
     assert audit.boundary == "history_start"
@@ -570,7 +625,7 @@ def test_today_history_audit_returns_unknown_when_history_container_is_unavailab
     page.locator('[data-e2e="message-list"]').evaluate("el => el.remove()")
     chat = DouyinChat(page, ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0)
 
-    audit = chat.audit_today_outgoing("早安", date(2026, 8, 30))
+    audit = chat.audit_today_outgoing(date(2026, 8, 30))
 
     assert audit.status is TodayOutgoingStatus.UNKNOWN
     assert audit.reason == "date_evidence_unavailable"
