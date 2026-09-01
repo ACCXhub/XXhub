@@ -216,6 +216,18 @@ function Test-PrivacyTextFile {
     )
 }
 
+function Test-InitialConfigSeed {
+    param(
+        [Parameter(Mandatory = $true)][string]$SeedPath,
+        [Parameter(Mandatory = $true)][string]$ExamplePath
+    )
+
+    $utf8 = [Text.UTF8Encoding]::new($false)
+    $seed = [IO.File]::ReadAllText($SeedPath, $utf8) -replace "`r`n?", "`n"
+    $example = [IO.File]::ReadAllText($ExamplePath, $utf8) -replace "`r`n?", "`n"
+    return $seed -ceq $example
+}
+
 function Test-ExtractedTree {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -228,8 +240,7 @@ function Test-ExtractedTree {
         $allowedInitialConfig = (
             $ArtifactLabel -eq 'msi-admin' -and
             $normalizedRelative -ieq 'LocalApp/AutoDy/config.yaml' -and
-            (Get-ReleaseFileSha256 -Path $file.FullName) -eq
-                (Get-ReleaseFileSha256 -Path (Join-Path $Root 'config.example.yaml'))
+            (Test-InitialConfigSeed -SeedPath $file.FullName -ExamplePath (Join-Path $Root 'config.example.yaml'))
         )
         if ((Test-ForbiddenEntryPath $relative) -and -not $allowedInitialConfig) {
             [void]$findings.Add([ordered]@{
@@ -399,8 +410,7 @@ try {
             $seedConfigs = @(Get-ChildItem -LiteralPath $AdminExtract -Recurse -File -Filter 'config.yaml')
             if (
                 $seedConfigs.Count -ne 1 -or
-                (Get-ReleaseFileSha256 -Path $seedConfigs[0].FullName) -ne
-                    (Get-ReleaseFileSha256 -Path (Join-Path $Root 'config.example.yaml'))
+                -not (Test-InitialConfigSeed -SeedPath $seedConfigs[0].FullName -ExamplePath (Join-Path $Root 'config.example.yaml'))
             ) {
                 [void]$findings.Add([ordered]@{
                     category = "invalid_initial_config_seed"

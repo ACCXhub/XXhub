@@ -2,24 +2,23 @@
 
 ## 当前检查点
 
-- canonical 分支为 `main`；本轮开始时 `HEAD` 与 `origin/main` 都是 `ff4789ef6dedfb8833a704a3983aab2513157381`。当前 v1.5.2 Master 仍在同一工作树中，尚未形成 release checkpoint；恢复时必须重新查询 Git，不把此快照当作长期仓库指令。
-- 已恢复并收敛的 Master 包含：全 enabled-target daily denominator、定向/虚拟列表安全恢复、发送后 provenance、P0 隐私 failure evidence、P1 audit-only 与账号/安全验证分类、ProgramRoot/DataRoot/BrowserRoot 分离，以及 Dashboard 的显式 stale 状态。
-- 本轮 Phase A 的唯一产品修正位于 `runner.py`：实时 audit 得到 `confirmed_missing` 时清除陈旧 failure，并仅通过既有 `TaskOutcomeStore.resume_confirmed_missing()` 把未过期 `UNCERTAIN`/`FINAL_FAILED` 日恢复为 `RETRY_PENDING`。它不跨越发送边界；`UNKNOWN` 仍不发送。
-- RuntimeContext/message-pack root 的旧失败已分类为过时测试：内置默认 pack 的稳定 ID 是 `daily-greeting`，临时 program/data 根必须显式传入 `RuntimeContext`。当前 `src/autody/runtime.py`、CLI/API 和 `scripts/resolve-runtime-roots.ps1` 均保持 ProgramRoot、DataRoot、BrowserRoot 分离。
-- 源码与已安装 BrowserRoot 都已有 Chromium；本轮只运行了 headless `doctor_playwright` 启动检查，没有访问抖音、没有输入或发送。
+- `v1.5.2` release source 是 `940bac8e8299d5a40338b32a58fae16fd1af3410`，已推送到 `origin/main`；annotated tag `v1.5.2` 的对象为 `bcb598c80edbfacc8bcda032230d6a4bd64dfdf8`，指向该 source。不要移动 tag。
+- 正式 Release workflow `33543897478` 已成功：clean-source build/accept、canonical guarded publish 与 public asset reverify 都通过；公开 MSI、Portable、两份 SHA-256 和 `release-manifest.json` 已发布。
+- 公共资产随后在本机重新下载并经 `scripts/verify-release-artifacts.ps1` 通过。该 verifier 已收敛 initial config seed 为 UTF-8 内容比较并规范化换行，避免工作树 CRLF/LF 策略造成误报；它不放宽路径、隐私或 payload 检查。
+- 仍未完成的唯一 release acceptance 是本机已安装升级：`D:\AutoDy` 仍是 1.4.4，尝试从公开 v1.5.2 MSI 升级因未提升上下文在 `RemoveExistingProducts` 得到 Error 1730/1603 回滚。DataRoot 的 `config.yaml` SHA-256 未变。必须在管理员上下文重跑同一公开 MSI 的升级，再做 identity-aware endpoint/Dashboard 验收。
+- 8765 当前是源码模式的 AutoDy（解释器与 package 在 canonical repo），不是 `D:\AutoDy`；不得为安装验收停止它。未发生真实抖音访问、输入或发送。
 
-## 已执行的 Phase A 证据
+## 已执行的 release 证据
 
-- focused Python integration：`337 passed`；覆盖 runner/chat、friend discovery、P0 evidence、P1 audit/classification、CLI/API、runtime/message packs、安装脚本。
-- frontend：Vitest `66 passed`；`npm run build` 成功，并把 tracked static 输出收敛到一组对应当前源码的 JS/CSS hash 资产。
-- `git diff --check` 已通过。FastAPI/TestClient 有一条既有 deprecation warning，不影响测试结果。
+- Phase A focused Python integration：`337 passed`；覆盖 runner/chat、friend discovery、P0 evidence、P1 audit/classification、CLI/API、runtime/message packs、安装脚本。RuntimeContext/message-pack 的旧失败均为过时测试，当前默认 pack 是 `daily-greeting`。
+- exact source pre-tag gate：clean-source preflight、`614 passed, 2 deselected` 的非 `release_build` Python suite、Vitest `66 passed`、frontend build、PowerShell 解析和 `git diff --check` 全部通过；`release_source_sha == validated_source_sha`。
+- BrowserRoot 已有 Chromium，headless `doctor_playwright` 启动检查通过；没有访问抖音、没有输入或发送。
 
-## 继续发布的顺序
+## 继续本机验收的顺序
 
-1. 对即将 checkpoint 的精确 source 运行当前 pre-tag gate：clean-source preflight、完整非 `release_build` Python suite、frontend tests/build、PowerShell 解析与 `git diff --check`。
-2. 只有所有 pre-tag gate 通过后，提交 v1.5.2 release source；fetch 并确认与 `origin/main` 的非破坏性同步；若 source SHA 变化，按实际差异重验受影响 gate。
-3. 在 `release_source_sha == validated_source_sha` 后创建并推送 `v1.5.2`。正式 workflow 从 tag 的 clean source 运行 MSI/Portable、privacy/package、manifest、发布与 public asset reverify；长时 `release_build` 保留给专门诊断，hosted MSI lifecycle 为非阻断诊断。
-4. 只有 workflow 终态成功且公开资产复核通过后，再对 `D:\AutoDy` 做 identity-aware、保留 DataRoot 的只读安装态验收；绝不把真实抖音发送当作验收步骤。
+1. 以管理员上下文运行公开 `AutoDy-1.5.2-x64.msi` 的升级，并保留 verbose MSI log；不能以复制文件代替 MSI。
+2. 先确认 8765 的 listener 与 `/api/service-identity` 是不是 `D:\AutoDy`；源码实例不是 installed owner，不能终止。仅在 identity 完全匹配后控制 installed instance。
+3. 验证 installed version/source identity、service health、canonical endpoint、Dashboard/status 与 DataRoot 保全；不发送真实抖音消息。
 
 ## 稳定指针
 

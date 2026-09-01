@@ -390,6 +390,7 @@ def test_release_privacy_verifier_covers_all_release_artifacts():
         "Test-FileContainsMappedPattern",
         "Test-PrivacyTextFile",
         "Test-ForbiddenEntryPath",
+        "Test-InitialConfigSeed",
     ]:
         assert token in verifier
     assert "$_.Values[1] -like $expectedShortcut.Name" not in verifier
