@@ -495,7 +495,8 @@ def test_release_workflow_publishes_only_versioned_public_assets():
     assert "https://github.com/ACCXhub/XXhub/releases/download/" in workflow
     assert "ACCXhub/hlhub" not in workflow
     assert ".\\scripts\\build-release-from-clean-source.ps1" in workflow
-    assert "-m release_build" in release_script
+    assert "-m release_build" not in release_script
+    assert "Skipping long release_build reproducibility tests" in release_script
     assert "npm.cmd test" not in release_script
     assert "verify-release-artifacts.ps1" in release_script
     assert "verify-msi-lifecycle.ps1" in release_script

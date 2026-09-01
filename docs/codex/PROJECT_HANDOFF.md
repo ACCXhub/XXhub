@@ -18,7 +18,7 @@
 
 1. 对即将 checkpoint 的精确 source 运行当前 pre-tag gate：clean-source preflight、完整非 `release_build` Python suite、frontend tests/build、PowerShell 解析与 `git diff --check`。
 2. 只有所有 pre-tag gate 通过后，提交 v1.5.2 release source；fetch 并确认与 `origin/main` 的非破坏性同步；若 source SHA 变化，按实际差异重验受影响 gate。
-3. 在 `release_source_sha == validated_source_sha` 后创建并推送 `v1.5.2`。正式 workflow 从 tag 的 clean source 运行大型 release build、MSI/Portable、privacy/package、manifest、发布与 public asset reverify；hosted MSI lifecycle 为非阻断诊断。
+3. 在 `release_source_sha == validated_source_sha` 后创建并推送 `v1.5.2`。正式 workflow 从 tag 的 clean source 运行 MSI/Portable、privacy/package、manifest、发布与 public asset reverify；长时 `release_build` 保留给专门诊断，hosted MSI lifecycle 为非阻断诊断。
 4. 只有 workflow 终态成功且公开资产复核通过后，再对 `D:\AutoDy` 做 identity-aware、保留 DataRoot 的只读安装态验收；绝不把真实抖音发送当作验收步骤。
 
 ## 稳定指针
