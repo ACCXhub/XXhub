@@ -2,13 +2,20 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+. (Join-Path $PSScriptRoot "resolve-runtime-roots.ps1")
+$RuntimeContext = Resolve-AutoDyLaunchContext -ProgramRoot $Root
+$Root = $RuntimeContext.ProgramRoot
+$DataRoot = $RuntimeContext.DataRoot
 Set-Location $Root
-$env:AUTODY_HOME = $Root
-$env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $Root "data\ms-playwright"
+$env:AUTODY_HOME = $DataRoot
+$env:AUTODY_PROGRAM_ROOT = $Root
+$env:AUTODY_BROWSERS_PATH = $RuntimeContext.BrowserRoot
+$env:PLAYWRIGHT_BROWSERS_PATH = $RuntimeContext.BrowserRoot
 $env:PLAYWRIGHT_SKIP_BROWSER_GC = "1"
 $Venv = Join-Path $Root ".venv"
-$Python = Join-Path $Venv "Scripts\python.exe"
-$Config = Join-Path $Root "config.yaml"
+$Python = $RuntimeContext.Python
+$Config = Join-Path $DataRoot "config.yaml"
+New-Item -ItemType Directory -Force -Path $DataRoot | Out-Null
 
 function Invoke-NativeChecked {
     param(
@@ -69,7 +76,7 @@ function Get-ProjectAutoDyService {
     try {
         $identity = Invoke-RestMethod -Uri "http://127.0.0.1:8765/api/service-identity" -TimeoutSec 2
         $identityRoot = [IO.Path]::GetFullPath([string]$identity.project_path).TrimEnd('\\')
-        $expectedRoot = [IO.Path]::GetFullPath($Root).TrimEnd('\\')
+        $expectedRoot = [IO.Path]::GetFullPath($DataRoot).TrimEnd('\\')
         $packagePath = [IO.Path]::GetFullPath([string]$identity.package_path).TrimEnd('\\')
         $expectedPackage = Join-Path $Root "src\autody"
         if ($identity.application -ne "AutoDy" -or $identityRoot -ne $expectedRoot -or
@@ -190,8 +197,8 @@ Invoke-NativeChecked -Stage "Install Chromium" -FilePath $Python -Arguments @("-
 if (-not (Test-Path -LiteralPath $Config)) {
     Copy-Item -LiteralPath (Join-Path $Root "config.example.yaml") -Destination $Config
 }
-if (-not (Test-Path -LiteralPath (Join-Path $Root "messages.txt"))) {
-    Copy-Item -LiteralPath (Join-Path $Root "messages.example.txt") -Destination (Join-Path $Root "messages.txt")
+if (-not (Test-Path -LiteralPath (Join-Path $DataRoot "messages.txt"))) {
+    Copy-Item -LiteralPath (Join-Path $Root "messages.example.txt") -Destination (Join-Path $DataRoot "messages.txt")
 }
 
 Invoke-NativeChecked -Stage "Verify AutoDy installation" -FilePath $Python -Arguments @("-m", "autody.cli", "doctor", "--config", $Config)
@@ -200,6 +207,7 @@ if (-not $Shortcut) {
     throw "Shortcut installer returned no shortcut path."
 }
 $TaskProgramRoot = $Root
+$TaskDataRoot = $DataRoot
 $TaskConfig = $Config
 $TaskRepairEnabled = $true
 $Registration = Get-ItemProperty -LiteralPath "HKCU:\Software\AutoDy" -ErrorAction SilentlyContinue
@@ -216,7 +224,8 @@ if ($Registration) {
         Write-Warning "Registered AutoDy roots are incomplete; scheduled tasks were not changed. Repair the installed copy from its Dashboard."
     } else {
         $TaskProgramRoot = [IO.Path]::GetFullPath($RegisteredProgramRoot)
-        $TaskConfig = Join-Path ([IO.Path]::GetFullPath($RegisteredDataRoot)) "config.yaml"
+        $TaskDataRoot = [IO.Path]::GetFullPath($RegisteredDataRoot)
+        $TaskConfig = Join-Path $TaskDataRoot "config.yaml"
         Write-Host "[INFO] Repairing scheduled tasks for the registered AutoDy installation."
     }
 }
@@ -224,7 +233,8 @@ if ($TaskRepairEnabled) {
     $TaskRepairArguments = @(
         "-m", "autody.cli", "repair-scheduler",
         "--config", $TaskConfig,
-        "--program-root", $TaskProgramRoot
+        "--program-root", $TaskProgramRoot,
+        "--data-root", $TaskDataRoot
     )
     if ($Registration) {
         $TaskRepairArguments += "--if-config-exists"

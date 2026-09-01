@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from autody.runtime import configure_runtime
+from autody.runtime import configure_runtime, resolve_runtime_context
 
 
 def test_configure_runtime_uses_project_local_playwright_directory(
@@ -9,6 +9,7 @@ def test_configure_runtime_uses_project_local_playwright_directory(
 ):
     for name in (
         "AUTODY_HOME",
+        "AUTODY_PROGRAM_ROOT",
         "AUTODY_BROWSERS_PATH",
         "PLAYWRIGHT_BROWSERS_PATH",
         "PLAYWRIGHT_SKIP_BROWSER_GC",
@@ -18,6 +19,8 @@ def test_configure_runtime_uses_project_local_playwright_directory(
     runtime = configure_runtime(tmp_path)
 
     assert runtime.home == tmp_path.resolve()
+    assert runtime.data_root == tmp_path.resolve()
+    assert runtime.program_root == Path(__file__).resolve().parents[1]
     assert runtime.browsers_path == tmp_path.resolve() / "data" / "ms-playwright"
     assert os.environ["AUTODY_HOME"] == str(tmp_path.resolve())
     assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(runtime.browsers_path)
@@ -49,7 +52,7 @@ def test_configure_runtime_honors_packaged_browser_path(
     assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(browsers.resolve())
 
 
-def test_configure_runtime_falls_back_to_existing_program_browser_directory(
+def test_source_runtime_does_not_treat_program_directory_as_data_or_browser_root(
     tmp_path: Path, monkeypatch
 ):
     program_root = tmp_path / "program"
@@ -60,5 +63,29 @@ def test_configure_runtime_falls_back_to_existing_program_browser_directory(
 
     runtime = configure_runtime(tmp_path / "user-data")
 
-    assert runtime.browsers_path == browsers.resolve()
-    assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(browsers.resolve())
+    assert runtime.data_root == (tmp_path / "user-data").resolve()
+    assert runtime.browsers_path == (
+        tmp_path / "user-data" / "data" / "ms-playwright"
+    ).resolve()
+    assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(runtime.browsers_path)
+
+
+def test_runtime_context_keeps_packaged_program_and_data_roots_distinct(
+    tmp_path: Path, monkeypatch
+):
+    program_root = tmp_path / "portable"
+    (program_root / "runtime").mkdir(parents=True)
+    (program_root / "runtime" / "distribution-mode.txt").write_text(
+        "portable", encoding="ascii"
+    )
+    monkeypatch.delenv("AUTODY_BROWSERS_PATH", raising=False)
+
+    runtime = resolve_runtime_context(
+        tmp_path / "user-data",
+        program_root=program_root,
+    )
+
+    assert runtime.program_root == program_root.resolve()
+    assert runtime.data_root == (tmp_path / "user-data").resolve()
+    assert runtime.browsers_path == program_root / "runtime" / "ms-playwright"
+    assert runtime.distribution_mode == "portable"

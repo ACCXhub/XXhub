@@ -34,7 +34,6 @@ const apiMocks = vi.hoisted(() => ({
   }),
   switchAccountProfile: vi.fn(),
   addAccountProfile: vi.fn(),
-  retryFailedTarget: vi.fn(),
   config: vi.fn(),
   friends: vi.fn(),
   discoveredFriends: vi.fn(),
@@ -74,7 +73,6 @@ vi.mock("./api", () => ({
     accountProfiles: apiMocks.accountProfiles,
     switchAccountProfile: apiMocks.switchAccountProfile,
     addAccountProfile: apiMocks.addAccountProfile,
-    retryFailedTarget: apiMocks.retryFailedTarget,
     config: apiMocks.config,
     friends: apiMocks.friends,
     discoveredFriends: apiMocks.discoveredFriends,
@@ -135,6 +133,34 @@ test("times out the initial status request with an explained fallback", async ()
 
   expect(screen.getByRole("alert")).toHaveTextContent("无法加载 AutoDy 状态");
   expect(screen.getByText("原因：请求超时")).toBeInTheDocument();
+});
+
+test("marks retained status as stale when a later refresh fails", async () => {
+  vi.useFakeTimers();
+  apiMocks.status
+    .mockResolvedValueOnce({
+      today: { date: "2026-08-31", message: "测试文案", succeeded: 9, failed: 0, total: 9, complete: true },
+      friends: [{ name: "小明", status: "success" }],
+      history: [], scheduler: [], next_run: "2026-09-01T07:30:00", login: { status: "normal" }, message_count: 60, issues: [],
+      statistics: { last_completed_run: "2026-08-31T07:31:00", consecutive_successful_days: 7, success_rate_7d: 100, success_rate_30d: 98, successful_today: 9, failed_today: 0, configured_friend_count: 9, enabled_friend_count: 9, local_message_count: 60, active_message_pack_count: 5, next_health_check: null, next_daily_send: "2026-09-01T07:30:00", most_recent_issue: null }
+    })
+    .mockRejectedValueOnce(new Error("network unavailable"));
+
+  render(<App />);
+  await act(async () => {
+    await Promise.resolve();
+  });
+  expect(screen.getByText("9/9")).toBeInTheDocument();
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(30_000);
+    await Promise.resolve();
+  });
+
+  expect(screen.getByRole("alert")).toHaveTextContent(
+    "当前状态暂不可用以下数据为上次成功获取的 2026-08-31 状态，不能代表当前发送结果。原因：服务连接失败。"
+  );
+  expect(screen.getByText("9/9")).toBeInTheDocument();
 });
 
 test("keeps browser action buttons disabled until the action finishes", async () => {

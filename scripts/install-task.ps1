@@ -18,10 +18,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 $TaskName = "AutoDy-DailySpark"
-$Root = if ($ProgramRoot) { [IO.Path]::GetFullPath($ProgramRoot) } else { (Resolve-Path (Join-Path $PSScriptRoot "..")).Path }
-$DataRoot = if ($DataRoot) { [IO.Path]::GetFullPath($DataRoot) } elseif ($env:AUTODY_HOME) { [IO.Path]::GetFullPath($env:AUTODY_HOME) } else { $Root }
 . (Join-Path $PSScriptRoot "resolve-runtime-roots.ps1")
+$Root = if ($ProgramRoot) { [IO.Path]::GetFullPath($ProgramRoot) } else { (Resolve-Path (Join-Path $PSScriptRoot "..")).Path }
 $RuntimeContext = Resolve-AutoDyLaunchContext -ProgramRoot $Root -DataRoot $DataRoot
+$Root = $RuntimeContext.ProgramRoot
+$DataRoot = $RuntimeContext.DataRoot
 $Python = $RuntimeContext.Python
 
 if (-not (Test-Path $Python)) { throw "Missing AutoDy Python runtime: $Python" }

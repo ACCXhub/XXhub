@@ -4,9 +4,15 @@ import re
 
 import pytest
 
-from autody.chat import DOUYIN_SELECTORS
+from autody.chat import ChatPageConditionError, DOUYIN_SELECTORS
 from autody.config import AppConfig, Target
-from autody.preflight import ReadOnlyPage, Readiness, PreflightStore, run_preflight
+from autody.preflight import (
+    PlaywrightPreflightInspector,
+    PreflightStore,
+    ReadOnlyPage,
+    Readiness,
+    run_preflight,
+)
 
 
 class ReadOnlyInspector:
@@ -134,3 +140,34 @@ def test_read_only_page_exposes_no_input_or_generic_click_methods():
     assert page.action_counts["send_click"] == 0
     with pytest.raises(TypeError):
         page.open_conversation(page.locator(".composer"))
+
+
+def test_preflight_uses_the_chat_page_condition_for_explicit_risk_control():
+    class Locator:
+        def __init__(self, present: bool):
+            self.present = present
+
+        @property
+        def first(self):
+            return self
+
+        def count(self):
+            return int(self.present)
+
+        def is_visible(self):
+            return self.present
+
+    class Page:
+        def locator(self, selector, **_kwargs):
+            return Locator(selector == DOUYIN_SELECTORS.risk_control_marker)
+
+        def wait_for_timeout(self, _timeout):
+            return None
+
+    inspector = PlaywrightPreflightInspector(Page())
+
+    with pytest.raises(ChatPageConditionError) as captured:
+        inspector.chat_ready()
+
+    assert captured.value.reason_code == "risk_control_required"
+    assert captured.value.marker_id == "verification"

@@ -73,12 +73,21 @@ class FatalChatError(RuntimeError):
     """A failure for which sending to further targets is unsafe."""
 
 
+class ChatPageConditionError(FatalChatError):
+    """Expose a canonical page condition without leaking matched page text."""
+
+    def __init__(self, reason_code: str, marker_id: str):
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+        self.marker_id = marker_id
+
+
 class AuthenticationError(FatalChatError):
-    pass
+    reason_code = "login_required"
 
 
 class ChatPageLoadError(FatalChatError):
-    pass
+    reason_code = "page_load_timeout"
 
 
 class ChatNavigationInterrupted(RuntimeError):
@@ -100,7 +109,8 @@ class ChatSelectors:
     header_name: str
     input: str
     login_marker: str
-    verification_marker: str
+    authentication_marker: str
+    risk_control_marker: str
 
     @classmethod
     def test_defaults(cls):
@@ -112,7 +122,8 @@ class ChatSelectors:
             '[data-e2e="chat-header-name"]',
             '[data-e2e="chat-input"]',
             '[data-e2e="conversation-item"]',
-            "text=安全验证",
+            '[data-e2e="authentication-required"]',
+            '[data-e2e="risk-control-required"]',
         )
 
 
@@ -175,6 +186,7 @@ class DeliveryResult:
     error: str | None = None
     failure_stage: str | None = None
     reason_code: str | None = None
+    failure_marker: str | None = None
     confirmation_provenance: DeliveryConfirmationProvenance = (
         DeliveryConfirmationProvenance.NONE
     )
@@ -311,8 +323,29 @@ DOUYIN_SELECTORS = ChatSelectors(
     header_name=".RightPanelHeadertitle",
     input=".messageEditorimChatEditorContainer",
     login_marker=".conversationConversationListwrapper",
-    verification_marker="text=/安全验证|扫码登录|登录后即可聊天/",
+    authentication_marker="text=/扫码登录|登录后即可聊天/",
+    risk_control_marker="text=/安全验证/",
 )
+
+
+def classify_page_condition(
+    page: Page,
+    selectors: ChatSelectors,
+) -> tuple[str, str] | None:
+    """Classify only explicit, visible, selector-owned page conditions."""
+    markers = (
+        ("risk_control_required", "verification", selectors.risk_control_marker),
+        ("login_required", "login", selectors.authentication_marker),
+    )
+    for reason_code, marker_id, selector in markers:
+        try:
+            marker = page.locator(selector)
+            if marker.count() and marker.first.is_visible():
+                return reason_code, marker_id
+        except Exception:
+            continue
+    return None
+
 
 # Delivery confirmation selectors are deliberately isolated from navigation and
 # editor selectors. A Douyin page change here must not alter friend search/send.
@@ -331,7 +364,7 @@ _SHORT_DATE_MARKER = re.compile(r"(?<!\d)(\d{1,2})[月/-](\d{1,2})(?:日)?")
 
 
 def _contains_current_day_marker(markers: list[object], today: date) -> bool:
-    """Return true only when the rendered history explicitly names today."""
+    """Identify an ambiguous current-day boundary without dating any message."""
     for marker in markers:
         text = str(marker or "").strip()
         if not text:
@@ -350,9 +383,7 @@ def _contains_current_day_marker(markers: list[object], today: date) -> bool:
         for match in _SHORT_DATE_MARKER.finditer(text):
             try:
                 if (
-                    datetime(
-                        today.year, int(match.group(1)), int(match.group(2))
-                    ).date()
+                    datetime(today.year, int(match.group(1)), int(match.group(2))).date()
                     == today
                 ):
                     return True
@@ -421,6 +452,19 @@ class DouyinChat:
         self.confirmation_retries = confirmation_retries
         self.friend_search_timeout_ms = friend_search_timeout_ms
 
+    def page_failure(self) -> tuple[str, str] | None:
+        """Classify only explicitly visible, selector-owned page conditions.
+
+        The current page exposes no independent session-invalidation signal.
+        It also has no reliable local rate-limit marker. Missing selectors
+        therefore remain generic navigation/page failures.
+        """
+        return classify_page_condition(self.page, self.selectors)
+
+    def _raise_if_page_failure(self) -> None:
+        if failure := self.page_failure():
+            raise ChatPageConditionError(*failure)
+
     def _latest_outgoing_text(self) -> str | None:
         messages = self.page.locator(self.confirmation_selectors.outgoing_message_text)
         if messages.count() == 0:
@@ -445,8 +489,9 @@ class DouyinChat:
         """Return stable identities for visible outgoing bubbles when exposed.
 
         The chat history is virtualized, so element count and DOM position are
-        deliberately excluded. Only a message-specific attribute, timestamp,
-        or React list key can prove that a post-Enter bubble is new.
+        deliberately excluded. Only message-specific IDs and timestamps placed
+        on the outgoing text itself can prove that a post-Enter bubble is new.
+        React keys are render identities, not message identities.
         """
         messages = self.page.locator(self.confirmation_selectors.outgoing_message_text)
         if messages.count() == 0:
@@ -454,23 +499,23 @@ class DouyinChat:
         try:
             observed = messages.evaluate_all(
                 """elements => {
-                    const attributeNames = [
+                    const messageIdAttributes = [
                       'data-message-id', 'data-messageid', 'data-msg-id',
-                      'data-msgid', 'data-message-key', 'data-key',
+                      'data-msgid'
+                    ];
+                    const timestampAttributes = [
                       'data-timestamp', 'data-time', 'datetime'
                     ];
                     const stableIdentity = element => {
                       for (let node = element, level = 0; node && level < 8; level += 1, node = node.parentElement) {
-                        for (const name of attributeNames) {
+                        for (const name of messageIdAttributes) {
                           const value = node.getAttribute(name);
                           if (value) return `attribute:${name}:${value}`;
                         }
-                        for (const property of Object.getOwnPropertyNames(node)) {
-                          if (!property.startsWith('__reactFiber$')) continue;
-                          for (let fiber = node[property], depth = 0; fiber && depth < 16; depth += 1, fiber = fiber.return) {
-                            if (fiber.key != null && String(fiber.key)) return `react-key:${String(fiber.key)}`;
-                          }
-                        }
+                      }
+                      for (const name of timestampAttributes) {
+                        const value = element.getAttribute(name);
+                        if (value) return `timestamp:${name}:${value}`;
                       }
                       return null;
                     };
@@ -503,6 +548,7 @@ class DouyinChat:
         missing result requires a prior-day marker or the true history start.
         A bubble beside an unresolved day boundary is never delivery evidence.
         """
+        self._raise_if_page_failure()
         try:
             history = self.page.locator(self.confirmation_selectors.history_container)
             if history.count() != 1:
@@ -521,7 +567,7 @@ class DouyinChat:
                     """(element, outgoingSelector) => {
                         const outgoing = Array.from(element.querySelectorAll(outgoingSelector))
                           .map(node => {
-                            const row = node.closest('[data-timestamp], [data-time], [datetime], [data-e2e*="message" i]') || node.parentElement;
+                            const row = node.closest('[data-message-id], [data-messageid], [data-msg-id], [data-msgid]') || node;
                             const timestamp = [node, row].flatMap(item => item ? [
                               item.getAttribute('data-timestamp'), item.getAttribute('data-time'),
                               item.getAttribute('datetime'), item.getAttribute('title')
@@ -596,20 +642,12 @@ class DouyinChat:
                         scrolls=scrolls,
                     )
                 if current_day and prior_boundary:
-                    # The viewport crosses a day divider. Its outgoing nodes
-                    # cannot be assigned to either day with enough confidence.
+                    # A snapshot-level current-day marker cannot date an
+                    # outgoing in the same virtualized viewport. It does,
+                    # however, make a prior-day MISSING conclusion unsafe.
                     return TodayOutgoingAudit(
                         TodayOutgoingStatus.UNKNOWN,
                         reason="date_boundary_ambiguous",
-                        rows_inspected=inspected,
-                        snapshots=snapshots,
-                        scrolls=scrolls,
-                    )
-                if current_day and outgoing_seen:
-                    return TodayOutgoingAudit(
-                        TodayOutgoingStatus.CONFIRMED_SENT,
-                        boundary="current_day_history",
-                        reason="today_outgoing_found",
                         rows_inspected=inspected,
                         snapshots=snapshots,
                         scrolls=scrolls,
@@ -679,8 +717,6 @@ class DouyinChat:
         message: str,
         *,
         pre_send_identities: dict[str, str],
-        pre_send_audit: TodayOutgoingAudit | None,
-        delivery_day: date | None,
     ) -> tuple[DeliveryStatus | None, int]:
         for attempt in range(1, self.confirmation_retries + 2):
             if self.confirmation_delay_ms:
@@ -690,14 +726,7 @@ class DouyinChat:
                 and text == normalize_message_text(message)
                 for identity, text in self._outgoing_message_identities().items()
             )
-            missing_to_sent = (
-                pre_send_audit is not None
-                and pre_send_audit.status is TodayOutgoingStatus.CONFIRMED_MISSING
-                and delivery_day is not None
-                and self.audit_today_outgoing(delivery_day).status
-                is TodayOutgoingStatus.CONFIRMED_SENT
-            )
-            if matching_identity_observed or missing_to_sent:
+            if matching_identity_observed:
                 status = DeliveryStatus.CONFIRMED if attempt == 1 else DeliveryStatus.RETRY_CONFIRMED
                 return status, attempt
         return None, self.confirmation_retries + 1
@@ -724,14 +753,17 @@ class DouyinChat:
         expected_conversation_id: str | None = None,
         interrupt_requested: Callable[[], str | None] | None = None,
     ):
-        conversations = self.page.locator(self.selectors.conversation)
-        scrollable = self.page.locator(self.selectors.conversation_list)
-        if scrollable.count():
-            scrollable.first.evaluate("el => el.scrollTop = 0")
+        if not self._normalize_conversation_search_origin():
+            return self.page.locator(self.selectors.conversation), 0
         deadline = time.monotonic() + self.friend_search_timeout_ms / 1000
+        matches = self.page.locator(self.selectors.conversation)
         for _ in range(50):
             if interrupt_requested is not None and (kind := interrupt_requested()):
                 raise ChatNavigationInterrupted(kind)
+            # A scroll or a preceding send may have replaced virtual rows.  Take
+            # a new locator snapshot for every search pass rather than carrying
+            # a row from a previous list position.
+            conversations = self.page.locator(self.selectors.conversation)
             if expected_conversation_id:
                 for index in range(conversations.count()):
                     item = conversations.nth(index)
@@ -746,6 +778,7 @@ class DouyinChat:
                 count = matches.count()
                 if count:
                     return matches, count
+            scrollable = self.page.locator(self.selectors.conversation_list)
             if not scrollable.count():
                 break
             position = scrollable.first.evaluate(
@@ -771,8 +804,67 @@ class DouyinChat:
             )
             self.page.wait_for_timeout(250)
         if expected_conversation_id:
-            return conversations, 0
+            return self.page.locator(self.selectors.conversation), 0
         return matches, matches.count()
+
+    def _normalize_conversation_search_origin(self) -> bool:
+        """Return the virtual conversation list to its latest/top search origin.
+
+        Sending a message can reorder Douyin's list while leaving a stale scroll
+        position in place.  Each target lookup must begin from a freshly observed
+        top position; assigning ``scrollTop`` alone is not proof that the virtual
+        list has rendered that position.
+        """
+        deadline = time.monotonic() + min(
+            self.friend_search_timeout_ms / 1000,
+            0.5,
+        )
+        while time.monotonic() < deadline:
+            scrollable = self.page.locator(self.selectors.conversation_list)
+            if not scrollable.count():
+                return True
+            try:
+                scrollable.first.evaluate(
+                    """element => {
+                        element.scrollTop = 0;
+                        element.dispatchEvent(new Event('scroll'));
+                    }"""
+                )
+                # Reacquire after the scroll event: virtualized list containers
+                # can be replaced while their rows are reconciled.
+                current = self.page.locator(self.selectors.conversation_list)
+                if not current.count():
+                    return False
+                position = current.first.evaluate(
+                    """element => ({
+                        scrollTop: Math.max(0, Math.round(element.scrollTop)),
+                        atOrigin: element.scrollTop <= 1
+                    })"""
+                )
+                if isinstance(position, dict) and bool(position.get("atOrigin")):
+                    # ``scrollTop`` reaches zero before the virtual rows are
+                    # necessarily reconciled.  Let that scroll settle, then
+                    # reacquire the container before the caller takes its
+                    # first row snapshot.
+                    self.page.wait_for_timeout(50)
+                    settled = self.page.locator(self.selectors.conversation_list)
+                    if not settled.count():
+                        return False
+                    settled_position = settled.first.evaluate(
+                        """element => ({
+                            scrollTop: Math.max(0, Math.round(element.scrollTop)),
+                            atOrigin: element.scrollTop <= 1
+                        })"""
+                    )
+                    if (
+                        isinstance(settled_position, dict)
+                        and bool(settled_position.get("atOrigin"))
+                    ):
+                        return True
+            except Exception:
+                return False
+            self.page.wait_for_timeout(50)
+        return False
 
     def _wait_for_conversation_list_growth(
         self,
@@ -836,6 +928,7 @@ class DouyinChat:
         interrupt_requested: Callable[[], str | None] | None = None,
     ) -> ConversationIdentity:
         """Open and stably verify one conversation without touching the composer."""
+        self._raise_if_page_failure()
         if not expected_conversation_id:
             visible_id, visible_name = self._visible_conversation()
             return ConversationIdentity(
@@ -1081,6 +1174,7 @@ class DouyinChat:
     ) -> DeliveryResult:
         send_attempted = False
         try:
+            self._raise_if_page_failure()
             if expected_conversation_id is not None and not conversation_verified:
                 identity = self.open_conversation_identity(
                     selected_target_id or "",
@@ -1110,6 +1204,7 @@ class DouyinChat:
                     )
             else:
                 self.open_verified_conversation(target)
+            self._raise_if_page_failure()
             editor = self.composer_editor()
             editor.fill(message)
             pre_send_identities = self._outgoing_message_identities()
@@ -1121,8 +1216,6 @@ class DouyinChat:
             status, attempts = self._confirm_delivery(
                 message,
                 pre_send_identities=pre_send_identities,
-                pre_send_audit=pre_send_audit,
-                delivery_day=delivery_day,
             )
             if status:
                 return DeliveryResult(
@@ -1133,7 +1226,14 @@ class DouyinChat:
                         DeliveryConfirmationProvenance.POST_SEND_OBSERVED
                     ),
                 )
+            if delivery_day is not None:
+                # Preserve the verified conversation and spend the existing
+                # bounded audit budget before carrying an uncertain Enter
+                # forward. Its SENT result is delivery truth only; it never
+                # manufactures post_send_observed provenance.
+                self.audit_today_outgoing(delivery_day)
             screenshot = self.screenshot("confirmation-failed")
+            post_send_failure = self.page_failure()
             return DeliveryResult(
                 DeliveryStatus.CONFIRMATION_FAILED,
                 send_attempts=1,
@@ -1142,9 +1242,28 @@ class DouyinChat:
                 error="post-send observation unavailable",
                 failure_stage="confirmation_observed",
                 reason_code="confirmation_failed_uncertain",
+                failure_marker=(
+                    post_send_failure[1] if post_send_failure else None
+                ),
+            )
+        except ChatPageConditionError as exc:
+            screenshot = self.screenshot("page-condition")
+            return DeliveryResult(
+                DeliveryStatus.BLOCKED,
+                send_attempts=int(send_attempted),
+                screenshot_path=screenshot,
+                error=exc.reason_code,
+                failure_stage=(
+                    "send_boundary_reached" if send_attempted else "conversation_selected"
+                ),
+                reason_code=(
+                    "confirmation_failed_uncertain" if send_attempted else exc.reason_code
+                ),
+                failure_marker=exc.marker_id,
             )
         except RuntimeError as exc:
             screenshot = self.screenshot("send-error")
+            page_failure = self.page_failure()
             return DeliveryResult(
                 DeliveryStatus.SEND_FAILED,
                 send_attempts=int(send_attempted),
@@ -1158,13 +1277,17 @@ class DouyinChat:
                 reason_code=(
                     "confirmation_failed_uncertain"
                     if send_attempted
+                    else page_failure[0]
+                    if page_failure
                     else "conversation_not_found"
                     if "not found" in str(exc).casefold()
                     else "unknown_exception"
                 ),
+                failure_marker=page_failure[1] if page_failure else None,
             )
         except PlaywrightTimeoutError as exc:
             screenshot = self.screenshot("page-changed")
+            page_failure = self.page_failure()
             return DeliveryResult(
                 DeliveryStatus.BLOCKED,
                 send_attempts=int(send_attempted),
@@ -1178,8 +1301,11 @@ class DouyinChat:
                 reason_code=(
                     "confirmation_failed_uncertain"
                     if send_attempted
+                    else page_failure[0]
+                    if page_failure
                     else "page_load_timeout"
                 ),
+                failure_marker=page_failure[1] if page_failure else None,
             )
 
     def screenshot(self, label: str) -> Path:
@@ -1188,6 +1314,93 @@ class DouyinChat:
         path = self.artifact_dir / f"{datetime.now():%Y%m%d-%H%M%S}-{safe_label}.png"
         self.page.screenshot(path=path, full_page=True)
         return path
+
+    def failure_evidence_snapshot(self, _stage: str) -> dict:
+        """Return selector-based diagnostics without reading page or editor text."""
+        def locator_state(selector: str) -> dict[str, bool | int]:
+            try:
+                locator = self.page.locator(selector)
+                count = locator.count()
+                return {
+                    "present": count > 0,
+                    "visible": bool(count and locator.first.is_visible()),
+                }
+            except Exception:
+                return {"present": False, "visible": False}
+
+        def scroll_state(selector: str) -> dict[str, int]:
+            try:
+                locator = self.page.locator(selector)
+                if not locator.count():
+                    return {}
+                position = locator.first.evaluate(
+                    """element => ({
+                        scroll_top: Math.max(0, Math.round(element.scrollTop)),
+                        scroll_height: Math.max(0, Math.round(element.scrollHeight)),
+                        client_height: Math.max(0, Math.round(element.clientHeight))
+                    })"""
+                )
+                return {
+                    name: int(value)
+                    for name, value in position.items()
+                    if name in {"scroll_top", "scroll_height", "client_height"}
+                    and isinstance(value, (int, float))
+                    and value >= 0
+                }
+            except Exception:
+                return {}
+
+        conversation_list = locator_state(self.selectors.conversation_list)
+        try:
+            conversation_list["row_count"] = self.page.locator(
+                self.selectors.conversation
+            ).count()
+        except Exception:
+            pass
+        conversation_list.update(scroll_state(self.selectors.conversation_list))
+
+        conversation = {
+            "visible_conversation_present": locator_state(
+                self.selectors.visible_conversation
+            )["present"],
+            "header_present": locator_state(self.selectors.header_name)["present"],
+        }
+        composer = locator_state(self.selectors.input)
+        try:
+            editor = self.composer_editor()
+            composer["enabled"] = editor.is_enabled()
+            composer["contenteditable"] = (
+                str(editor.get_attribute("contenteditable") or "").lower()
+                == "true"
+            )
+        except Exception:
+            pass
+        history = locator_state(self.confirmation_selectors.history_container)
+        try:
+            history["outgoing_count"] = self.page.locator(
+                self.confirmation_selectors.outgoing_message_text
+            ).count()
+        except Exception:
+            pass
+        history.update(scroll_state(self.confirmation_selectors.history_container))
+
+        def marker_present(selector: str) -> bool:
+            try:
+                return self.page.locator(selector).count() > 0
+            except Exception:
+                return False
+
+        return {
+            "page": {"url": self.page.url},
+            "conversation_list": conversation_list,
+            "conversation": conversation,
+            "composer": composer,
+            "history": history,
+            "markers": {
+                "login": marker_present(self.selectors.authentication_marker),
+                "verification": marker_present(self.selectors.risk_control_marker),
+            },
+        }
 
 
 def _runtime_home(profile_dir: Path, home: Path | None) -> Path:
@@ -1251,10 +1464,16 @@ def open_chat(
             page.goto(CHAT_URL, wait_until="domcontentloaded", timeout=timeout_ms)
         except PlaywrightTimeoutError as exc:
             raise ChatPageLoadError("Douyin chat page load timed out") from exc
-        if page.locator(DOUYIN_SELECTORS.verification_marker).count():
+        chat = DouyinChat(
+            page,
+            DOUYIN_SELECTORS,
+            artifact_dir or Path.cwd(),
+            DOUYIN_CONFIRMATION_SELECTORS,
+        )
+        if failure := chat.page_failure():
             if artifact_dir:
-                DouyinChat(page, DOUYIN_SELECTORS, artifact_dir, DOUYIN_CONFIRMATION_SELECTORS).screenshot("authentication")
-            raise AuthenticationError("login expired or security verification required")
+                chat.screenshot("page-condition")
+            raise ChatPageConditionError(*failure)
         try:
             page.locator(DOUYIN_SELECTORS.login_marker).wait_for()
         except PlaywrightTimeoutError as exc:

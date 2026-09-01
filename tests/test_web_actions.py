@@ -57,6 +57,43 @@ def test_targeted_retry_action_uses_stable_target_id_argument(tmp_path: Path):
     ]]
 
 
+def test_safe_supplement_uses_one_cli_run_for_all_safe_target_ids(tmp_path: Path):
+    commands = []
+
+    def execute(command, **_kwargs):
+        commands.append(command)
+        return type("Completed", (), {"returncode": 0})()
+
+    manager = ActionManager(tmp_path, tmp_path / "config.yaml", executor=execute)
+    job = manager.start(
+        "safe-supplement",
+        target_ids=["target-a", "target-b", "target-c"],
+    )
+
+    for _attempt in range(100):
+        completed = manager.get(job["id"])
+        if completed and completed["status"] != "running":
+            break
+        threading.Event().wait(0.01)
+
+    assert commands == [[
+        sys.executable,
+        "-m",
+        "autody.cli",
+        "run",
+        "--config",
+        str(tmp_path / "config.yaml"),
+        "--source",
+        "retry",
+        "--target-id",
+        "target-a",
+        "--target-id",
+        "target-b",
+        "--target-id",
+        "target-c",
+    ]]
+
+
 def test_scheduler_writes_are_not_exposed_through_generic_actions(tmp_path: Path):
     manager = ActionManager(tmp_path, tmp_path / "config.yaml")
 

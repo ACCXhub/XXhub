@@ -4,17 +4,56 @@ from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
-from autody.cli import app
+from autody.chat import ChatPageConditionError
+from autody.cli import _run_preflight_with_page, app
 from autody.config import load_config, save_config
 from autody.failures import failure_detail
 from autody.friend_discovery import AvatarRefreshResult, FriendDiscoveryResult
 from autody.account_profile import mark_bindings_for_revalidation
-from autody.locking import SingleInstanceLock
+from autody.locking import SingleInstanceLock, TaskAlreadyRunning
 from autody.retry_state import TaskOutcomeStore
 from autody.runner import RunResult, RunStatus
 
 
 runner = CliRunner()
+
+
+def test_preflight_preserves_explicit_risk_control_reason(tmp_path: Path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "targets: []\nmessages_file: messages.txt\n",
+        encoding="utf-8",
+    )
+    loaded = load_config(config_path)
+
+    class Locator:
+        def __init__(self, present: bool):
+            self.present = present
+
+        @property
+        def first(self):
+            return self
+
+        def count(self):
+            return int(self.present)
+
+        def is_visible(self):
+            return self.present
+
+    class Page:
+        def locator(self, selector, **_kwargs):
+            from autody.chat import DOUYIN_SELECTORS
+
+            return Locator(selector == DOUYIN_SELECTORS.risk_control_marker)
+
+        def wait_for_timeout(self, _timeout):
+            return None
+
+    result = _run_preflight_with_page(
+        loaded, Page(), target_ids=None, trigger_source="manual"
+    )
+
+    assert result["global_status"] == "risk_control_required"
 
 
 def test_repair_scheduler_uses_explicit_program_and_canonical_data_roots(
@@ -791,6 +830,115 @@ def test_run_target_id_passes_only_current_stable_binding_to_runner(
 
     assert result.exit_code == 0
     assert captured["target_ids"] == {"target-current"}
+
+
+def test_run_audit_only_exposes_the_canonical_runner_mode_without_send_activity(
+    tmp_path: Path, monkeypatch
+):
+    (tmp_path / "messages.txt").write_text("早安\n", encoding="utf-8")
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "targets:\n  - name: 目标\n    stable_id: target-current\n    candidate_id: candidate-current\nmessages_file: messages.txt\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    class Context:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr("autody.cli.open_chat", lambda *_args, **_kwargs: Context())
+    monkeypatch.setattr("autody.cli.DouyinChat", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(
+        "autody.cli._sending_activity",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("audit must not create send activity")
+        ),
+    )
+
+    def fake_run_daily(*_args, **kwargs):
+        captured.update(kwargs)
+        return RunResult(
+            status=RunStatus.COMPLETED,
+            total_targets=1,
+            sent_count=0,
+            skipped_count=0,
+            failed_count=0,
+            today_audit_outcomes={"target-current": "confirmed_missing"},
+            audit_navigation_target_ids=("target-current",),
+        )
+
+    monkeypatch.setattr("autody.cli.run_daily", fake_run_daily)
+
+    result = runner.invoke(app, ["run", "--config", str(config), "--audit-only"])
+
+    assert result.exit_code == 0
+    assert captured["audit_only"] is True
+    assert "confirmed_missing" in result.stdout
+
+
+def test_run_audit_only_reports_busy_as_unknown_without_creating_send_failure(
+    tmp_path: Path, monkeypatch
+):
+    (tmp_path / "messages.txt").write_text("早安\n", encoding="utf-8")
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "targets:\n  - name: 目标\n    stable_id: target-current\n    candidate_id: candidate-current\nmessages_file: messages.txt\n",
+        encoding="utf-8",
+    )
+
+    class BusyLock:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            raise TaskAlreadyRunning("busy")
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr("autody.cli.SingleInstanceLock", BusyLock)
+    monkeypatch.setattr(
+        "autody.cli.record_safe_pre_send_failure",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("audit lock contention must not create send failure")
+        ),
+    )
+
+    result = runner.invoke(app, ["run", "--config", str(config), "--audit-only"])
+
+    assert result.exit_code == 0
+    assert "unknown" in result.stdout
+    assert "browser_busy" in result.stdout
+
+
+def test_run_audit_only_exposes_a_classified_page_condition(tmp_path: Path, monkeypatch):
+    (tmp_path / "messages.txt").write_text("早安\n", encoding="utf-8")
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        "targets:\n  - name: 目标\n    stable_id: target-current\n    candidate_id: candidate-current\nmessages_file: messages.txt\n",
+        encoding="utf-8",
+    )
+
+    class ClassifiedContext:
+        def __enter__(self):
+            raise ChatPageConditionError("risk_control_required", "verification")
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        "autody.cli.open_chat", lambda *_args, **_kwargs: ClassifiedContext()
+    )
+
+    result = runner.invoke(app, ["run", "--config", str(config), "--audit-only"])
+
+    assert result.exit_code == 0
+    assert "risk_control_required" in result.stdout
+    assert '"send_attempts": 0' in result.stdout
 
 
 def test_ui_starts_local_server(tmp_path: Path, monkeypatch):

@@ -16,7 +16,7 @@ from typing import Callable, Protocol
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
 
-from autody.chat import DOUYIN_SELECTORS
+from autody.chat import ChatPageConditionError, DOUYIN_SELECTORS, classify_page_condition
 from autody.config import AppConfig, Target, target_identity
 
 
@@ -68,6 +68,9 @@ class ReadOnlyLocator:
 
     def count(self) -> int:
         return self._locator.count()
+
+    def is_visible(self) -> bool:
+        return self._locator.is_visible()
 
     def filter(self, **kwargs) -> "ReadOnlyLocator":
         if isinstance(kwargs.get("has"), ReadOnlyLocator):
@@ -143,8 +146,8 @@ class PlaywrightPreflightInspector:
         return dict(self.page.action_counts)
 
     def chat_ready(self) -> None:
-        if self.page.locator(DOUYIN_SELECTORS.verification_marker).count():
-            raise RuntimeError("login_required")
+        if failure := classify_page_condition(self.page, DOUYIN_SELECTORS):
+            raise ChatPageConditionError(*failure)
         if not self.page.locator(DOUYIN_SELECTORS.conversation_list).count():
             raise RuntimeError("page_structure_changed")
 

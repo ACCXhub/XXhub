@@ -86,6 +86,7 @@ from autody.runner import (
     reconcile_today_delivery,
 )
 from autody.state import StateStore
+from autody.runtime import RuntimeContext, resolve_runtime_context
 from autody.scheduler import ScheduleSettings, SchedulerService
 from autody.test_center_dry_run import (
     batch_target_exclusion_reasons,
@@ -785,10 +786,8 @@ def _message_count(path: Path) -> int:
         return 0
 
 
-def _runtime_available(root: Path) -> bool:
-    configured = os.environ.get("AUTODY_BROWSERS_PATH", "").strip()
-    browsers = Path(configured).resolve() if configured else root / "data" / "ms-playwright"
-    return any(browsers.glob("chromium-*/chrome-win*/chrome.exe"))
+def _runtime_available(runtime: RuntimeContext) -> bool:
+    return any(runtime.browsers_path.glob("chromium-*/chrome-win*/chrome.exe"))
 
 
 def _config_payload(config: AppConfig) -> dict:
@@ -877,10 +876,13 @@ def create_app(
     account_logout_runner=None,
     startup_refresh_enabled: bool = False,
     today_reconciler=None,
+    runtime_context: RuntimeContext | None = None,
 ) -> FastAPI:
     config_path = config_path.resolve()
-    root = config_path.parent
-    program_root = Path(os.environ.get("AUTODY_PROGRAM_ROOT", root)).resolve()
+    data_root = config_path.parent
+    root = data_root
+    runtime_context = runtime_context or resolve_runtime_context(data_root)
+    program_root = runtime_context.program_root
     scheduler_task_user_id = scheduler.current_process_user_sid()
     manager = ActionManager(program_root, config_path)
     account_store = MultiAccountStore(root, config_path)
@@ -898,7 +900,7 @@ def create_app(
     def message_pack_service() -> MessagePackService:
         return MessagePackService(
             program_root,
-            root,
+            runtime_context.data_root,
             now=current_time,
         )
 
@@ -1120,7 +1122,7 @@ def create_app(
     def dashboard_scheduler_service() -> SchedulerService:
         return SchedulerService(
             program_root,
-            data_root=root,
+            data_root=runtime_context.data_root,
             task_user_id=scheduler_task_user_id,
         )
 
@@ -1190,7 +1192,13 @@ def create_app(
 
         if not plan.live_audit_target_ids and not plan.confirmed_missing_target_ids:
             return (
-                reconcile_today_delivery(config, None, today, plan=plan),
+                reconcile_today_delivery(
+                    config,
+                    None,
+                    today,
+                    plan=plan,
+                    runtime_context=runtime_context,
+                ),
                 None,
             )
 
@@ -1238,7 +1246,11 @@ def create_app(
                         friend_search_timeout_ms=config.friend_search_timeout_ms,
                     )
                     return reconcile_today_delivery(
-                        config, chat, today, plan=plan
+                        config,
+                        chat,
+                        today,
+                        plan=plan,
+                        runtime_context=runtime_context,
                     ), None
         except (TaskAlreadyRunning, AuthenticationError, FatalChatError, RuntimeError) as exc:
             return unresolved_live_audit("live_chat_audit_unavailable"), type(exc).__name__
@@ -1249,7 +1261,7 @@ def create_app(
         return {
             "application": "AutoDy",
             "version": _application_version(),
-            "git_commit": _git_commit(root),
+            "git_commit": _git_commit(runtime_context.program_root),
             "python_executable": sys.executable,
             "package_path": str(package_path),
             "project_path": str(root),
@@ -1327,12 +1339,12 @@ def create_app(
         manual: list[dict[str, str]] = []
         checks: list[dict[str, str]] = []
 
-        if _runtime_available(root):
+        if _runtime_available(runtime_context):
             checks.append({"id": "runtime", "label": "浏览器运行时正常"})
         else:
             try:
                 job = finish_repair_action("repair-playwright")
-                if job.get("status") == "success" and _runtime_available(root):
+                if job.get("status") == "success" and _runtime_available(runtime_context):
                     repaired.append({"id": "runtime", "label": "浏览器运行时已恢复"})
                 else:
                     manual.append({"id": "runtime", "label": "浏览器运行时未能自动恢复，请查看运行日志"})
@@ -1613,7 +1625,7 @@ def create_app(
                 tasks,
                 len(executable_targets),
                 program_root=program_root,
-                data_root=root,
+                data_root=runtime_context.data_root,
                 task_user_id=scheduler_task_user_id,
             )
             if scheduler_available
@@ -1651,7 +1663,7 @@ def create_app(
                 "action": "friends",
                 "action_label": "重新扫描好友",
             })
-        if not _runtime_available(root):
+        if not _runtime_available(runtime_context):
             issues.append({
                 "id": "runtime_missing", "status": "error",
                 "explanation": "项目内 Chromium 缺失或不可用。",
@@ -1836,6 +1848,25 @@ def create_app(
         except ActionAlreadyRunning as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    def retry_failed_targets(today: str | None = None):
+        config = load_config(config_path)
+        try:
+            failure_day = date.fromisoformat(today) if today else current_time().date()
+        except ValueError as exc:
+            raise HTTPException(422, "日期格式应为 YYYY-MM-DD") from exc
+        failures = _failed_targets(config, StateStore(config.state_file).load(), failure_day)
+        target_ids = [
+            item["target_id"]
+            for item in failures["items"]
+            if item["safe_retry_available"]
+        ]
+        if not target_ids:
+            raise HTTPException(409, "当前没有满足安全补发条件的目标。")
+        try:
+            return run_action("safe-supplement", target_ids=target_ids)
+        except ActionAlreadyRunning as exc:
+            raise HTTPException(409, str(exc)) from exc
+
     @app.get("/api/failed-targets")
     def overview_failed_targets(today: str | None = None):
         return failed_targets(today)
@@ -1980,7 +2011,12 @@ def create_app(
         if target is None:
             raise HTTPException(422, "测试目标无效或已停用")
         try:
-            preview = preview_today_target_message(config, target, date.today())
+            preview = preview_today_target_message(
+                config,
+                target,
+                date.today(),
+                runtime_context=runtime_context,
+            )
         except (OSError, ValueError, MessagePackError) as exc:
             raise HTTPException(422, f"今日文案不可用：{exc}") from exc
         return {"available": True, "text": preview.text, "mode": "today"}
@@ -2909,7 +2945,7 @@ def create_app(
                 try:
                     ids = {
                         pack.id
-                        for pack in MessagePackService(program_root).list_packs().packs
+                        for pack in message_pack_service().list_packs().packs
                     }
                 except MessagePackError as exc:
                     raise HTTPException(422, str(exc)) from exc
@@ -3380,6 +3416,7 @@ def create_app(
     def action(action: str):
         if action not in {
             "run",
+            "safe-supplement",
             "login",
             "health-check",
             "scan-friends",
@@ -3390,6 +3427,8 @@ def create_app(
         }:
             raise HTTPException(404, "未知操作")
         try:
+            if action == "safe-supplement":
+                return retry_failed_targets()
             return run_action(action)
         except ActionAlreadyRunning as exc:
             raise HTTPException(409, str(exc)) from exc

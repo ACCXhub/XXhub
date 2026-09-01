@@ -9,6 +9,7 @@ import pytest
 
 from autody.config import AppConfig, Target
 from autody.chat import (
+    ChatPageConditionError,
     DeliveryConfirmationProvenance,
     DeliveryResult,
     DeliveryStatus,
@@ -33,6 +34,7 @@ from autody.runner import (
     run_daily,
 )
 from autody.retry_state import TaskOutcome, TaskOutcomeStore
+from autody.runtime import resolve_runtime_context
 from autody.state import StateStore
 
 
@@ -750,6 +752,7 @@ def test_live_audit_missing_reopens_uncertain_and_only_resends_missing_target(
         day,
         plan=TodayDeliveryReconciliationPlan({}, {}, (missing.stable_id,)),
         supplement=False,
+        now=datetime(2026, 8, 30, 19, 1),
     )
     stored = StateStore(config.state_file).load().daily[day.isoformat()]
     statuses = runner_module.effective_daily_target_statuses(
@@ -774,7 +777,7 @@ def test_live_audit_missing_reopens_uncertain_and_only_resends_missing_target(
         config,
         chat,
         day,
-        now=datetime.now() + timedelta(seconds=1),
+        now=datetime(2026, 8, 30, 19, 2),
     )
 
     assert resent.sent_count == 1
@@ -1143,6 +1146,61 @@ def test_retry_only_processes_failed_target_with_same_message(tmp_path: Path):
     assert second.sent[0][1] == first.sent[0][1]
 
 
+def test_unknown_audit_is_rechecked_once_before_send_decision():
+    target = Target(name="目标", stable_id="target-a", candidate_id="candidate-a")
+
+    class AuditChat:
+        friend_search_timeout_ms = 1
+
+        def __init__(self, audits):
+            self.audits = list(audits)
+            self.audit_calls = 0
+            self.send_calls = 0
+
+        def open_conversation_identity(self, *_args, **_kwargs):
+            return SimpleNamespace(identity_match=True)
+
+        def audit_today_outgoing(self, _today):
+            result = self.audits[self.audit_calls]
+            self.audit_calls += 1
+            return TodayOutgoingAudit(result)
+
+        def send(self, *_args, **_kwargs):
+            self.send_calls += 1
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMED,
+                send_attempts=1,
+                confirmation_provenance=DeliveryConfirmationProvenance.POST_SEND_OBSERVED,
+            )
+
+    sent = AuditChat([
+        TodayOutgoingStatus.UNKNOWN,
+        TodayOutgoingStatus.CONFIRMED_SENT,
+    ])
+    missing = AuditChat([
+        TodayOutgoingStatus.UNKNOWN,
+        TodayOutgoingStatus.CONFIRMED_MISSING,
+    ])
+    unresolved = AuditChat([
+        TodayOutgoingStatus.UNKNOWN,
+        TodayOutgoingStatus.UNKNOWN,
+    ])
+
+    sent_result = runner_module._execute_today_target(
+        sent, target, "早安", date(2026, 8, 30), expected_conversation_id="conversation-a"
+    )
+    missing_result = runner_module._execute_today_target(
+        missing, target, "早安", date(2026, 8, 30), expected_conversation_id="conversation-a"
+    )
+    unresolved_result = runner_module._execute_today_target(
+        unresolved, target, "早安", date(2026, 8, 30), expected_conversation_id="conversation-a"
+    )
+
+    assert (sent.audit_calls, sent.send_calls, sent_result.audit.status) == (2, 0, TodayOutgoingStatus.CONFIRMED_SENT)
+    assert (missing.audit_calls, missing.send_calls, missing_result.audit.status) == (2, 1, TodayOutgoingStatus.CONFIRMED_MISSING)
+    assert (unresolved.audit_calls, unresolved.send_calls, unresolved_result.audit.status) == (2, 0, TodayOutgoingStatus.UNKNOWN)
+
+
 def test_partial_pre_send_failure_retries_only_the_unconfirmed_target(tmp_path: Path):
     config = make_config(tmp_path)
     config.min_delay_seconds = 0
@@ -1171,7 +1229,7 @@ def test_partial_pre_send_failure_retries_only_the_unconfirmed_target(tmp_path: 
                 confirmation_provenance=DeliveryConfirmationProvenance.POST_SEND_OBSERVED,
             )
 
-    first_chat = PartialChat("目标8")
+    first_chat = PartialChat("目标4")
     first = run_daily(
         config,
         first_chat,
@@ -1182,6 +1240,7 @@ def test_partial_pre_send_failure_retries_only_the_unconfirmed_target(tmp_path: 
     assert first.status is RunStatus.RETRY_PENDING
     assert first.sent_count == 8
     assert first.failed_count == 1
+    assert first_chat.calls == [f"目标{index}" for index in range(9)]
 
     pending = TaskOutcomeStore(tmp_path / "history" / "task-outcomes.json").get(first.run_id)
     retry_chat = PartialChat()
@@ -1194,7 +1253,7 @@ def test_partial_pre_send_failure_retries_only_the_unconfirmed_target(tmp_path: 
     )
 
     assert recovered.status is RunStatus.RECOVERED
-    assert retry_chat.calls == ["目标8"]
+    assert retry_chat.calls == ["目标4"]
     assert recovered.skipped_count == 8
 
 
@@ -1451,6 +1510,123 @@ def test_runner_resolves_account_scoped_bindings_to_current_conversation_identit
     )
 
 
+@pytest.mark.parametrize(
+    ("reason_code", "marker_id", "retryable"),
+    [
+        ("login_required", "login", False),
+        ("risk_control_required", "verification", False),
+    ],
+)
+def test_explicit_page_conditions_map_to_canonical_failure_details(
+    tmp_path: Path,
+    reason_code: str,
+    marker_id: str,
+    retryable: bool,
+):
+    config = make_config(tmp_path)
+    config.targets = [
+        Target(name="目标", stable_id="target-a", candidate_id="candidate-a")
+    ]
+    write_verified_retry_scope(tmp_path, ["candidate-a"])
+    bind_authoritatively(config)
+
+    class ClassifiedChat:
+        def send(self, *_args, **_kwargs):
+            return DeliveryResult(
+                DeliveryStatus.BLOCKED,
+                send_attempts=0,
+                failure_stage="conversation_selected",
+                reason_code=reason_code,
+                failure_marker=marker_id,
+            )
+
+        def failure_evidence_snapshot(self, _stage):
+            return {
+                "page": {"url": "https://www.douyin.com/chat?private=query"},
+                "markers": {marker_id: True, "untrusted_text": True},
+            }
+
+    result = run_daily(config, ClassifiedChat(), date(2026, 9, 1))
+    detail = result.target_failures["target-a"]
+    manifest = json.loads(
+        (config.artifact_dir / detail.evidence_manifest).read_text(encoding="utf-8")
+    )
+
+    assert detail.reason_code == reason_code
+    assert detail.diagnostic_details["page_marker"] == marker_id
+    assert detail.send_attempts == 0
+    assert detail.retryable is retryable
+    assert manifest["reason_code"] == reason_code
+    assert manifest["structural_snapshot"]["markers"] == {marker_id: True}
+
+
+def test_post_enter_page_marker_keeps_confirmation_uncertain_and_never_proves_send(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.targets = [
+        Target(name="目标", stable_id="target-a", candidate_id="candidate-a")
+    ]
+    write_verified_retry_scope(tmp_path, ["candidate-a"])
+    bind_authoritatively(config)
+
+    class PostEnterRiskControlledChat:
+        def send(self, *_args, **_kwargs):
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMATION_FAILED,
+                send_attempts=1,
+                failure_stage="confirmation_observed",
+                reason_code="confirmation_failed_uncertain",
+                failure_marker="verification",
+            )
+
+    result = run_daily(config, PostEnterRiskControlledChat(), date(2026, 9, 1))
+    detail = result.target_failures["target-a"]
+
+    assert result.status is RunStatus.UNCERTAIN
+    assert detail.reason_code == "confirmation_failed_uncertain"
+    assert detail.send_attempts == 1
+    assert detail.uncertain_send is True
+    assert detail.diagnostic_details["page_marker"] == "verification"
+    assert result.confirmation_provenance["target-a"] != "post_send_observed"
+
+
+def test_audit_only_surfaces_page_condition_without_sending(tmp_path: Path, monkeypatch):
+    config = make_config(tmp_path)
+    config.targets = [
+        Target(name="目标", stable_id="target-a", candidate_id="candidate-a")
+    ]
+    write_verified_retry_scope(tmp_path, ["candidate-a"])
+    bind_authoritatively(config)
+    _set_discovered_conversation_id(tmp_path, "candidate-a", "conversation-a")
+    monkeypatch.setattr(
+        runner_module,
+        "read_messages",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("audit must not read messages")
+        ),
+    )
+
+    class RiskControlledAuditChat:
+        def open_conversation_identity(self, *_args, **_kwargs):
+            raise ChatPageConditionError(
+                "risk_control_required", "verification"
+            )
+
+        def audit_today_outgoing(self, *_args, **_kwargs):
+            raise AssertionError("classified navigation failure must stop audit")
+
+        def send(self, *_args, **_kwargs):
+            raise AssertionError("audit must not send")
+
+    result = run_daily(config, RiskControlledAuditChat(), date(2026, 9, 1), audit_only=True)
+    detail = result.target_failures["target-a"]
+
+    assert detail.reason_code == "risk_control_required"
+    assert detail.send_attempts == 0
+    assert result.sent_count == 0
+
+
 def test_pre_send_failure_records_target_level_chinese_reason_and_exact_stage(
     tmp_path: Path,
 ):
@@ -1498,6 +1674,290 @@ def test_pre_send_failure_records_target_level_chinese_reason_and_exact_stage(
     assert daily["target_failures"]["target-current"]["reason_code"] == (
         "conversation_not_found"
     )
+
+
+def test_delivery_failure_attaches_evidence_without_changing_retry_or_failure_truth(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.targets = [Target(name="目标", stable_id="target-a", candidate_id="candidate-a")]
+    write_verified_retry_scope(tmp_path, ["candidate-a"])
+    bind_authoritatively(config)
+    screenshot = config.artifact_dir / "send-error.png"
+    screenshot.parent.mkdir(parents=True)
+    screenshot.write_bytes(b"local-only")
+
+    class EvidenceChat:
+        def send(self, *_args, **_kwargs):
+            return DeliveryResult(
+                DeliveryStatus.SEND_FAILED,
+                screenshot_path=screenshot,
+                error="conversation not found",
+                failure_stage="conversation_located",
+                reason_code="conversation_not_found",
+            )
+
+        def failure_evidence_snapshot(self, _stage):
+            return {
+                "page": {"url": "https://www.douyin.com/chat?private=query"},
+                "conversation_list": {"present": True, "row_count": 0},
+            }
+
+    result = run_daily(config, EvidenceChat(), date(2026, 8, 31))
+    detail = result.target_failures["target-a"]
+    persisted = StateStore(config.state_file).load().daily["2026-08-31"]["target_failures"]["target-a"]
+
+    assert result.status is RunStatus.RETRY_PENDING
+    assert detail.reason_code == "conversation_not_found"
+    assert detail.send_attempts == 0
+    assert detail.safe_retry_available is True
+    assert detail.evidence_manifest is not None
+    assert persisted["evidence_manifest"] == detail.evidence_manifest
+    manifest = json.loads((config.artifact_dir / detail.evidence_manifest).read_text(encoding="utf-8"))
+    assert manifest["artifacts"] == [
+        {
+            "kind": "screenshot",
+            "reference": (
+                config.artifact_dir / detail.evidence_manifest
+            ).parent.joinpath("send-error.png").relative_to(config.artifact_dir).as_posix(),
+        }
+    ]
+    assert manifest["structural_snapshot"]["page"]["url"] == "https://www.douyin.com/chat"
+    assert not screenshot.exists()
+
+
+def test_evidence_capture_failure_keeps_original_delivery_failure(tmp_path: Path, monkeypatch):
+    config = make_config(tmp_path)
+    config.targets = [Target(name="目标", stable_id="target-a", candidate_id="candidate-a")]
+    write_verified_retry_scope(tmp_path, ["candidate-a"])
+    bind_authoritatively(config)
+    monkeypatch.setattr(
+        runner_module,
+        "capture_failure_evidence",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk unavailable")),
+    )
+
+    class FailingChat:
+        def send(self, *_args, **_kwargs):
+            return DeliveryResult(
+                DeliveryStatus.SEND_FAILED,
+                error="conversation not found",
+                failure_stage="conversation_located",
+                reason_code="conversation_not_found",
+            )
+
+    result = run_daily(config, FailingChat(), date(2026, 8, 31))
+    detail = result.target_failures["target-a"]
+
+    assert result.status is RunStatus.RETRY_PENDING
+    assert detail.reason_code == "conversation_not_found"
+    assert detail.evidence_manifest is None
+    assert detail.evidence_capture_warnings == ["capture_failed"]
+
+
+def _set_discovered_conversation_id(tmp_path: Path, candidate_id: str, conversation_id: str) -> None:
+    path = tmp_path / "discovered_friends.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    for candidate in payload["candidates"]:
+        if candidate["candidate_id"] == candidate_id:
+            candidate["conversation_id"] = conversation_id
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("audit_status", "expected"),
+    [
+        (TodayOutgoingStatus.CONFIRMED_SENT, "confirmed_sent"),
+        (TodayOutgoingStatus.CONFIRMED_MISSING, "confirmed_missing"),
+        (TodayOutgoingStatus.UNKNOWN, "unknown"),
+    ],
+)
+def test_audit_only_reuses_verified_navigation_without_message_or_send_side_effects(
+    tmp_path: Path,
+    monkeypatch,
+    audit_status: TodayOutgoingStatus,
+    expected: str,
+):
+    config = make_config(tmp_path)
+    config.targets = [Target(name="目标", stable_id="target-a", candidate_id="candidate-a")]
+    write_verified_retry_scope(tmp_path, ["candidate-a"])
+    bind_authoritatively(config)
+    _set_discovered_conversation_id(tmp_path, "candidate-a", "conversation-a")
+    monkeypatch.setattr(
+        runner_module,
+        "read_messages",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("audit must not read or select message text")
+        ),
+    )
+
+    class AuditChat:
+        def __init__(self):
+            self.opened: list[tuple[str, str]] = []
+            self.audit_calls = 0
+            self.send_calls = 0
+
+        def open_conversation_identity(self, target_id, conversation_id, *_args, **_kwargs):
+            self.opened.append((target_id, conversation_id))
+            return SimpleNamespace(identity_match=True)
+
+        def audit_today_outgoing(self, _today):
+            self.audit_calls += 1
+            return TodayOutgoingAudit(audit_status, reason="fixture")
+
+        def composer_editor(self):
+            raise AssertionError("audit must not access the composer")
+
+        def send(self, *_args, **_kwargs):
+            self.send_calls += 1
+            raise AssertionError("audit must not send")
+
+    chat = AuditChat()
+    result = run_daily(config, chat, date(2026, 9, 1), audit_only=True)
+    stored = StateStore(config.state_file).load().daily["2026-09-01"]
+
+    assert result.status is RunStatus.COMPLETED
+    assert result.sent_count == 0
+    assert result.today_audit_outcomes == {"target-a": expected}
+    assert result.audit_navigation_target_ids == ("target-a",)
+    assert chat.opened == [("target-a", "conversation-a")]
+    assert chat.audit_calls == (2 if audit_status is TodayOutgoingStatus.UNKNOWN else 1)
+    assert chat.send_calls == 0
+    assert "messages_by_target" not in stored
+    assert stored.get("consumed") is False
+    assert not (tmp_path / "history" / "task-outcomes.json").exists()
+    assert all(value != "post_send_observed" for value in stored["confirmation_provenance"].values())
+
+
+def test_audit_only_reuses_one_targeted_locator_recovery_without_sending(
+    tmp_path: Path, monkeypatch
+):
+    config = make_config(tmp_path)
+    config.targets = [Target(name="目标", stable_id="target-a", candidate_id="candidate-a")]
+    write_verified_retry_scope(tmp_path, ["candidate-a"])
+    bind_authoritatively(config)
+    _set_discovered_conversation_id(tmp_path, "candidate-a", "stale-conversation")
+    monkeypatch.setattr(
+        runner_module,
+        "read_messages",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("audit must not read messages")),
+    )
+    recoveries: list[list[str]] = []
+    monkeypatch.setattr(
+        runner_module,
+        "_refresh_conversation_locators",
+        lambda _config, _chat, targets: (
+            recoveries.append([target.stable_id for target in targets]) or {"target-a": "fresh-conversation"}
+        ),
+    )
+
+    class RecoveryChat:
+        def __init__(self):
+            self.opened: list[str] = []
+
+        def open_conversation_identity(self, _target_id, conversation_id, *_args, **_kwargs):
+            self.opened.append(conversation_id)
+            return SimpleNamespace(
+                identity_match=conversation_id == "fresh-conversation",
+                identity_match_reason="conversation_not_found",
+            )
+
+        def audit_today_outgoing(self, _today):
+            return TodayOutgoingAudit(TodayOutgoingStatus.CONFIRMED_MISSING)
+
+        def send(self, *_args, **_kwargs):
+            raise AssertionError("audit recovery must not send")
+
+    result = run_daily(config, RecoveryChat(), date(2026, 9, 1), audit_only=True)
+
+    assert result.status is RunStatus.COMPLETED
+    assert result.today_audit_outcomes == {"target-a": "confirmed_missing"}
+    assert result.locator_recovery_target_ids == ("target-a",)
+    assert recoveries == [["target-a"]]
+
+
+def test_audit_only_live_checks_a_locally_confirmed_target(tmp_path: Path):
+    config = make_config(tmp_path)
+    config.targets = [Target(name="目标", stable_id="target-a", candidate_id="candidate-a")]
+    write_verified_retry_scope(tmp_path, ["candidate-a"])
+    bind_authoritatively(config)
+    _set_discovered_conversation_id(tmp_path, "candidate-a", "conversation-a")
+    day = date(2026, 9, 1)
+    state = StateStore(config.state_file).load()
+    state.daily[day.isoformat()] = {
+        "message": "早安",
+        "succeeded": ["目标"],
+        "failures": {},
+        "confirmation_results": {"target-a": "confirmed"},
+        "confirmation_provenance": {"target-a": "post_send_observed"},
+        "consumed": True,
+    }
+    StateStore(config.state_file).save(state)
+
+    class SentAuditChat:
+        def __init__(self):
+            self.opened = 0
+
+        def open_conversation_identity(self, *_args, **_kwargs):
+            self.opened += 1
+            return SimpleNamespace(identity_match=True)
+
+        def audit_today_outgoing(self, _today):
+            return TodayOutgoingAudit(TodayOutgoingStatus.CONFIRMED_SENT)
+
+        def send(self, *_args, **_kwargs):
+            raise AssertionError("explicit audit must not send")
+
+    chat = SentAuditChat()
+    result = run_daily(config, chat, day, audit_only=True)
+
+    assert result.today_audit_outcomes == {"target-a": "confirmed_sent"}
+    assert result.audit_navigation_target_ids == ("target-a",)
+    assert chat.opened == 1
+    assert result.sent_count == 0
+
+
+def test_audit_only_failure_keeps_p0_evidence_and_zero_send_attempts(
+    tmp_path: Path, monkeypatch
+):
+    config = make_config(tmp_path)
+    config.targets = [Target(name="目标", stable_id="target-a", candidate_id="candidate-a")]
+    write_verified_retry_scope(tmp_path, ["candidate-a"])
+    bind_authoritatively(config)
+    _set_discovered_conversation_id(tmp_path, "candidate-a", "conversation-a")
+    screenshot = config.artifact_dir / "audit-failure.png"
+    screenshot.parent.mkdir(parents=True)
+    screenshot.write_bytes(b"local-only")
+    monkeypatch.setattr(
+        runner_module,
+        "read_messages",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("audit must not read messages")),
+    )
+    monkeypatch.setattr(runner_module, "_refresh_conversation_locators", lambda *_args: {})
+
+    class MissingAuditChat:
+        def open_conversation_identity(self, *_args, **_kwargs):
+            return SimpleNamespace(identity_match=False, identity_match_reason="conversation_not_found")
+
+        def failure_evidence_snapshot(self, _stage):
+            return {"page": {"url": "https://www.douyin.com/chat?private=query"}}
+
+        def screenshot(self, *_args, **_kwargs):
+            return screenshot
+
+        def send(self, *_args, **_kwargs):
+            raise AssertionError("audit failure must not send")
+
+    result = run_daily(config, MissingAuditChat(), date(2026, 9, 1), audit_only=True)
+    detail = result.target_failures["target-a"]
+
+    assert result.status is RunStatus.FINAL_FAILED
+    assert detail.reason_code == "conversation_not_found"
+    assert detail.send_attempts == 0
+    assert detail.evidence_manifest is not None
+    assert (config.artifact_dir / detail.evidence_manifest).is_file()
+    assert "2026-09-01" not in StateStore(config.state_file).load().daily
+    assert not (tmp_path / "history" / "task-outcomes.json").exists()
 
 
 def test_history_uses_configured_stable_id_and_keeps_target_failure_detail(
@@ -1684,7 +2144,12 @@ def test_target_overrides_apply_pack_and_explicit_suffix_without_changing_global
     config.targets[0].suffix_override = "专属后缀"
     config.targets[1].suffix_mode = "disabled"
 
-    result = run_daily(config, chat, date(2026, 7, 15))
+    result = run_daily(
+        config,
+        chat,
+        date(2026, 7, 15),
+        runtime_context=resolve_runtime_context(tmp_path, program_root=tmp_path),
+    )
 
     assert result.status is RunStatus.COMPLETED
     assert chat.sent[0] == ("小明", "专属问候 —— 专属后缀")
@@ -1692,7 +2157,7 @@ def test_target_overrides_apply_pack_and_explicit_suffix_without_changing_global
     assert config.message_suffix.text == "gpt小助手"
 
 
-def test_target_pack_uses_installed_program_root(
+def test_target_pack_uses_explicit_runtime_program_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     config, chat = make_config(tmp_path), FakeChat()
@@ -1705,9 +2170,17 @@ def test_target_pack_uses_installed_program_root(
         encoding="utf-8",
     )
     config.targets[0].message_pack = "special"
-    monkeypatch.setenv("AUTODY_PROGRAM_ROOT", str(program_root))
+    monkeypatch.delenv("AUTODY_PROGRAM_ROOT", raising=False)
 
-    result = run_daily(config, chat, date(2026, 7, 15))
+    result = run_daily(
+        config,
+        chat,
+        date(2026, 7, 15),
+        runtime_context=resolve_runtime_context(
+            tmp_path,
+            program_root=program_root,
+        ),
+    )
 
     assert result.status is RunStatus.COMPLETED
     assert chat.sent[0][1].startswith("安装内置问候")
@@ -1832,6 +2305,7 @@ def test_today_message_preview_matches_production_resolution_without_mutating_st
         config,
         config.targets[0],
         date(2026, 7, 28),
+        runtime_context=resolve_runtime_context(tmp_path, program_root=tmp_path),
     )
 
     assert preview.text.endswith(" —— gpt小助手")
@@ -1867,6 +2341,7 @@ def test_today_message_preview_uses_target_pack_and_custom_suffix_without_persis
         config,
         config.targets[0],
         date(2026, 7, 28),
+        runtime_context=resolve_runtime_context(tmp_path, program_root=tmp_path),
     )
 
     assert preview.text == "专属问候 —— 专属后缀"

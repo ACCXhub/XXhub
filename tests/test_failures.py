@@ -70,6 +70,17 @@ def test_binding_and_account_failures_choose_condition_aware_actions():
     assert mismatch.suggested_action_zh == "切换或登录账号"
 
 
+def test_login_and_explicit_verification_require_different_recovery_actions():
+    login = failure_detail("login_required", stage="account_verified")
+    verification = failure_detail("risk_control_required", stage="account_verified")
+
+    assert login.suggested_action == "switch_account"
+    assert login.suggested_action_zh == "切换或登录账号"
+    assert "安全验证" not in login.user_summary_zh
+    assert verification.suggested_action == "resolve_verification"
+    assert verification.suggested_action_zh == "完成抖音安全验证"
+
+
 def test_failure_detail_round_trips_through_json():
     detail = failure_detail(
         "conversation_not_found",

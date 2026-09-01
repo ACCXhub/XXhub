@@ -138,13 +138,15 @@ function Resolve-AutoDyRuntimeRoots {
     } else {
         (Resolve-Path (Join-Path $ScriptRoot "..")).Path
     }
-    $ResolvedDataRoot = if ($DataRoot) {
+    $RequestedDataRoot = if ($DataRoot) {
         [IO.Path]::GetFullPath($DataRoot)
     } elseif ($env:AUTODY_HOME) {
         [IO.Path]::GetFullPath($env:AUTODY_HOME)
-    } else {
-        $ResolvedProgramRoot
-    }
+    } else { "" }
+
+    $RuntimeContext = Resolve-AutoDyLaunchContext -ProgramRoot $ResolvedProgramRoot -DataRoot $RequestedDataRoot
+    $ResolvedProgramRoot = $RuntimeContext.ProgramRoot
+    $ResolvedDataRoot = $RuntimeContext.DataRoot
 
     if ($RegisteredInstalledMode) {
         $ExpectedProgramRoot = [IO.Path]::GetFullPath($RegisteredProgramRoot).TrimEnd([IO.Path]::DirectorySeparatorChar)

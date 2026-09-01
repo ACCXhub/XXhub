@@ -71,7 +71,6 @@ export const api = {
   serviceIdentity: () => request<ServiceIdentity>("/api/service-identity"),
   todayPlan: () => request<TodayPlan>("/api/today-plan"),
   failedTargets: () => request<FailedTargetCenter>("/api/failed-targets"),
-  retryFailedTarget: (targetId: string) => request<ActionJob>(`/api/failed-targets/${encodeURIComponent(targetId)}/retry`, { method: "POST", body: JSON.stringify({}) }),
   accountProfile: () => request<AccountProfile>("/api/account-profile"),
   accountProfiles: () => request<LocalAccountProfiles>("/api/account-profiles"),
   switchAccountProfile: (profileId: string) =>

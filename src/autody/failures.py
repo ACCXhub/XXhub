@@ -175,11 +175,19 @@ _REASONS: dict[str, dict[str, Any]] = {
     },
     "login_required": {
         "category": "account",
-        "summary": "当前账号未登录或需要安全验证",
-        "detail": "账号身份无法验证，发送任务已在导航前停止。",
+        "summary": "当前账号需要登录",
+        "detail": "已观察到明确的登录要求，发送任务已在导航前停止。",
         "retryable": False,
         "action": "switch_account",
         "action_zh": "切换或登录账号",
+    },
+    "risk_control_required": {
+        "category": "security",
+        "summary": "抖音要求完成安全验证",
+        "detail": "已观察到明确的安全验证界面，未到达发送边界。",
+        "retryable": False,
+        "action": "resolve_verification",
+        "action_zh": "完成抖音安全验证",
     },
     "composer_missing": {
         "category": "composer",
@@ -244,6 +252,8 @@ class FailureDetail(BaseModel):
     target_stable_id: str | None = None
     account_scope: str | None = None
     scheduler_execution_id: str | None = None
+    evidence_manifest: str | None = None
+    evidence_capture_warnings: list[str] = Field(default_factory=list)
     binding_valid: bool | None = None
     account_scope_matches: bool | None = None
     diagnostic_details: dict[str, Any] = Field(default_factory=dict)

@@ -11,6 +11,7 @@ from autody.failures import failure_detail
 BROWSER_ACTIONS = {
     "run",
     "run-target",
+    "safe-supplement",
     "login",
     "health-check",
     "scan-friends",
@@ -36,6 +37,7 @@ class ActionJob:
     finished_at: str | None = None
     exit_code: int | None = None
     target_id: str | None = None
+    target_ids: list[str] | None = None
     failure: dict | None = None
 
 
@@ -48,7 +50,13 @@ class ActionManager:
         self._executor = executor or subprocess.run
         self.module_data_root: Path | None = None
 
-    def start(self, action: str, *, target_id: str | None = None) -> dict:
+    def start(
+        self,
+        action: str,
+        *,
+        target_id: str | None = None,
+        target_ids: list[str] | None = None,
+    ) -> dict:
         with self._lock:
             if action in BROWSER_ACTIONS and any(
                 job.status == "running" and job.action in BROWSER_ACTIONS
@@ -60,6 +68,7 @@ class ActionManager:
                 action=action,
                 started_at=datetime.now().isoformat(timespec="seconds"),
                 target_id=target_id,
+                target_ids=list(dict.fromkeys(target_ids or [])) or None,
             )
             self.jobs[job.id] = job
         threading.Thread(target=self._execute, args=(job,), daemon=True).start()
@@ -77,7 +86,12 @@ class ActionManager:
                 for job in self.jobs.values()
             )
 
-    def _command(self, action: str, target_id: str | None = None) -> list[str]:
+    def _command(
+        self,
+        action: str,
+        target_id: str | None = None,
+        target_ids: list[str] | None = None,
+    ) -> list[str]:
         if action == "run-target":
             if not target_id:
                 raise ValueError("target_id is required for run-target")
@@ -93,6 +107,22 @@ class ActionManager:
                 "--target-id",
                 target_id,
             ]
+        if action == "safe-supplement":
+            if not target_ids:
+                raise ValueError("target_ids are required for safe-supplement")
+            command = [
+                sys.executable,
+                "-m",
+                "autody.cli",
+                "run",
+                "--config",
+                str(self.config_path),
+                "--source",
+                "retry",
+            ]
+            for selected_target_id in target_ids:
+                command.extend(["--target-id", selected_target_id])
+            return command
         if action == "module-preflight":
             return [
                 sys.executable,
@@ -127,7 +157,7 @@ class ActionManager:
     def _execute(self, job: ActionJob) -> None:
         try:
             completed = self._executor(
-                self._command(job.action, job.target_id),
+                self._command(job.action, job.target_id, job.target_ids),
                 cwd=self.root,
                 check=False,
             )

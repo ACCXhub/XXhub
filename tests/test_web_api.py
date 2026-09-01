@@ -12,6 +12,7 @@ from autody.scheduler import scheduler_status_rows
 from autody.history import TaskHistoryStore, TaskRunRecord
 from autody.config import Target, load_config, save_config, stable_target_id
 from autody.preflight import PreflightStore
+from autody.runtime import resolve_runtime_context
 from autody.runner import TodayDeliveryReconciliation, TodayDeliveryReconciliationPlan
 from autody.modules import OFFICIAL_TEST_CENTER_CORE_RANGE, OFFICIAL_TEST_CENTER_VERSION, MODULE_ID, ModuleManager, build_module_archive
 from autody.account_profile import mark_bindings_for_revalidation
@@ -33,7 +34,7 @@ artifact_dir: data/artifacts
 retry_count: 3
 timeout_ms: 30000
 headless: true
-default_message_pack: daily
+default_message_pack: daily-greeting
 """.strip(),
         encoding="utf-8",
     )
@@ -1093,7 +1094,7 @@ def test_target_settings_and_today_plan_are_test_center_routes(tmp_path: Path):
     updated = client.put(
         "/api/modules/autody-test-center/targets/target-one/settings",
         json={
-            "message_pack": "daily",
+            "message_pack": "daily-greeting",
             "suffix_mode": "disabled",
             "delay_offset_minutes": 12,
             "message_selection": "per_friend",
@@ -1109,7 +1110,7 @@ def test_target_settings_and_today_plan_are_test_center_routes(tmp_path: Path):
     assert plan.status_code == 200
     first = next(item for item in plan.json()["targets"] if item["target_id"] == "target-one")
     assert first["planned_at"].endswith("07:42")
-    assert first["message_source"] == "daily"
+    assert first["message_source"] == "daily-greeting"
     assert first["suffix"] == "已禁用"
     assert (tmp_path / "data" / "state.json").read_bytes() == before
 
@@ -2297,6 +2298,93 @@ def test_overview_retry_endpoint_starts_only_the_current_safe_target(
     assert unsafe.status_code == 409
 
 
+def test_safe_supplement_action_starts_one_job_for_all_current_safe_targets(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets = [
+        Target(name="安全目标甲", stable_id="target-a", candidate_id="candidate-a"),
+        Target(name="安全目标乙", stable_id="target-b", candidate_id="candidate-b"),
+        Target(name="不确定目标", stable_id="target-c", candidate_id="candidate-c"),
+    ]
+    account_id = write_verified_account(tmp_path)
+    for target, identity_key in zip(
+        config.targets,
+        ["participant:friend-a", "participant:friend-b", "participant:friend-c"],
+        strict=True,
+    ):
+        target.binding_identity_key = identity_key
+        target.binding_identity_source = "participant_sec_user_id"
+        target.binding_account_scope = account_id
+    save_config(config_path, config)
+    (tmp_path / "data" / "discovered_friends.json").write_text(
+        json.dumps(
+            {
+                "scanned_at": "2026-06-24T07:20:00",
+                "account_scope": account_id,
+                "last_result": {
+                    "status": "completed_bottom_reached",
+                    "completed_bottom_reached": True,
+                    "partial": False,
+                },
+                "candidates": [
+                    {
+                        "candidate_id": candidate_id,
+                        "display_name": candidate_id,
+                        "avatar_status": "missing",
+                        "discovered_at": "2026-06-24T07:20:00",
+                        "match_status": "configured",
+                        "presence_status": "current",
+                        "identity_key": identity_key,
+                        "identity_source": "participant_sec_user_id",
+                    }
+                    for candidate_id, identity_key in [
+                        ("candidate-a", "participant:friend-a"),
+                        ("candidate-b", "participant:friend-b"),
+                        ("candidate-c", "participant:friend-c"),
+                    ]
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    state_path = tmp_path / "data" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    daily = state["daily"]["2026-06-24"]
+    daily["succeeded"] = []
+    daily["failures"] = {
+        "安全目标甲": "conversation_not_found",
+        "安全目标乙": "conversation_not_found",
+        "不确定目标": "confirmation_failed_uncertain",
+    }
+    daily["target_failures"] = {
+        "target-a": failure_detail("conversation_not_found", stage="conversation_located", send_attempts=0, target_stable_id="target-a", binding_valid=True, account_scope_matches=True).model_dump(mode="json"),
+        "target-b": failure_detail("conversation_not_found", stage="conversation_located", send_attempts=0, target_stable_id="target-b", binding_valid=True, account_scope_matches=True).model_dump(mode="json"),
+        "target-c": failure_detail("confirmation_failed_uncertain", stage="confirmation_observed", send_attempts=1, target_stable_id="target-c", binding_valid=True, account_scope_matches=True).model_dump(mode="json"),
+    }
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    started = []
+
+    def start_action(action: str, **kwargs):
+        started.append((action, kwargs))
+        return {"id": "job-safe-supplement", "action": action, "status": "running"}
+
+    client = TestClient(
+        create_app(
+            config_path,
+            action_runner=start_action,
+            now_provider=lambda: datetime(2026, 6, 24, 8, 0),
+        )
+    )
+
+    response = client.post("/api/actions/safe-supplement", json={})
+
+    assert response.status_code == 202
+    assert started == [("safe-supplement", {"target_ids": ["target-a", "target-b"]})]
+
+
 def test_failed_target_rechecks_binding_before_offering_retry(
     tmp_path: Path,
 ):
@@ -2853,7 +2941,16 @@ def test_actions_are_started_and_reported(tmp_path: Path):
 
 
 def test_message_pack_list_preview_and_merge_import(tmp_path: Path):
-    client = TestClient(create_app(make_project(tmp_path)))
+    config_path = make_project(tmp_path)
+    client = TestClient(
+        create_app(
+            config_path,
+            runtime_context=resolve_runtime_context(
+                tmp_path,
+                program_root=tmp_path,
+            ),
+        )
+    )
 
     catalog = client.get("/api/message-packs")
     assert catalog.status_code == 200
@@ -2927,7 +3024,15 @@ def test_message_pack_management_api_rejects_stale_revision(tmp_path: Path):
 
 def test_message_pack_management_api_imports_edits_fuses_and_splits(tmp_path: Path):
     config_path = make_project(tmp_path)
-    client = TestClient(create_app(config_path))
+    client = TestClient(
+        create_app(
+            config_path,
+            runtime_context=resolve_runtime_context(
+                tmp_path,
+                program_root=tmp_path,
+            ),
+        )
+    )
     revision = client.get("/api/message-packs").json()["revision"]
     imported = client.post(
         "/api/message-packs/import",
@@ -2980,7 +3085,15 @@ def test_message_pack_management_api_rejects_deleting_referenced_pack(tmp_path: 
     config = load_config(config_path)
     config.targets[0].message_pack = "daily"
     save_config(config_path, config)
-    client = TestClient(create_app(config_path))
+    client = TestClient(
+        create_app(
+            config_path,
+            runtime_context=resolve_runtime_context(
+                tmp_path,
+                program_root=tmp_path,
+            ),
+        )
+    )
     revision = client.get("/api/message-packs").json()["revision"]
 
     response = client.request(
@@ -2993,7 +3106,7 @@ def test_message_pack_management_api_rejects_deleting_referenced_pack(tmp_path: 
     assert "目标使用" in response.json()["detail"]
 
 
-def test_installed_message_packs_come_from_program_root(
+def test_message_packs_use_explicit_runtime_program_and_data_roots(
     tmp_path: Path, monkeypatch
 ):
     data_root = tmp_path / "data-root"
@@ -3004,9 +3117,16 @@ def test_installed_message_packs_come_from_program_root(
     program_packs = program_root / "message-packs"
     program_packs.parent.mkdir(parents=True, exist_ok=True)
     source_packs.rename(program_packs)
-    monkeypatch.setenv("AUTODY_PROGRAM_ROOT", str(program_root))
-
-    response = TestClient(create_app(config_path)).get("/api/message-packs")
+    monkeypatch.delenv("AUTODY_PROGRAM_ROOT", raising=False)
+    response = TestClient(
+        create_app(
+            config_path,
+            runtime_context=resolve_runtime_context(
+                data_root,
+                program_root=program_root,
+            ),
+        )
+    ).get("/api/message-packs")
 
     assert response.status_code == 200
     assert response.json()["packs"][0]["id"] == "daily"

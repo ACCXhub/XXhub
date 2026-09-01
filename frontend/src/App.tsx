@@ -189,29 +189,6 @@ export default function App() {
       setBusy(null);
     }
   };
-  const retryTargets = async (targetIds: string[]) => {
-    if (!targetIds.length) return;
-    setBusy("retry-all-targets");
-    try {
-      for (const targetId of targetIds) {
-        const job = await api.retryFailedTarget(targetId);
-        const finished = await api.waitForAction(job.id);
-        const nextStatus = await refreshAll();
-        if (finished.status === "failed") {
-          const failure = nextStatus.friends.find(
-            (friend) => friend.target_id === targetId
-          )?.failure;
-          throw new Error(failure?.user_summary_zh || "目标重试未完成，请查看失败详情");
-        }
-      }
-      notify(`已完成 ${targetIds.length} 个安全目标的补发`);
-    } catch (error) {
-      notify(error instanceof Error ? error.message : "安全补发失败");
-    } finally {
-      setBusy(null);
-    }
-  };
-
   if (!status && loadFailure) {
     return (
       <div className="app-loading">
@@ -251,7 +228,15 @@ export default function App() {
         onOpenTestCenter={() => setView("test-center")}
       />
       <main className="workspace">
-        {view === "dashboard" && <DashboardPage status={status} busy={busy} onAction={action} onNavigate={setView as (view: ViewName) => void} onRetryTargets={(targetIds) => void retryTargets(targetIds)} />}
+        {loadFailure && (
+          <section className="status-stale-notice" role="alert">
+            <strong>当前状态暂不可用</strong>
+            <span>
+              以下数据为上次成功获取的 {status.today.date} 状态，不能代表当前发送结果。原因：{loadFailure.reason}。
+            </span>
+          </section>
+        )}
+        {view === "dashboard" && <DashboardPage status={status} busy={busy} onAction={action} onNavigate={setView as (view: ViewName) => void} />}
         {view === "friends" && <FriendsPage notify={notify} onDataChanged={() => void refreshAll()} />}
         {view === "messages" && <MessagesPage notify={notify} onNavigate={setView} />}
         {view === "packs" && <MessagePacksPage notify={notify} />}

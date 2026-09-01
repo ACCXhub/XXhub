@@ -1,120 +1,28 @@
 # AutoDy 项目交接
 
-## Outcome
+## 当前检查点
 
-维护现有 AutoDy Windows 本机产品，使其在好友身份、发送安全、服务恢复、Scheduler、安装/升级、DataRoot 和 Release 供应链上保持可验证、可恢复、fail-closed。当前产品功能不从零重构；优先关闭阻断性可靠性/安装/发布问题。
+- canonical 分支为 `main`；本轮开始时 `HEAD` 与 `origin/main` 都是 `ff4789ef6dedfb8833a704a3983aab2513157381`。当前 v1.5.2 Master 仍在同一工作树中，尚未形成 release checkpoint；恢复时必须重新查询 Git，不把此快照当作长期仓库指令。
+- 已恢复并收敛的 Master 包含：全 enabled-target daily denominator、定向/虚拟列表安全恢复、发送后 provenance、P0 隐私 failure evidence、P1 audit-only 与账号/安全验证分类、ProgramRoot/DataRoot/BrowserRoot 分离，以及 Dashboard 的显式 stale 状态。
+- 本轮 Phase A 的唯一产品修正位于 `runner.py`：实时 audit 得到 `confirmed_missing` 时清除陈旧 failure，并仅通过既有 `TaskOutcomeStore.resume_confirmed_missing()` 把未过期 `UNCERTAIN`/`FINAL_FAILED` 日恢复为 `RETRY_PENDING`。它不跨越发送边界；`UNKNOWN` 仍不发送。
+- RuntimeContext/message-pack root 的旧失败已分类为过时测试：内置默认 pack 的稳定 ID 是 `daily-greeting`，临时 program/data 根必须显式传入 `RuntimeContext`。当前 `src/autody/runtime.py`、CLI/API 和 `scripts/resolve-runtime-roots.ps1` 均保持 ProgramRoot、DataRoot、BrowserRoot 分离。
+- 源码与已安装 BrowserRoot 都已有 Chromium；本轮只运行了 headless `doctor_playwright` 启动检查，没有访问抖音、没有输入或发送。
 
-## Master
+## 已执行的 Phase A 证据
 
-当前代码线与正式发布目标为 1.5.2，核心已接受能力包括：
+- focused Python integration：`337 passed`；覆盖 runner/chat、friend discovery、P0 evidence、P1 audit/classification、CLI/API、runtime/message packs、安装脚本。
+- frontend：Vitest `66 passed`；`npm run build` 成功，并把 tracked static 输出收敛到一组对应当前源码的 JS/CSS hash 资产。
+- `git diff --check` 已通过。FastAPI/TestClient 有一条既有 deprecation warning，不影响测试结果。
 
-- durable friend proof、discovery candidate、conversation locator 明确分层；
-- `binding_recovery.resolve_stable_binding` 是唯一权威运行时解析，`reassociate_stable_binding` 是显式重新关联写入口；
-- Friends 重新关联、取消/重新加入与 Overview executable target set 投影一致；
-- Runner/Chat 保持 stable identity、账号范围、重复保护、确认、全局 browser lock；`uncertain` 不自动重试；
-- 多账号本地 profile/snapshot 隔离；账号写操作与 browser action 互斥；
-- Scheduler 使用原交互用户 Principal、`RunLevel Limited`，Dashboard 常态非提升，写操作走一次性受约束 UAC；
-- 托盘以 service identity + 用户/路径/解释器/进程事实验证服务 ownership，端口冲突安全回退 8766–8799；
-- 本机 canonical runtime 是源码仓库：影响实际行为的源码修改完成后，直接切换或重启到当前源码，核验 repository identity、`127.0.0.1:8765` 并做最小运行验收；除非明确要求正式发布，MSI/Portable 不作为本地修改生效步骤；
-- watchdog 对 verified service 有界恢复：进程退出或约 15–20 秒连续 health failure、graceful first、exact PID 再验证、3 次/10 分钟熔断、manual full exit suppression；
-- MSI/Portable standalone runtime，MSI ProgramRoot/DataRoot 分离，普通卸载默认保留 DataRoot；
-- 普通 CI 与正式 Release validation 已分层。
+## 继续发布的顺序
 
-## Locked
+1. 对即将 checkpoint 的精确 source 运行当前 pre-tag gate：clean-source preflight、完整非 `release_build` Python suite、frontend tests/build、PowerShell 解析与 `git diff --check`。
+2. 只有所有 pre-tag gate 通过后，提交 v1.5.2 release source；fetch 并确认与 `origin/main` 的非破坏性同步；若 source SHA 变化，按实际差异重验受影响 gate。
+3. 在 `release_source_sha == validated_source_sha` 后创建并推送 `v1.5.2`。正式 workflow 从 tag 的 clean source 运行大型 release build、MSI/Portable、privacy/package、manifest、发布与 public asset reverify；hosted MSI lifecycle 为非阻断诊断。
+4. 只有 workflow 终态成功且公开资产复核通过后，再对 `D:\AutoDy` 做 identity-aware、保留 DataRoot 的只读安装态验收；绝不把真实抖音发送当作验收步骤。
 
-以下边界是当前维护必须保持的安全契约：
+## 稳定指针
 
-1. `candidate_id`/conversation locator 不是 durable friend identity；名称/头像不能建立权威 proof。
-2. 自动/显式 binding 恢复只接受完整当前 discovery、唯一权威 identity、匹配 account scope、candidate 未占用。
-3. 部分/失败/取消/陈旧 discovery、登录/账号异常不修改 stable binding。
-4. 历史失败保持历史；binding 恢复不能把旧 `uncertain` 改成可重试。
-5. 只有明确发生在发送动作前的失败可自动 retry；可能已发送/确认不确定必须停止。
-6. 浏览器任务共享全局锁；账号切换不能绕过发送/浏览器互斥。
-7. 不按端口、PID 或进程名终止未知进程；尤其禁止按 `python.exe` 名称批量 kill。
-8. Watchdog 自动恢复只管理服务，不发送、不扫描好友、不修 Scheduler、不修改无关 DataRoot。
-9. Scheduler 始终使用原交互用户/Limited；提升后的管理员环境不得重新推断 DataRoot。
-10. MSI/Repair/Upgrade/Uninstall 不把普通程序维护变成用户数据删除；DataRoot 默认保留。
-11. Git/Release/普通诊断不得包含真实账号、目标、消息、Cookie、browser profile、备份或未经审查的原始日志。
-12. 已发布历史 tag/Release asset 保持不可变；候选版本的部分验证不能冒充完整 Release。
-
-## 当前发布事实
-
-- 已确认公开稳定 Release：**v1.4.4**。
-- v1.4.4 MSI：`AutoDy-1.4.4-x64.msi`，`301,540,220` bytes，SHA-256 `bea7a7e7495c0137d33463f504d2999dcef250e7df7766c90eb0dbcb4a1daa10`。
-- 当前源码元数据版本：`1.5.2`。
-- `v1.5.0` tag 固定在 `4cf2620805f37e4c9fe8f221806b88c70f592ea8`，`v1.5.1` tag 固定在其历史提交；两者均未完成公开 Release，保留为历史。
-- `v1.5.1` lifecycle 报告显示 verifier 曾误判 WiX `WixQuietExec` CustomActionData contract；修复后 hosted runner 仍可能在 fresh install 返回 1603，本版本不再把该诊断作为发布硬门禁。
-- 当前唯一 release target 为 `v1.5.2`；source/build、MSI/Portable、privacy/package、manifest、publish 和 public asset verify 仍为硬门禁。
-
-## 当前 Delta
-
-本次发布 Delta 是在已收敛的 lifecycle verifier 修复与 Dashboard 自适应布局之上执行一次 `v1.5.2` formal Release：
-
-1. 版本、Release workflow、发布说明与 source tag 收敛为 `v1.5.2`；
-2. 从 v1.4.4 固定 MSI baseline 执行 clean-source build、Portable/MSI、privacy/package 与 manifest；
-3. hosted-runner lifecycle 失败保留诊断但不阻断 publish；
-4. 重新下载公开资产并复核集合、hash、MSI 与 privacy；
-5. 对当前已安装运行时执行一次升级后的只读验收。
-
-不要因为 runner 已构建出 MSI 就绕过 lifecycle 后仍宣称完整验收。
-
-## CI/Release 结构
-
-普通 push/PR：
-
-- 常规 Python tests（当前 selection 基线 529）；
-- frontend tests；
-- PowerShell parsing。
-
-正式 Release：
-
-- 2 个 `release_build` 大型 reproducibility tests；
-- clean-source Portable/MSI；
-- privacy/package verifier；
-- MSI lifecycle；
-- guarded manifest；
-- publish；
-- public assets re-download/hash/MSI/privacy verify。
-
-Tag push 不再重复触发 ordinary CI。不要用交互代理持续轮询 GitHub Actions；远端任务启动后等待完成，再一次读取结果。
-
-## 数据/模块 owner 摘要
-
-| 责任 | canonical owner |
-| --- | --- |
-| AppConfig / Target | `src/autody/config.py` |
-| 当前好友 discovery | `friend_discovery.py` |
-| stable binding/reassociation | `binding_recovery.py` |
-| 当前账号/认证 revalidation | `account_profile.py` |
-| 多账号 snapshot/activation | `account_profiles.py` |
-| 发送状态机 | `runner.py` + `chat.py` |
-| 只读 preflight | `preflight.py` |
-| state/history/retry/failure | `state.py`、`history.py`、`retry_state.py`、`failures.py` |
-| Scheduler | `scheduler.py` + existing task PowerShell scripts |
-| 本地 API | `web_api.py` |
-| Dashboard | `frontend/src/` |
-| Tray/watchdog | `scripts/` 的现有 canonical scripts |
-| MSI | `packaging/wix/` + build/lifecycle scripts |
-| Release | `.github/workflows/release.yml` + build/verify scripts |
-
-完整字段见 `docs/软件工程/07-数据字典与数据存储设计.md`；API 见 06；需求—测试追踪见 08/09。
-
-## 文档 owner
-
-当前完整软件工程文档入口：`docs/软件工程/00-文档总览.md`。正文按 00–13 管理：可行性、计划、需求、概要、详细设计、接口、数据字典、测试计划、测试报告、安装用户、运维、安全、项目总结。
-
-`docs/文档总览.md` 和 `docs/AUTODY_ENGINEERING_MANUAL.md` 只保留兼容入口；不要再形成第二套长文。`docs/archive` 只保存历史。
-
-## 接手顺序
-
-1. 查看当前 `main`、工作树和 remote，先保留用户未提交工作。
-2. 读取 `AGENTS.md`、`docs/软件工程/00-文档总览.md`、本文件以及与任务直接相关的 03/05/06/07/08/09/12。
-3. 若 hosted-runner lifecycle 失败，保留报告但不重复整个发布构建来猜问题。
-4. 涉及本机服务时先验证 service identity、用户、ProgramRoot、DataRoot、解释器和 exact PID ownership。
-5. 涉及真实浏览器时优先 fixture/read-only，验证不执行真实发送。
-6. 按风险做 focused validation；正式 Release 才执行重型 release gate。
-7. 修改当前 canonical owner，Git 保存历史；不创建 `final/fixed/latest` 副本。
-
-## Deliverables
-
-当前待交付只有：最终 v1.5.2 release source/tag → GitHub Release canonical assets/hash/manifest → public asset reverify → installed-runtime acceptance。
+- 项目边界、运行时根、module owners 与副作用限制：`AGENTS.md`。
+- 发布/验证 owner：`.github/workflows/release.yml`、`scripts/build-release-from-clean-source.ps1`、`scripts/verify-release-artifacts.ps1`、`scripts/verify-msi-lifecycle.ps1`。
+- Release/version truth：`pyproject.toml`、`frontend/package.json`、`.github/workflows/release.yml`、`CHANGELOG.md`、`docs/RELEASE_NOTES.md`。

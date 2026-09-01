@@ -2,7 +2,7 @@ import hmac
 import json
 import logging
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
 import signal
@@ -145,6 +145,43 @@ def _report_daily_result(config: AppConfig, result: RunResult) -> None:
         typer.echo(detail, err=True)
         raise typer.Exit(3 if result.status is RunStatus.UNCERTAIN else 2)
     _clear_attention(config)
+
+
+def _report_audit_result(result: RunResult) -> None:
+    """Emit the read-only result without invoking send/retry reporting."""
+    typer.echo(
+        json.dumps(
+            {
+                "mode": "audit_only",
+                "status": result.status.value,
+                "audit_outcomes": result.today_audit_outcomes,
+                "navigation_target_ids": result.audit_navigation_target_ids,
+                "locator_recovery_target_ids": result.locator_recovery_target_ids,
+                "failures": {
+                    target_id: detail.reason_code
+                    for target_id, detail in result.target_failures.items()
+                },
+                "send_attempts": 0,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+
+
+def _report_audit_unavailable(reason: str) -> None:
+    typer.echo(
+        json.dumps(
+            {
+                "mode": "audit_only",
+                "status": "unknown",
+                "reason": reason,
+                "send_attempts": 0,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
 
 
 def _merge_discovered_target_bindings(
@@ -452,7 +489,12 @@ def _run_preflight_with_page(
             on_progress=store.save_progress,
         )
     except RuntimeError as exc:
-        status = "login_required" if str(exc) == "login_required" else "chat_page_unavailable"
+        reason_code = getattr(exc, "reason_code", None)
+        status = (
+            reason_code
+            if reason_code in {"login_required", "risk_control_required"}
+            else "chat_page_unavailable"
+        )
         result = global_failure(status, trigger_source=trigger_source, error_summary=str(exc))
     store.save(result)
     return result
@@ -827,7 +869,7 @@ def doctor(config: Path = typer.Option(Path("config.yaml"), "--config")):
         typer.echo(f"Playwright 浏览器目录：{runtime.browsers_path}")
         typer.echo(f"Chromium 启动检查失败：{exc}", err=True)
         raise typer.Exit(1) from exc
-    typer.echo(f"AUTODY_HOME：{result.home}")
+    typer.echo(f"AUTODY_HOME：{result.data_root}")
     typer.echo(f"Playwright 浏览器目录：{result.browsers_path}")
     typer.echo(f"Chromium 可执行文件：{result.executable_path}")
     typer.echo("Chromium 启动检查：成功")
@@ -857,14 +899,18 @@ def ui(
 ):
     config = config.resolve()
     load_config(config)
-    configure_runtime(config.parent)
+    runtime_context = configure_runtime(config.parent)
     if host not in {"127.0.0.1", "localhost"}:
         raise typer.BadParameter("管理台只能监听本机地址")
     url = f"http://127.0.0.1:{port}"
     if not no_open:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     typer.echo(f"AutoDy 管理台正在运行：{url}")
-    dashboard_app = create_app(config, startup_refresh_enabled=True)
+    dashboard_app = create_app(
+        config,
+        startup_refresh_enabled=True,
+        runtime_context=runtime_context,
+    )
     _install_service_control_middleware(
         dashboard_app,
         lambda: signal.raise_signal(signal.SIGINT),
@@ -899,30 +945,40 @@ def repair_scheduler(
 def run(
     config: Path = typer.Option(Path("config.yaml"), "--config"),
     source: str = typer.Option("manual", "--source"),
-    target_id: str | None = typer.Option(
-        None,
+    target_ids: list[str] = typer.Option(
+        [],
         "--target-id",
-        help="仅重试具有当前稳定绑定的指定目标",
+        help="仅处理具有当前稳定绑定的指定目标；可重复指定",
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="只检查任务可启动性，不打开浏览器或发送消息"),
+    audit_only: bool = typer.Option(
+        False,
+        "--audit-only",
+        help="复用生产目标管线进行只读当日审计；不会准备或发送消息",
+    ),
 ):
     if source not in RUN_TRIGGER_SOURCES:
         raise typer.BadParameter(f"未知任务来源：{source}")
     loaded = load_config(config)
-    if target_id is not None and not any(
-        target.enabled and target.stable_id == target_id
+    requested_target_ids = set(target_ids)
+    unknown_target_ids = requested_target_ids - {
+        target.stable_id
         for target in loaded.targets
-    ):
+        if target.enabled and target.stable_id
+    }
+    if unknown_target_ids:
         raise typer.BadParameter("定向重试目标不存在、未启用或缺少稳定标识")
+    if dry_run and audit_only:
+        raise typer.BadParameter("--dry-run 与 --audit-only 不能同时使用")
     if dry_run:
         enabled = (
-            1
-            if target_id is not None
+            len(requested_target_ids)
+            if requested_target_ids
             else sum(1 for target in loaded.targets if target.enabled)
         )
         typer.echo(f"模拟运行已通过：将处理 {enabled} 个启用目标；未打开浏览器，未发送消息。")
         return
-    if source in {"scheduled", "retry"} and target_id is None:
+    if not audit_only and source in {"scheduled", "retry"} and not requested_target_ids:
         gated = automatic_daily_run_gate(loaded)
         if gated is not None:
             _report_daily_result(loaded, gated)
@@ -936,8 +992,8 @@ def run(
     result: RunResult | None = None
     try:
         with SingleInstanceLock(loaded.lock_file):
-            with _sending_activity(loaded):
-                configure_runtime(_data_root(config))
+            with nullcontext() if audit_only else _sending_activity(loaded):
+                runtime_context = configure_runtime(_data_root(config))
                 setup_logging(loaded)
                 with open_chat(
                     loaded.profile_dir,
@@ -958,17 +1014,37 @@ def run(
                         loaded,
                         chat,
                         trigger_source=source,
-                        target_ids={target_id} if target_id is not None else None,
+                        target_ids=requested_target_ids or None,
+                        audit_only=audit_only,
+                        runtime_context=runtime_context,
                     )
-            _write_health(loaded, "success")
-            _report_daily_result(loaded, result)
+            if audit_only:
+                _report_audit_result(result)
+            else:
+                _write_health(loaded, "success")
+                _report_daily_result(loaded, result)
     except TaskAlreadyRunning:
-        _report_daily_result(loaded, record_safe_pre_send_failure(loaded, "browser_busy"))
+        if audit_only:
+            _report_audit_unavailable("browser_busy")
+        else:
+            _report_daily_result(loaded, record_safe_pre_send_failure(loaded, "browser_busy"))
     except AuthenticationError as exc:
-        _write_health(loaded, "failed", str(exc))
-        _report_daily_result(loaded, record_safe_pre_send_failure(loaded, f"login_unavailable:{exc}"))
+        reason_code = getattr(exc, "reason_code", "login_required")
+        if audit_only:
+            _report_audit_unavailable(reason_code)
+        else:
+            _write_health(loaded, "failed", str(exc))
+            _report_daily_result(
+                loaded, record_safe_pre_send_failure(loaded, reason_code)
+            )
     except FatalChatError as exc:
-        _report_daily_result(loaded, record_safe_pre_send_failure(loaded, f"browser_unavailable:{exc}"))
+        reason_code = getattr(exc, "reason_code", "browser_unavailable")
+        if audit_only:
+            _report_audit_unavailable(reason_code)
+        else:
+            _report_daily_result(
+                loaded, record_safe_pre_send_failure(loaded, reason_code)
+            )
     except typer.Exit:
         raise
     except Exception as exc:

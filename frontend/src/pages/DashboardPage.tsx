@@ -35,19 +35,17 @@ export function DashboardPage({
   status,
   busy,
   onAction,
-  onNavigate,
-  onRetryTargets
+  onNavigate
 }: {
   status: DashboardStatus;
   busy: string | null;
   onAction: (action: string) => void;
   onNavigate: (view: ViewName) => void;
-  onRetryTargets?: (targetIds: string[]) => void;
 }) {
   const handleIssue = (issue: DashboardIssue) => {
     const action = issue.action;
-    if (action === "retry_target" && issue.target_ids?.length && onRetryTargets) {
-      onRetryTargets(issue.target_ids);
+    if (action === "retry_target") {
+      onAction("safe-supplement");
       return;
     }
     if (["friends", "messages", "packs", "scheduler", "logs", "backup", "settings"].includes(action)) {

@@ -6,11 +6,16 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $Root = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+$RuntimeContextScript = Join-Path $PSScriptRoot 'resolve-runtime-roots.ps1'
+. $RuntimeContextScript
+$RuntimeContext = Resolve-AutoDyLaunchContext -ProgramRoot $Root
+$Root = $RuntimeContext.ProgramRoot
+$DataRoot = $RuntimeContext.DataRoot
 $Venv = Join-Path $Root '.venv'
-$Python = Join-Path $Venv 'Scripts\python.exe'
+$Python = $RuntimeContext.Python
 $Frontend = Join-Path $Root 'frontend'
 $DependencyLock = Join-Path $Root 'requirements-dev.lock'
-$BrowserPath = Join-Path $Root 'data\ms-playwright'
+$BrowserPath = $RuntimeContext.BrowserRoot
 
 function Invoke-NativeChecked {
     param(
@@ -108,12 +113,14 @@ try {
 }
 
 $previousHome = [Environment]::GetEnvironmentVariable('AUTODY_HOME', 'Process')
+$previousProgramRoot = [Environment]::GetEnvironmentVariable('AUTODY_PROGRAM_ROOT', 'Process')
 $previousBrowsers = [Environment]::GetEnvironmentVariable('AUTODY_BROWSERS_PATH', 'Process')
 $previousPlaywright = [Environment]::GetEnvironmentVariable('PLAYWRIGHT_BROWSERS_PATH', 'Process')
 $previousGc = [Environment]::GetEnvironmentVariable('PLAYWRIGHT_SKIP_BROWSER_GC', 'Process')
 try {
-    $env:AUTODY_HOME = $Root
-    [Environment]::SetEnvironmentVariable('AUTODY_BROWSERS_PATH', $null, 'Process')
+    $env:AUTODY_HOME = $DataRoot
+    $env:AUTODY_PROGRAM_ROOT = $Root
+    $env:AUTODY_BROWSERS_PATH = $BrowserPath
     $env:PLAYWRIGHT_BROWSERS_PATH = $BrowserPath
     $env:PLAYWRIGHT_SKIP_BROWSER_GC = '1'
     Invoke-NativeChecked -Stage 'Install pinned Playwright Chromium' -FilePath $Python `
@@ -122,6 +129,7 @@ try {
         -Arguments @('-X', 'utf8', '-m', 'autody.cli', 'doctor', '--config', (Join-Path $Root 'config.example.yaml'))
 } finally {
     [Environment]::SetEnvironmentVariable('AUTODY_HOME', $previousHome, 'Process')
+    [Environment]::SetEnvironmentVariable('AUTODY_PROGRAM_ROOT', $previousProgramRoot, 'Process')
     [Environment]::SetEnvironmentVariable('AUTODY_BROWSERS_PATH', $previousBrowsers, 'Process')
     [Environment]::SetEnvironmentVariable('PLAYWRIGHT_BROWSERS_PATH', $previousPlaywright, 'Process')
     [Environment]::SetEnvironmentVariable('PLAYWRIGHT_SKIP_BROWSER_GC', $previousGc, 'Process')

@@ -59,6 +59,8 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .service-dot { width: 8px; height: 8px; border-radius: 50%; background: #31d07c; margin-top: 5px; box-shadow: 0 0 0 4px rgba(49,208,124,.1); }
 
 .workspace { min-width: 0; min-height: 100vh; padding: 28px 32px 48px; background: #f8fafc; }
+.status-stale-notice { min-height: 42px; margin: 0 0 14px; padding: 9px 13px; display: flex; align-items: center; gap: 9px; border: 1px solid #e8bf73; border-radius: 8px; color: #69440a; background: #fff9eb; font-size: 12px; line-height: 1.45; }
+.status-stale-notice strong { flex: 0 0 auto; font-size: 13px; }
 .page-header { min-height: 55px; display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 22px; }
 .page-header h1 { margin: 0; font-size: 27px; letter-spacing: -.04em; color: #0b1830; }
 .page-header p { margin: 6px 0 0; color: #738097; font-size: 13px; }

@@ -76,7 +76,7 @@ def test_confirmation_accepts_new_message_identity_when_virtual_dom_replaces_sam
     assert page.locator('[data-e2e="message-text"]', has_text="早安").count() == 1
 
 
-def test_confirmation_uses_missing_to_sent_transition_without_message_identity(
+def test_missing_to_sent_without_new_message_proof_never_confirms(
     page, fake_chat
 ):
     page.locator('[data-e2e="chat-input"]').evaluate(
@@ -97,7 +97,8 @@ def test_confirmation_uses_missing_to_sent_transition_without_message_identity(
         delivery_day=date(2026, 8, 30),
     )
 
-    assert result.status is DeliveryStatus.CONFIRMED
+    assert result.status is DeliveryStatus.CONFIRMATION_FAILED
+    assert result.confirmation_provenance.value == "none"
 
 
 def test_historical_same_text_without_a_new_identity_never_confirms(page, fake_chat):
@@ -114,11 +115,153 @@ def test_historical_same_text_without_a_new_identity_never_confirms(page, fake_c
     status, _attempts = fake_chat._confirm_delivery(
         "早安",
         pre_send_identities=fake_chat._outgoing_message_identities(),
-        pre_send_audit=None,
-        delivery_day=None,
     )
 
     assert status is None
+
+
+def test_rerendered_weak_react_key_never_proves_a_new_outgoing(page, fake_chat):
+    page.locator('[data-e2e="message-list"]').evaluate(
+        """el => {
+            const item = document.createElement('p');
+            const text = document.createElement('span');
+            text.dataset.e2e = 'message-text';
+            text.textContent = '早安';
+            Object.defineProperty(item, '__reactFiber$test', {
+              configurable: true, value: { key: 'old-render-key' }
+            });
+            item.append(text); el.append(item);
+        }"""
+    )
+    page.locator('[data-e2e="chat-input"]').evaluate(
+        """editor => editor.addEventListener('keydown', event => {
+            if (event.key !== 'Enter') return;
+            event.preventDefault(); event.stopImmediatePropagation();
+            const item = document.querySelector('[data-e2e="message-list"] p');
+            Object.defineProperty(item, '__reactFiber$test', {
+              configurable: true, value: { key: 'new-render-key' }
+            });
+            editor.textContent = '';
+        }, true)"""
+    )
+
+    result = fake_chat.send("小明", "早安")
+
+    assert result.status is DeliveryStatus.CONFIRMATION_FAILED
+    assert result.confirmation_provenance.value == "none"
+
+
+def test_generic_today_marker_does_not_date_an_unrelated_old_outgoing(page, fake_chat):
+    page.locator('[data-e2e="message-list"]').evaluate(
+        """el => {
+            const marker = document.createElement('time');
+            marker.textContent = '今天 08:00';
+            const old = document.createElement('p');
+            old.dataset.e2e = 'message-text'; old.textContent = '昨天的消息';
+            el.append(marker, old);
+        }"""
+    )
+
+    audit = fake_chat.audit_today_outgoing(date(2026, 8, 30))
+
+    assert audit.status is not TodayOutgoingStatus.CONFIRMED_SENT
+
+
+def test_composer_clear_without_new_outgoing_never_confirms(page, fake_chat):
+    page.locator('[data-e2e="chat-input"]').evaluate(
+        """editor => editor.addEventListener('keydown', event => {
+            if (event.key !== 'Enter') return;
+            event.preventDefault(); event.stopImmediatePropagation();
+            editor.textContent = '';
+        }, true)"""
+    )
+
+    result = fake_chat.send("小明", "早安")
+
+    assert result.status is DeliveryStatus.CONFIRMATION_FAILED
+
+
+def test_matching_new_direct_timestamp_identity_confirms(page, fake_chat):
+    page.locator('[data-e2e="chat-input"]').evaluate(
+        """editor => editor.addEventListener('keydown', event => {
+            if (event.key !== 'Enter') return;
+            event.preventDefault(); event.stopImmediatePropagation();
+            const text = document.createElement('span');
+            text.dataset.e2e = 'message-text';
+            text.dataset.timestamp = '2026-08-30T08:00:01';
+            text.textContent = editor.textContent;
+            document.querySelector('[data-e2e="message-list"]').append(text);
+            editor.textContent = '';
+        }, true)"""
+    )
+
+    result = fake_chat.send("小明", "早安")
+
+    assert result.status is DeliveryStatus.CONFIRMED
+    assert result.confirmation_provenance.value == "post_send_observed"
+
+
+def test_post_enter_bounded_observation_can_find_a_later_durable_message(
+    page, fake_chat, monkeypatch
+):
+    page.locator('[data-e2e="chat-input"]').evaluate(
+        """editor => editor.addEventListener('keydown', event => {
+            if (event.key === 'Enter') { event.preventDefault(); event.stopImmediatePropagation(); }
+        }, true)"""
+    )
+    original = fake_chat._outgoing_message_identities
+    calls = 0
+
+    def delayed_observation():
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            page.locator('[data-e2e="message-list"]').evaluate(
+                """el => {
+                    const item = document.createElement('p');
+                    item.dataset.messageId = 'post-observation-id';
+                    const text = document.createElement('span');
+                    text.dataset.e2e = 'message-text'; text.textContent = '早安';
+                    item.append(text); el.append(item);
+                }"""
+            )
+        return original()
+
+    fake_chat.confirmation_retries = 1
+    monkeypatch.setattr(fake_chat, "_outgoing_message_identities", delayed_observation)
+
+    result = fake_chat.send("小明", "早安")
+
+    assert result.status is DeliveryStatus.RETRY_CONFIRMED
+    assert result.confirmation_provenance.value == "post_send_observed"
+
+
+def test_post_enter_live_audit_cannot_manufacture_post_send_provenance(
+    page, fake_chat, monkeypatch
+):
+    page.locator('[data-e2e="chat-input"]').evaluate(
+        """editor => editor.addEventListener('keydown', event => {
+            if (event.key === 'Enter') { event.preventDefault(); event.stopImmediatePropagation(); }
+        }, true)"""
+    )
+    audits = []
+
+    def sent_audit(_day):
+        audits.append(_day)
+        return TodayOutgoingAudit(TodayOutgoingStatus.CONFIRMED_SENT)
+
+    monkeypatch.setattr(fake_chat, "audit_today_outgoing", sent_audit)
+
+    result = fake_chat.send(
+        "小明",
+        "早安",
+        pre_send_audit=TodayOutgoingAudit(TodayOutgoingStatus.CONFIRMED_MISSING),
+        delivery_day=date(2026, 8, 30),
+    )
+
+    assert result.status is DeliveryStatus.CONFIRMATION_FAILED
+    assert result.confirmation_provenance.value == "none"
+    assert audits == [date(2026, 8, 30)]
 
 
 def test_duplicate_names_are_rejected(page, fake_chat):
@@ -207,6 +350,8 @@ def test_locator_open_waits_for_lazy_conversation_list_growth(fake_chat):
             if "scrollTop = 0" in script:
                 self.page.position = 0
                 return None
+            if "atOrigin" in script:
+                return {"scrollTop": self.page.position, "atOrigin": self.page.position == 0}
             if "before" in script:
                 return {
                     "before": self.page.position,
@@ -248,6 +393,198 @@ def test_locator_open_waits_for_lazy_conversation_list_growth(fake_chat):
     assert count == 1
     assert found is target
     assert page.waited_ms >= 500
+
+
+def test_locator_waits_for_top_virtual_rows_to_settle_before_search(fake_chat):
+    class Row:
+        def __init__(self, participant: str, conversation: str):
+            self.participant = participant
+            self.conversation = conversation
+
+        def evaluate(self, _script):
+            return {
+                "participantSecUserId": self.participant,
+                "conversationId": self.conversation,
+                "conversationShortId": None,
+            }
+
+        def get_attribute(self, _attribute):
+            return None
+
+    class Conversations:
+        def __init__(self, page):
+            self.page = page
+
+        def count(self):
+            return 1
+
+        def nth(self, _index):
+            return self.page.target if self.page.settled else self.page.other
+
+    class ConversationList:
+        def __init__(self, page):
+            self.page = page
+
+        def count(self):
+            return 1
+
+        @property
+        def first(self):
+            return self
+
+        def evaluate(self, script, *_args):
+            if "scrollTop = 0" in script:
+                return None
+            if "atOrigin" in script:
+                return {"scrollTop": 0, "atOrigin": True}
+            if "before" in script:
+                return {"before": 0, "maximum": 0, "step": 1}
+            if "maximum" in script:
+                return {"maximum": 0}
+            return None
+
+    class SettlingPage:
+        def __init__(self, selectors):
+            self.selectors = selectors
+            self.settled = False
+            self.other = Row("other-proof", "other-conversation")
+            self.target = Row("target-proof", "fresh-conversation")
+            self.conversations = Conversations(self)
+            self.conversation_list = ConversationList(self)
+
+        def locator(self, selector):
+            if selector == self.selectors.conversation:
+                return self.conversations
+            if selector == self.selectors.conversation_list:
+                return self.conversation_list
+            raise AssertionError(f"unexpected selector: {selector}")
+
+        def wait_for_timeout(self, delay):
+            if delay == 50:
+                self.settled = True
+
+    page = SettlingPage(fake_chat.selectors)
+    fake_chat.page = page
+    fake_chat.friend_search_timeout_ms = 200
+    expected = conversation_row_candidate_id(page.target)
+
+    found, count = fake_chat._find_conversation("target", expected)
+
+    assert count == 1
+    assert found is page.target
+
+
+def test_sequential_lookup_restarts_from_fresh_virtual_list_origin(fake_chat):
+    class Row:
+        def __init__(self, page, name: str, participant: str, conversation: str):
+            self.page = page
+            self.name = name
+            self.participant = participant
+            self.conversation = conversation
+
+        def evaluate(self, _script):
+            return {
+                "participantSecUserId": self.participant,
+                "conversationId": self.conversation,
+                "conversationShortId": None,
+            }
+
+        def get_attribute(self, _attribute):
+            return None
+
+        def click(self):
+            self.page.opened.append(self.name)
+
+    class ConversationSnapshot:
+        def __init__(self, page):
+            self.rows = list(page.visible_rows())
+
+        def count(self):
+            return len(self.rows)
+
+        def nth(self, index):
+            return self.rows[index]
+
+    class ConversationList:
+        def __init__(self, page):
+            self.page = page
+
+        def count(self):
+            return 1
+
+        @property
+        def first(self):
+            return self
+
+        def evaluate(self, script, *_args):
+            if "scrollTop = 0" in script:
+                self.page.origin_reset_pending = True
+                return None
+            if "atOrigin" in script:
+                return {
+                    "scrollTop": 0 if self.page.position == 0 else 400,
+                    "atOrigin": self.page.position == 0,
+                }
+            if "before" in script:
+                return {
+                    "before": self.page.position,
+                    "maximum": 1,
+                    "step": 1,
+                }
+            self.page.position = min(1, self.page.position + 1)
+            return None
+
+    class VirtualPage:
+        def __init__(self, selectors):
+            self.selectors = selectors
+            self.position = 0
+            self.origin_reset_pending = False
+            self.opened: list[str] = []
+            self.rows = []
+            self.conversation_list = ConversationList(self)
+
+        def visible_rows(self):
+            return self.rows[:2] if self.position == 0 else self.rows[2:]
+
+        def locator(self, selector):
+            if selector == self.selectors.conversation:
+                return ConversationSnapshot(self)
+            if selector == self.selectors.conversation_list:
+                return self.conversation_list
+            raise AssertionError(f"unexpected selector: {selector}")
+
+        def wait_for_timeout(self, _delay):
+            if self.origin_reset_pending:
+                self.position = 0
+                self.origin_reset_pending = False
+
+    page = VirtualPage(fake_chat.selectors)
+    rows = {
+        name: Row(page, name, f"participant-{name}", f"conversation-{name}")
+        for name in ("A", "B", "C", "D")
+    }
+    page.rows = [rows["C"], rows["A"], rows["B"], rows["D"]]
+    fake_chat.page = page
+
+    def locate_and_open(name: str):
+        expected = conversation_row_candidate_id(rows[name])
+        item, count = fake_chat._find_conversation(name, expected)
+        assert count == 1
+        item.click()
+
+    locate_and_open("A")
+    # A send moves A to the newest/top end, but the recycled list remains
+    # scrolled to its older segment. B is now above that stale position.
+    page.rows = [rows["A"], rows["B"], rows["C"], rows["D"]]
+    page.position = 1
+    locate_and_open("B")
+    # The next send reorders again. C now requires a fresh origin followed by
+    # the normal bounded forward search in the same chat instance.
+    page.rows = [rows["B"], rows["A"], rows["C"], rows["D"]]
+    page.position = 1
+    locate_and_open("C")
+
+    assert page.opened == ["A", "B", "C"]
 
 
 def test_runtime_model_separates_friend_identity_from_conversation_locator(
@@ -587,6 +924,25 @@ def test_send_rejects_optimistic_bubble_that_disappears(page, tmp_path):
     assert result.screenshot_path is not None
 
 
+def test_failure_evidence_snapshot_is_structural_and_never_reads_chat_or_composer_text(
+    page, fake_chat
+):
+    page.locator('[data-e2e="chat-input"]').fill("私密草稿")
+    page.locator('[data-e2e="message-list"]').evaluate(
+        "el => { const item=document.createElement('p'); item.dataset.e2e='message-text'; item.textContent='私密聊天正文'; el.append(item); }"
+    )
+
+    snapshot = fake_chat.failure_evidence_snapshot("confirmation_observed")
+
+    assert snapshot["page"]["url"].startswith("file:")
+    assert snapshot["conversation_list"]["row_count"] == 1
+    assert snapshot["composer"]["present"] is True
+    assert snapshot["composer"]["contenteditable"] is True
+    assert snapshot["history"]["outgoing_count"] == 1
+    assert "私密草稿" not in repr(snapshot)
+    assert "私密聊天正文" not in repr(snapshot)
+
+
 def test_find_target_scrolls_conversation_list(page, tmp_path):
     page.goto((Path("tests/fixtures/chat.html").resolve()).as_uri())
     page.locator('[data-e2e="conversation-item"]').evaluate("el => el.remove()")
@@ -647,8 +1003,8 @@ def test_today_history_audit_confirms_any_current_day_outgoing(page, tmp_path):
 
     audit = chat.audit_today_outgoing(date(2026, 8, 30))
 
-    assert audit.status is TodayOutgoingStatus.CONFIRMED_SENT
-    assert audit.reason == "today_outgoing_found"
+    assert audit.status is TodayOutgoingStatus.UNKNOWN
+    assert audit.reason == "date_evidence_unavailable"
 
 
 def test_today_history_audit_ignores_text_and_stops_at_newest_snapshot(page, tmp_path):
@@ -665,7 +1021,7 @@ def test_today_history_audit_ignores_text_and_stops_at_newest_snapshot(page, tmp
 
     audit = chat.audit_today_outgoing(date(2026, 8, 30))
 
-    assert audit.status is TodayOutgoingStatus.CONFIRMED_SENT
+    assert audit.status is TodayOutgoingStatus.UNKNOWN
     assert audit.snapshots == 1
     assert audit.scrolls == 0
 
@@ -784,6 +1140,111 @@ def test_today_history_audit_returns_unknown_when_history_container_is_unavailab
 
     assert audit.status is TodayOutgoingStatus.UNKNOWN
     assert audit.reason == "date_evidence_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("marker", "expected"),
+    [
+        ("authentication-required", ("login_required", "login")),
+        ("risk-control-required", ("risk_control_required", "verification")),
+        (None, None),
+    ],
+)
+def test_page_failure_requires_one_explicit_visible_marker(marker, expected, tmp_path: Path):
+    class Locator:
+        def __init__(self, present):
+            self.present = present
+            self.first = self
+
+        def count(self):
+            return int(self.present)
+
+        def is_visible(self):
+            return self.present
+
+    class Page:
+        def locator(self, selector):
+            return Locator(marker is not None and marker in selector)
+
+    chat = DouyinChat(Page(), ChatSelectors.test_defaults(), tmp_path)
+
+    assert chat.page_failure() == expected
+
+
+def test_page_failure_prioritizes_explicit_verification_over_login_when_both_are_visible(
+    tmp_path: Path,
+):
+    class Locator:
+        def __init__(self, present):
+            self.present = present
+            self.first = self
+
+        def count(self):
+            return int(self.present)
+
+        def is_visible(self):
+            return self.present
+
+    class Page:
+        def locator(self, selector):
+            return Locator(
+                selector
+                in {
+                    ChatSelectors.test_defaults().authentication_marker,
+                    ChatSelectors.test_defaults().risk_control_marker,
+                }
+            )
+
+    chat = DouyinChat(Page(), ChatSelectors.test_defaults(), tmp_path)
+
+    assert chat.page_failure() == ("risk_control_required", "verification")
+
+
+def test_page_failure_keeps_a_hidden_marker_on_the_generic_safe_path(tmp_path: Path):
+    class Locator:
+        def __init__(self, selector):
+            self.selector = selector
+            self.first = self
+
+        def count(self):
+            return int(self.selector == ChatSelectors.test_defaults().risk_control_marker)
+
+        def is_visible(self):
+            return False
+
+    class Page:
+        def locator(self, selector):
+            return Locator(selector)
+
+    chat = DouyinChat(Page(), ChatSelectors.test_defaults(), tmp_path)
+
+    assert chat.page_failure() is None
+
+
+@pytest.mark.parametrize(
+    ("failure", "reason_code"),
+    [
+        (("login_required", "login"), "login_required"),
+        (("risk_control_required", "verification"), "risk_control_required"),
+    ],
+)
+def test_explicit_page_condition_stops_send_before_the_send_boundary(
+    failure, reason_code, tmp_path: Path
+):
+    class ClassifiedChat(DouyinChat):
+        def page_failure(self):
+            return failure
+
+        def screenshot(self, _label):
+            return tmp_path / "page-condition.png"
+
+    result = ClassifiedChat(
+        object(), ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0
+    ).send("目标", "消息")
+
+    assert result.reason_code == reason_code
+    assert result.send_attempts == 0
+    assert result.failure_marker == failure[1]
 
 
 def test_open_chat_bounds_page_load_and_closes_resources(monkeypatch, tmp_path: Path):

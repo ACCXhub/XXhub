@@ -5,7 +5,7 @@ import { DashboardPage } from "./DashboardPage";
 
 const apiMocks = vi.hoisted(() => ({
   preflightStatus: vi.fn(), runPreflight: vi.fn(), cancelPreflight: vi.fn(),
-  todayPlan: vi.fn(), failedTargets: vi.fn(), serviceIdentity: vi.fn(), retryFailedTarget: vi.fn()
+  todayPlan: vi.fn(), failedTargets: vi.fn(), serviceIdentity: vi.fn()
 }));
 vi.mock("../api", () => ({ api: apiMocks }));
 
@@ -159,14 +159,14 @@ function failure(
 }
 
 test("hides the resend action when no current target is safely retryable", () => {
-  render(<DashboardPage status={status} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} onRetryTargets={vi.fn()} />);
+  render(<DashboardPage status={status} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} />);
 
   expect(screen.queryByRole("button", { name: "补发" })).not.toBeInTheDocument();
   expect(screen.queryByText("仅补发今日尚未成功且可安全重试的目标")).not.toBeInTheDocument();
 });
 
-test("safe resend includes only unresolved current failures allowed by safety gates", () => {
-  const retryTargets = vi.fn();
+test("safe supplement starts one aggregate backend job for all retryable targets", () => {
+  const onAction = vi.fn();
   const mixed = {
     ...status,
     friends: [
@@ -194,7 +194,7 @@ test("safe resend includes only unresolved current failures allowed by safety ga
     issues: [{
       id: "send_failure_retryable", status: "warning" as const,
       explanation: "安全目标：无法在当前会话列表中找到目标。",
-      action: "retry_target", action_label: "安全补发", target_ids: ["target-safe"]
+      action: "retry_target", action_label: "安全补发", target_ids: ["target-safe", "target-b", "target-c"]
     }],
     history: [{
       run_id: "run-mixed", date: "2026-07-16", task_type: "daily_send",
@@ -219,9 +219,10 @@ test("safe resend includes only unresolved current failures allowed by safety ga
     }]
   };
 
-  render(<DashboardPage status={mixed} busy={null} onAction={vi.fn()} onNavigate={vi.fn()} onRetryTargets={retryTargets} />);
+  render(<DashboardPage status={mixed} busy={null} onAction={onAction} onNavigate={vi.fn()} />);
 
   expect(screen.getByText("安全目标：无法在当前会话列表中找到目标。")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "安全补发" }));
-  expect(retryTargets).toHaveBeenCalledWith(["target-safe"]);
+  expect(onAction).toHaveBeenCalledTimes(1);
+  expect(onAction).toHaveBeenCalledWith("safe-supplement");
 });
