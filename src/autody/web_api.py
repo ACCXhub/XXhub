@@ -45,6 +45,7 @@ from autody.daily_status import (
     dashboard_statistics,
     effective_daily_target_statuses,
     is_post_send_confirmation,
+    last_post_send_success_dates,
 )
 from autody.account_profile import (
     bindings_revalidation_required,
@@ -750,13 +751,6 @@ def _failed_targets(config: AppConfig, state, day: date) -> dict:
             "needs_attention": len(rows),
         },
     }
-
-
-def _last_success_date(state, name: str) -> str | None:
-    for key in sorted(state.daily, reverse=True):
-        if name in state.daily[key].get("succeeded", []):
-            return key
-    return None
 
 
 def _login_status(path: Path, log_dir: Path | None = None) -> str:
@@ -2878,6 +2872,7 @@ def create_app(
             state,
             status_day,
         )
+        last_success_dates = last_post_send_success_dates(config, state)
         cache_dir = config.state_file.parent / "avatar-cache"
         discovered = load_discovered_friends(
             config.state_file.parent / "discovered_friends.json"
@@ -2922,7 +2917,9 @@ def create_app(
                     "today_status": effective_statuses.get(
                         target_identity(target), "pending"
                     ),
-                    "last_success_date": _last_success_date(state, target.name),
+                    "last_success_date": last_success_dates.get(
+                        target_identity(target)
+                    ),
                     "ambiguous_duplicate": target.enabled and normalized_names[" ".join(target.name.split()).casefold()] > 1,
                     "binding_status": (
                         "verified" if resolution.valid else resolution.status

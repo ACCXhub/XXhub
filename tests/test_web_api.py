@@ -123,6 +123,111 @@ def test_status_returns_dashboard_summary(tmp_path: Path):
     assert data["login"]["status"] == "unknown"
 
 
+def test_friends_last_success_ignores_unproven_current_day_legacy_success(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets[0].stable_id = "target-one"
+    save_config(config_path, config)
+
+    state_path = tmp_path / "data" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["daily"]["2026-06-24"] = {
+        "message": "早安",
+        "succeeded": ["小明"],
+        "failures": {},
+        "confirmation_results": {"target-one": "confirmed"},
+        "confirmation_provenance": {},
+        "consumed": True,
+    }
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    TaskHistoryStore(
+        tmp_path / "data" / "history" / "task-runs.jsonl"
+    ).append(
+        TaskRunRecord(
+            run_id="proved-prior-send",
+            date="2026-06-23",
+            task_type="daily_send",
+            trigger_source="scheduled",
+            start_time="2026-06-23T07:30:00",
+            end_time="2026-06-23T07:31:00",
+            total_targets=2,
+            success_count=1,
+            final_status="completed",
+            confirmation_results={"target-one": "confirmed"},
+            confirmation_provenance={"target-one": "post_send_observed"},
+        )
+    )
+
+    friends = TestClient(create_app(config_path)).get(
+        "/api/friends?today=2026-06-24"
+    ).json()["friends"]
+    friend = next(item for item in friends if item["target_id"] == "target-one")
+
+    assert friend["today_status"] == "pending"
+    assert friend["last_success_date"] == "2026-06-23"
+
+
+def test_friends_and_dashboard_reject_unproven_nine_target_completion(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    config = load_config(config_path)
+    config.targets = [
+        Target(name=f"目标 {index}", stable_id=f"target-{index}")
+        for index in range(9)
+    ]
+    save_config(config_path, config)
+
+    state_path = tmp_path / "data" / "state.json"
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["daily"]["2026-06-24"] = {
+        "message": "早安",
+        "succeeded": [target.name for target in config.targets],
+        "failures": {},
+        "confirmation_results": {
+            target.stable_id: "confirmed" for target in config.targets
+        },
+        "confirmation_provenance": {},
+        "consumed": True,
+    }
+    state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    TaskHistoryStore(
+        tmp_path / "data" / "history" / "task-runs.jsonl"
+    ).append(
+        TaskRunRecord(
+            run_id="unproven-nine-target-run",
+            date="2026-06-24",
+            task_type="daily_send",
+            trigger_source="scheduled",
+            start_time="2026-06-24T07:30:00",
+            end_time="2026-06-24T07:31:00",
+            total_targets=9,
+            success_count=9,
+            final_status="completed",
+            confirmation_results={
+                target.stable_id: "confirmed" for target in config.targets
+            },
+        )
+    )
+
+    client = TestClient(create_app(config_path))
+    friends = client.get("/api/friends?today=2026-06-24").json()["friends"]
+    dashboard = client.get("/api/status?today=2026-06-24").json()
+
+    assert {friend["today_status"] for friend in friends} == {"pending"}
+    assert {friend["status"] for friend in dashboard["friends"]} == {"pending"}
+    assert dashboard["today"] == {
+        "date": "2026-06-24",
+        "message": "早安",
+        "succeeded": 0,
+        "failed": 0,
+        "total": 9,
+        "complete": False,
+    }
+
+
 def test_status_projects_post_send_uncertain_as_unknown_with_current_detail(tmp_path: Path):
     config_path = make_project(tmp_path)
     target = load_config(config_path).targets[0]

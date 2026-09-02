@@ -104,6 +104,72 @@ def same_day_confirmed_target_ids(
     return confirmed
 
 
+def last_post_send_success_dates(
+    config: AppConfig,
+    state: AppState,
+    records: Sequence[TaskRunRecord] | None = None,
+) -> dict[str, str]:
+    """Return each current target's latest proven AutoDy send date.
+
+    A displayed recent success must retain the same post-send confirmation
+    provenance required for an effective daily success.  Legacy ``succeeded``
+    names, bare confirmation strings, and consumed flags are not send proof.
+    """
+    aliases = _current_target_aliases(config)
+    latest: dict[str, str] = {}
+
+    def remember(
+        historical_id: object,
+        result: object,
+        provenance: object,
+        day: object,
+    ) -> None:
+        if not isinstance(historical_id, str) or not isinstance(day, str):
+            return
+        try:
+            date.fromisoformat(day)
+        except ValueError:
+            return
+        identity = aliases.get(historical_id)
+        if identity is not None and is_post_send_confirmation(result, provenance):
+            if day > latest.get(identity, ""):
+                latest[identity] = day
+
+    for day, daily in state.daily.items():
+        if not isinstance(daily, Mapping):
+            continue
+        results = daily.get("confirmation_results", {})
+        provenance = daily.get("confirmation_provenance", {})
+        if not isinstance(results, Mapping) or not isinstance(provenance, Mapping):
+            continue
+        for historical_id, result in results.items():
+            remember(historical_id, result, provenance.get(historical_id), day)
+
+    if records is None:
+        history = TaskHistoryStore(
+            config.state_file.parent / "history" / "task-runs.jsonl"
+        )
+        records = []
+        page = 1
+        while True:
+            history_page = history.query(
+                task_type="daily_send", page=page, page_size=100
+            )
+            records.extend(history_page.items)
+            if len(records) >= history_page.total:
+                break
+            page += 1
+    for record in records:
+        for historical_id, result in record.confirmation_results.items():
+            remember(
+                historical_id,
+                result,
+                record.confirmation_provenance.get(historical_id),
+                record.date,
+            )
+    return latest
+
+
 def _day_is_success(
     daily_fact: Mapping[str, object] | None,
     records: Sequence[TaskRunRecord],
