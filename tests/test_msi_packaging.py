@@ -489,7 +489,7 @@ def test_release_workflow_publishes_only_versioned_public_assets():
         encoding="utf-8-sig"
     )
 
-    assert "AUTODY_RELEASE_VERSION: \"1.5.2\"" in workflow
+    assert "AUTODY_RELEASE_VERSION: \"1.5.3\"" in workflow
     assert "AUTODY_PREVIOUS_VERSION: \"1.4.4\"" in workflow
     assert "23fd4811aebbcc66faa10eacd4d09788039cd5e1" in workflow
     assert "bea7a7e7495c0137d33463f504d2999dcef250e7df7766c90eb0dbcb4a1daa10" in workflow
@@ -510,18 +510,18 @@ def test_release_workflow_publishes_only_versioned_public_assets():
     assert "actions/upload-artifact@v4" in diagnostic_upload
     assert "msi-lifecycle-report.json" in diagnostic_upload
     assert "msi-lifecycle-report.md" in diagnostic_upload
-    assert "AutoDy-1.5.2-x64.msi" not in diagnostic_upload
-    assert "AutoDy-Windows-Portable-1.5.2.zip" not in diagnostic_upload
+    assert "AutoDy-1.5.3-x64.msi" not in diagnostic_upload
+    assert "AutoDy-Windows-Portable-1.5.3.zip" not in diagnostic_upload
     assert "if: github.event_name == 'push' && success()" in workflow
     assert "write-release-manifest.ps1" not in workflow.split(
         "Publish only canonical guarded assets", 1
     )[1]
     for asset in [
-        "output/release/v1.5.2/AutoDy-1.5.2-x64.msi",
-        "output/release/v1.5.2/AutoDy-1.5.2-x64.msi.sha256",
-        "output/release/v1.5.2/AutoDy-Windows-Portable-1.5.2.zip",
-        "output/release/v1.5.2/AutoDy-Windows-Portable-1.5.2.zip.sha256",
-        "output/release/v1.5.2/release-manifest.json",
+        "output/release/v1.5.3/AutoDy-1.5.3-x64.msi",
+        "output/release/v1.5.3/AutoDy-1.5.3-x64.msi.sha256",
+        "output/release/v1.5.3/AutoDy-Windows-Portable-1.5.3.zip",
+        "output/release/v1.5.3/AutoDy-Windows-Portable-1.5.3.zip.sha256",
+        "output/release/v1.5.3/release-manifest.json",
     ]:
         assert asset in workflow
     published_files = workflow.split("files: |", 1)[1].split(

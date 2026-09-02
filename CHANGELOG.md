@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [1.5.3] - 2026-09-02
+
+### Fixed
+
+- Friends 的“最近成功”现在只投影带有 `post_send_observed` 的 `confirmed` 或 `retry_confirmed` 发送证据。兼容旧持久记录中的裸 `succeeded`、裸确认和 `consumed` 标记不再制造当天成功历史或误导性完成状态。
+
 ## [1.5.2] - 2026-08-30
 
 ### Changed

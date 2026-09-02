@@ -6,11 +6,11 @@ AutoDy 是面向 Windows 的本机 Douyin 私信工作流管理台，用于管�
 
 ## 当前版本状态
 
-- 当前源码版本线：**v1.5.2**。
+- 当前源码版本线：**v1.5.3**。
 - 当前源码 Master 已完成 daily denominator、好友扫描性能、统一 today-delivery pipeline、发送确认 provenance、`one_for_all` 每日轮换和源码直运行收敛。
 - `v1.5.0` tag 的正式 workflow 在 MSI lifecycle acceptance 阶段失败且没有 GitHub Release；该标签保留为不可变历史。
 - `v1.5.1` lifecycle 失败候选保留为不可变历史。
-- 当前没有正式发布的 v1.5.2 GitHub Release；在新的正式发布明确执行并完成资产验证前，最后已确认公开稳定基线仍是 **v1.4.4**。
+- v1.5.2 已作为正式 GitHub Release 发布；v1.5.3 是当前待发布的修正版本，正式资产仍须完成 Release workflow 与 public asset verification。
 
 因此需要公开稳定安装包的普通用户仍应从正式 Releases 获取已发布资产；当前项目维护和本机实际使用则以源码直运行为主。
 
