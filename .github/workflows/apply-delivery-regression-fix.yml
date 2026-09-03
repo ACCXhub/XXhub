@@ -1,0 +1,47 @@
+name: Apply delivery regression repair
+
+on:
+  push:
+    branches:
+      - fix/delivery-verification-regression
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/delivery-verification-regression
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.lock
+      - name: Apply bounded source repair
+        shell: powershell
+        run: python .\scripts\apply-delivery-regression-fix.py
+      - name: Bootstrap clean source
+        shell: powershell
+        run: .\scripts\bootstrap-source.ps1
+      - name: Run focused regression tests
+        shell: powershell
+        run: .\.venv\Scripts\python.exe -m pytest -q tests/test_delivery_regression.py
+      - name: Verify patch shape
+        shell: powershell
+        run: git diff --check
+      - name: Commit repaired canonical files
+        shell: powershell
+        run: |
+          git config user.name "ACCXhub"
+          git config user.email "3375139621@qq.com"
+          git rm .github/workflows/apply-delivery-regression-fix.yml
+          git rm .github/workflows/delivery-regression-red.yml
+          git rm scripts/apply-delivery-regression-fix.py
+          git add src/autody/chat.py src/autody/runner.py tests/test_delivery_regression.py
+          git diff --cached --check
+          git commit -m "fix: restore daily delivery confirmation"
+          git push origin HEAD:fix/delivery-verification-regression
