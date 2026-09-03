@@ -485,6 +485,14 @@ class DouyinChat:
         latest = self._latest_outgoing_text()
         return latest is not None and normalize_message_text(latest) == normalize_message_text(message)
 
+    def _matching_outgoing_count(self, message: str) -> int:
+        expected = normalize_message_text(message)
+        messages = self.page.locator(self.confirmation_selectors.outgoing_message_text)
+        return sum(
+            normalize_message_text(str(text)) == expected
+            for text in messages.all_text_contents()
+        )
+
     def _outgoing_message_identities(self) -> dict[str, str]:
         """Return stable identities for visible outgoing bubbles when exposed.
 
@@ -717,17 +725,26 @@ class DouyinChat:
         message: str,
         *,
         pre_send_identities: dict[str, str],
+        pre_send_match_count: int,
     ) -> tuple[DeliveryStatus | None, int]:
+        normalized_message = normalize_message_text(message)
         for attempt in range(1, self.confirmation_retries + 2):
             if self.confirmation_delay_ms:
                 self.page.wait_for_timeout(self.confirmation_delay_ms)
             matching_identity_observed = any(
-                identity not in pre_send_identities
-                and text == normalize_message_text(message)
+                identity not in pre_send_identities and text == normalized_message
                 for identity, text in self._outgoing_message_identities().items()
             )
-            if matching_identity_observed:
-                status = DeliveryStatus.CONFIRMED if attempt == 1 else DeliveryStatus.RETRY_CONFIRMED
+            matching_count_observed = (
+                self._latest_matches(message)
+                and self._matching_outgoing_count(message) > pre_send_match_count
+            )
+            if matching_identity_observed or matching_count_observed:
+                status = (
+                    DeliveryStatus.CONFIRMED
+                    if attempt == 1
+                    else DeliveryStatus.RETRY_CONFIRMED
+                )
                 return status, attempt
         return None, self.confirmation_retries + 1
 
@@ -1202,10 +1219,11 @@ class DouyinChat:
                         failure_stage=stage,
                         reason_code=reason_code,
                     )
-            else:
+            elif expected_conversation_id is None:
                 self.open_verified_conversation(target)
             self._raise_if_page_failure()
             editor = self.composer_editor()
+            pre_send_match_count = self._matching_outgoing_count(message)
             editor.fill(message)
             pre_send_identities = self._outgoing_message_identities()
             # Treat the outcome as potentially sent from the moment Enter is
@@ -1216,6 +1234,7 @@ class DouyinChat:
             status, attempts = self._confirm_delivery(
                 message,
                 pre_send_identities=pre_send_identities,
+                pre_send_match_count=pre_send_match_count,
             )
             if status:
                 return DeliveryResult(

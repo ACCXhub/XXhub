@@ -278,6 +278,22 @@ def _supports_today_target_pipeline(chat) -> bool:
     )
 
 
+def _needs_live_audit_before_send(
+    *,
+    requested_target_ids: set[str] | None,
+    effective_status: str | None,
+    has_target_failure: bool,
+    reconciliation_status: object,
+) -> bool:
+    """Keep live history audit on recovery paths, not fresh normal delivery."""
+    return (
+        requested_target_ids is not None
+        or effective_status != "pending"
+        or has_target_failure
+        or reconciliation_status is not None
+    )
+
+
 def _fatal_chat_execution(exc: FatalChatError) -> TodayTargetExecution:
     """Project a chat-layer classification without re-parsing page state."""
     return TodayTargetExecution(
@@ -300,6 +316,7 @@ def _execute_today_target(
     *,
     expected_conversation_id: str | None,
     allow_send: bool = True,
+    audit_before_send: bool = True,
 ) -> TodayTargetExecution:
     """Audit a verified conversation and, only when missing, send in place.
 
@@ -357,6 +374,19 @@ def _execute_today_target(
                     if reason == "conversation_not_found"
                     else "identity_verification_failed"
                 ),
+            )
+        )
+    if allow_send and not audit_before_send:
+        if message is None:
+            raise ValueError("sending requires a prepared message")
+        return TodayTargetExecution(
+            delivery=_send_target(
+                chat,
+                target,
+                message,
+                expected_conversation_id=expected_conversation_id,
+                conversation_verified=True,
+                delivery_day=today,
             )
         )
     try:
@@ -1705,6 +1735,20 @@ def run_daily(
                     blocking_failure_reason or detail.reason_code
                 )
     def execute_target(target: Target, message: str, expected_conversation_id: str | None):
+        target_id = target_identity(target)
+        target_failures = _stored_target_failures(daily)
+        reconciliation = daily.get("delivery_reconciliation", {})
+        reconciliation_status = (
+            reconciliation.get(target_id)
+            if isinstance(reconciliation, dict)
+            else None
+        )
+        audit_before_send = audit_only or _needs_live_audit_before_send(
+            requested_target_ids=requested_target_ids,
+            effective_status=effective_before_run.get(target_id),
+            has_target_failure=target_id in target_failures,
+            reconciliation_status=reconciliation_status,
+        )
         try:
             return _execute_today_target(
                 chat,
@@ -1713,6 +1757,7 @@ def run_daily(
                 today,
                 expected_conversation_id=expected_conversation_id,
                 allow_send=not audit_only,
+                audit_before_send=audit_before_send,
             )
         except FatalChatError as exc:
             return _fatal_chat_execution(exc)
