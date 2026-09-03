@@ -38,8 +38,6 @@ jobs:
         run: |
           git config user.name "ACCXhub"
           git config user.email "3375139621@qq.com"
-          git rm .github/workflows/apply-delivery-compat-fix.yml
-          git rm scripts/apply-delivery-compat-fix.py
           git add src/autody/chat.py
           git diff --cached --check
           git commit -m "fix: preserve confirmation helper compatibility"
