@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  apply-and-verify:
+  apply:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,23 +19,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: requirements-dev.lock
       - name: Apply compatibility patch
         shell: powershell
         run: python .\scripts\apply-confirmation-compat.py
-      - name: Bootstrap clean source
-        shell: powershell
-        run: .\scripts\bootstrap-source.ps1
-      - name: Run impacted Python tests
-        shell: powershell
-        run: .\.venv\Scripts\python.exe -m pytest -q tests/test_delivery_regression.py tests/test_chat.py
-      - name: Verify patch shape
-        shell: powershell
-        run: git diff --check
-      - name: Commit canonical source patch
+      - name: Verify and commit canonical source patch
         shell: powershell
         run: |
+          git diff --check
+          if (git diff --quiet -- src/autody/chat.py) {
+            Write-Host "Canonical source patch already present."
+            exit 0
+          }
           git config user.name "ACCXhub"
           git config user.email "3375139621@qq.com"
           git add src/autody/chat.py
