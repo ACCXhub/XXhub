@@ -138,12 +138,18 @@ function Update-FrontendBuild {
         $npm = Get-Command npm -ErrorAction SilentlyContinue
     }
     if ($null -eq $npm) {
-        throw "Source frontend is present but npm was not found. Install Node.js, then run npm run build from frontend."
+        throw "Source frontend is present but npm was not found. Install Node.js, then rerun the installer."
     }
 
-    Write-Host "[INFO] Source frontend detected; rebuilding production static assets."
+    $frontendLock = Join-Path $frontendRoot "package-lock.json"
+    if (-not (Test-Path -LiteralPath $frontendLock -PathType Leaf)) {
+        throw "Source frontend package-lock.json is missing; deterministic dependency installation is unavailable."
+    }
+
+    Write-Host "[INFO] Source frontend detected; installing locked dependencies and rebuilding production static assets."
     Push-Location $frontendRoot
     try {
+        Invoke-NativeChecked -Stage "Install source frontend dependencies" -FilePath $npm.Source -Arguments @("ci")
         Invoke-NativeChecked -Stage "Source frontend production build" -FilePath $npm.Source -Arguments @("run", "build")
     } finally {
         Pop-Location
@@ -212,21 +218,28 @@ $TaskConfig = $Config
 $TaskRepairEnabled = $true
 $Registration = Get-ItemProperty -LiteralPath "HKCU:\Software\AutoDy" -ErrorAction SilentlyContinue
 if ($Registration) {
-    $RegisteredProgramRoot = [string]$Registration.InstallFolder
-    $RegisteredDataRoot = [string]$Registration.DataRoot
-    if (
-        [string]::IsNullOrWhiteSpace($RegisteredProgramRoot) -or
-        [string]::IsNullOrWhiteSpace($RegisteredDataRoot) -or
-        -not (Test-Path -LiteralPath $RegisteredProgramRoot -PathType Container) -or
-        -not (Test-Path -LiteralPath $RegisteredDataRoot -PathType Container)
-    ) {
-        $TaskRepairEnabled = $false
-        Write-Warning "Registered AutoDy roots are incomplete; scheduled tasks were not changed. Repair the installed copy from its Dashboard."
+    $InstallFolderProperty = $Registration.PSObject.Properties["InstallFolder"]
+    $DataRootProperty = $Registration.PSObject.Properties["DataRoot"]
+    if ($null -eq $InstallFolderProperty -or $null -eq $DataRootProperty) {
+        Write-Host "[INFO] Ignoring incomplete AutoDy registration without install roots."
+        $Registration = $null
     } else {
-        $TaskProgramRoot = [IO.Path]::GetFullPath($RegisteredProgramRoot)
-        $TaskDataRoot = [IO.Path]::GetFullPath($RegisteredDataRoot)
-        $TaskConfig = Join-Path $TaskDataRoot "config.yaml"
-        Write-Host "[INFO] Repairing scheduled tasks for the registered AutoDy installation."
+        $RegisteredProgramRoot = [string]$InstallFolderProperty.Value
+        $RegisteredDataRoot = [string]$DataRootProperty.Value
+        if (
+            [string]::IsNullOrWhiteSpace($RegisteredProgramRoot) -or
+            [string]::IsNullOrWhiteSpace($RegisteredDataRoot) -or
+            -not (Test-Path -LiteralPath $RegisteredProgramRoot -PathType Container) -or
+            -not (Test-Path -LiteralPath $RegisteredDataRoot -PathType Container)
+        ) {
+            $TaskRepairEnabled = $false
+            Write-Warning "Registered AutoDy roots are incomplete; scheduled tasks were not changed. Repair the installed copy from its Dashboard."
+        } else {
+            $TaskProgramRoot = [IO.Path]::GetFullPath($RegisteredProgramRoot)
+            $TaskDataRoot = [IO.Path]::GetFullPath($RegisteredDataRoot)
+            $TaskConfig = Join-Path $TaskDataRoot "config.yaml"
+            Write-Host "[INFO] Repairing scheduled tasks for the registered AutoDy installation."
+        }
     }
 }
 if ($TaskRepairEnabled) {
