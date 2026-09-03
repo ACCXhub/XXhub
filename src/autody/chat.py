@@ -725,7 +725,7 @@ class DouyinChat:
         message: str,
         *,
         pre_send_identities: dict[str, str],
-        pre_send_match_count: int,
+        pre_send_match_count: int | None = None,
     ) -> tuple[DeliveryStatus | None, int]:
         normalized_message = normalize_message_text(message)
         for attempt in range(1, self.confirmation_retries + 2):
@@ -736,7 +736,8 @@ class DouyinChat:
                 for identity, text in self._outgoing_message_identities().items()
             )
             matching_count_observed = (
-                self._latest_matches(message)
+                pre_send_match_count is not None
+                and self._latest_matches(message)
                 and self._matching_outgoing_count(message) > pre_send_match_count
             )
             if matching_identity_observed or matching_count_observed:
