@@ -76,7 +76,7 @@ def test_confirmation_accepts_new_message_identity_when_virtual_dom_replaces_sam
     assert page.locator('[data-e2e="message-text"]', has_text="早安").count() == 1
 
 
-def test_missing_to_sent_without_new_message_proof_never_confirms(
+def test_missing_stable_identity_confirms_from_matching_outgoing_count_delta(
     page, fake_chat
 ):
     page.locator('[data-e2e="chat-input"]').evaluate(
@@ -97,8 +97,9 @@ def test_missing_to_sent_without_new_message_proof_never_confirms(
         delivery_day=date(2026, 8, 30),
     )
 
-    assert result.status is DeliveryStatus.CONFIRMATION_FAILED
-    assert result.confirmation_provenance.value == "none"
+    assert result.status is DeliveryStatus.CONFIRMED
+    assert result.send_attempts == 1
+    assert result.confirmation_provenance.value == "post_send_observed"
 
 
 def test_historical_same_text_without_a_new_identity_never_confirms(page, fake_chat):
