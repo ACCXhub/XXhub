@@ -1,3 +1,5 @@
+"""Regression coverage for AutoDy daily Douyin delivery boundaries."""
+
 from datetime import date
 from types import SimpleNamespace
 
