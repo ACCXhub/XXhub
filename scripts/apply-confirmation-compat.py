@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# Temporary branch-only patcher. The canonical result is committed into src/autody/chat.py.
 path = Path("src/autody/chat.py")
 data = path.read_bytes()
 newline = "\r\n" if b"\r\n" in data else "\n"
