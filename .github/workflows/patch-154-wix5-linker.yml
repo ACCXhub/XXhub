@@ -1,0 +1,56 @@
+name: Patch AutoDy WiX 5 linker
+
+on:
+  push:
+    branches:
+      - release/1.5.4-setup-exe
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/1.5.4-setup-exe
+          fetch-depth: 0
+      - name: Align MSI linker with WiX 5.0.2
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          p = Path('scripts/build-msi.ps1')
+          text = p.read_text(encoding='utf-8-sig')
+          replacements = [
+              ("$WixCli = Join-Path $NuGetPackages 'wixtoolset.sdk\\7.0.0\\tools\\net8.0\\wix.dll'",
+               "$WixCli = Join-Path $NuGetPackages 'wixtoolset.sdk\\5.0.2\\tools\\net472\\x86\\wix.exe'"),
+              ("$WixUiExtension = Join-Path $NuGetPackages 'wixtoolset.ui.wixext\\7.0.0\\wixext7\\WixToolset.UI.wixext.dll'",
+               "$WixUiExtension = Join-Path $NuGetPackages 'wixtoolset.ui.wixext\\5.0.2\\wixext5\\WixToolset.UI.wixext.dll'"),
+              ("$WixUtilExtension = Join-Path $NuGetPackages 'wixtoolset.util.wixext\\7.0.0\\wixext7\\WixToolset.Util.wixext.dll'",
+               "$WixUtilExtension = Join-Path $NuGetPackages 'wixtoolset.util.wixext\\5.0.2\\wixext5\\WixToolset.Util.wixext.dll'"),
+              ("    '-p:AcceptEula=wix7',\n", ""),
+              ("$LinkArguments = @(\n    $WixCli, 'build', '--acceptEula', 'wix7', '--nologo',",
+               "$LinkArguments = @(\n    'build', '--nologo',"),
+              ("    throw 'Restored WiX 7 tooling is missing.'", "    throw 'Restored WiX 5 tooling is missing.'"),
+              ('Invoke-NativeChecked "Link WiX MSI" "dotnet" $LinkArguments',
+               'Invoke-NativeChecked "Link WiX MSI" $WixCli $LinkArguments'),
+          ]
+          for old, new in replacements:
+              if old in text:
+                  text = text.replace(old, new, 1)
+              elif new not in text:
+                  raise SystemExit(f'expected build-msi marker missing: {old}')
+          p.write_text(text, encoding='utf-8-sig', newline='\n')
+          PY
+      - name: Commit linker alignment
+        shell: bash
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scripts/build-msi.ps1
+          git commit -m "fix(packaging): align MSI linker to WiX 5"
+          git push origin HEAD:release/1.5.4-setup-exe
