@@ -1,4 +1,4 @@
-<Project Sdk="WixToolset.Sdk/7.0.0">
+<Project Sdk="WixToolset.Sdk/5.0.2">
   <PropertyGroup>
     <OutputType>Package</OutputType>
     <Platform>x64</Platform>
@@ -15,7 +15,7 @@
   <ItemGroup>
     <Compile Remove="Bundle.wxs" />
     <Compile Include="$(GeneratedWxs)" />
-    <PackageReference Include="WixToolset.UI.wixext" Version="7.0.0" />
-    <PackageReference Include="WixToolset.Util.wixext" Version="7.0.0" />
+    <PackageReference Include="WixToolset.UI.wixext" Version="5.0.2" />
+    <PackageReference Include="WixToolset.Util.wixext" Version="5.0.2" />
   </ItemGroup>
 </Project>
