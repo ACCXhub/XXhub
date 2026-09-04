@@ -1,4 +1,4 @@
-﻿<Project Sdk="WixToolset.Sdk/7.0.0">
+<Project Sdk="WixToolset.Sdk/7.0.0">
   <PropertyGroup>
     <OutputType>Package</OutputType>
     <Platform>x64</Platform>
@@ -13,6 +13,7 @@
     <SuppressIces>ICE60</SuppressIces>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="Bundle.wxs" />
     <Compile Include="$(GeneratedWxs)" />
     <PackageReference Include="WixToolset.UI.wixext" Version="7.0.0" />
     <PackageReference Include="WixToolset.Util.wixext" Version="7.0.0" />
