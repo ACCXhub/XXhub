@@ -17,7 +17,8 @@ def test_setup_exe_is_a_wix_bundle_over_the_canonical_msi():
     project = Path("packaging/wix/AutoDy.Bundle.wixproj").read_text(encoding="utf-8")
     package_project = Path("packaging/wix/AutoDy.Package.wixproj").read_text(encoding="utf-8")
     bundle = Path("packaging/wix/Bundle.wxs").read_text(encoding="utf-8")
-    builder = Path("scripts/build-setup-exe.ps1").read_text(encoding="utf-8-sig")
+    setup_builder = Path("scripts/build-setup-exe.ps1").read_text(encoding="utf-8-sig")
+    msi_builder = Path("scripts/build-msi.ps1").read_text(encoding="utf-8-sig")
 
     assert 'Sdk="WixToolset.Sdk/5.0.2"' in project
     assert 'Sdk="WixToolset.Sdk/5.0.2"' in package_project
@@ -32,9 +33,14 @@ def test_setup_exe_is_a_wix_bundle_over_the_canonical_msi():
     assert '<Compile Include="$(GeneratedWxs)" />' in package_project
     assert 'bal:WixStandardBootstrapperApplication' in bundle
     assert 'MsiPackage SourceFile="$(var.MsiPath)"' in bundle
-    assert 'AutoDy-Setup-$Version.exe' in builder
-    assert 'AutoDy-$Version-x64.msi' in builder
-    assert 'Get-FileHash -Algorithm SHA256' in builder
+    assert 'AutoDy-Setup-$Version.exe' in setup_builder
+    assert 'AutoDy-$Version-x64.msi' in setup_builder
+    assert 'Get-FileHash -Algorithm SHA256' in setup_builder
+    assert "wixtoolset.sdk\\5.0.2\\tools\\net472\\x86\\wix.exe" in msi_builder
+    assert "wixtoolset.ui.wixext\\5.0.2\\wixext5" in msi_builder
+    assert "wixtoolset.util.wixext\\5.0.2\\wixext5" in msi_builder
+    assert "wix7" not in msi_builder
+    assert "7.0.0" not in msi_builder
 
 
 def test_msi_installs_a_visible_uninstaller_exe_and_start_menu_shortcut():
