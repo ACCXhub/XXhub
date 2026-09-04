@@ -1,0 +1,194 @@
+name: Prepare AutoDy 1.5.4 packaging
+
+on:
+  push:
+    branches:
+      - release/1.5.4-setup-exe
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/1.5.4-setup-exe
+          fetch-depth: 0
+
+      - name: Apply bounded 1.5.4 packaging changes
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace(path, old, new, count=1):
+              p = Path(path)
+              text = p.read_text(encoding='utf-8-sig')
+              if old not in text:
+                  if new in text:
+                      return
+                  raise SystemExit(f'marker not found in {path}: {old[:80]!r}')
+              p.write_text(text.replace(old, new, count), encoding='utf-8-sig', newline='\n')
+
+          replace('pyproject.toml', 'version = "1.5.3"', 'version = "1.5.4"')
+          replace('frontend/package.json', '"version": "1.5.3"', '"version": "1.5.4"')
+          p = Path('frontend/package-lock.json')
+          text = p.read_text(encoding='utf-8')
+          if text.count('"version": "1.5.3"') >= 2:
+              text = text.replace('"version": "1.5.3"', '"version": "1.5.4"', 2)
+              p.write_text(text, encoding='utf-8', newline='\n')
+
+          replace('packaging/wix/AutoDy.Package.wixproj', ">1.5.3</ProductVersion>", ">1.5.4</ProductVersion>")
+
+          for script in [
+              'scripts/build-msi.ps1',
+              'scripts/build-portable.ps1',
+              'scripts/verify-msi-lifecycle.ps1',
+              'scripts/verify-release-artifacts.ps1',
+          ]:
+              p = Path(script)
+              text = p.read_text(encoding='utf-8-sig')
+              text = text.replace('[string]$Version = "1.5.3"', '[string]$Version = "1.5.4"', 1)
+              p.write_text(text, encoding='utf-8-sig', newline='\n')
+          for script in ['scripts/build-release-from-clean-source.ps1', 'scripts/write-release-manifest.ps1']:
+              p = Path(script)
+              text = p.read_text(encoding='utf-8-sig')
+              text = text.replace("[string]$Version = '1.5.3'", "[string]$Version = '1.5.4'", 1)
+              p.write_text(text, encoding='utf-8-sig', newline='\n')
+
+          # MSI owns a visible uninstaller executable and both Start Menu and install-folder entry use it.
+          p = Path('packaging/wix/Product.wxs')
+          text = p.read_text(encoding='utf-8')
+          text = text.replace(
+              '      <ComponentGroupRef Id="PayloadComponents" />\n      <ComponentRef Id="DataRootComponent" />',
+              '      <ComponentGroupRef Id="PayloadComponents" />\n      <ComponentRef Id="UninstallHelperComponent" />\n      <ComponentRef Id="DataRootComponent" />',
+              1,
+          )
+          marker = '''    <Component\n      Id="ShortcutComponent"\n      Directory="INSTALLFOLDER"\n      Guid="0D3D1771-81B4-4D42-8DD8-1E13D093399B">'''
+          helper = '''    <Component\n      Id="UninstallHelperComponent"\n      Directory="INSTALLFOLDER"\n      Guid="7B7FCB2D-C2F5-4BB0-9D95-933C7C16C09D">\n      <File\n        Id="UninstallHelperExe"\n        Source="$(var.StageDir)\\Uninstall AutoDy.exe"\n        Name="Uninstall AutoDy.exe"\n        KeyPath="yes" />\n    </Component>\n'''
+          if 'Id="UninstallHelperComponent"' not in text:
+              if marker not in text:
+                  raise SystemExit('ShortcutComponent marker not found')
+              text = text.replace(marker, helper + marker, 1)
+          old_shortcut = '''        Target="[SystemFolder]msiexec.exe"\n        Arguments="/x [ProductCode]"\n        Icon="AutoDyIcon" />'''
+          new_shortcut = '''        Target="[INSTALLFOLDER]Uninstall AutoDy.exe"\n        WorkingDirectory="INSTALLFOLDER"\n        Icon="AutoDyIcon" />'''
+          if old_shortcut in text:
+              text = text.replace(old_shortcut, new_shortcut, 1)
+          p.write_text(text, encoding='utf-8', newline='\n')
+
+          # Build the helper into the MSI stage with the exact ProductCode for this version.
+          p = Path('scripts/build-msi.ps1')
+          text = p.read_text(encoding='utf-8-sig')
+          marker = '$allowedExact = @($releaseFiles.Values) + @("optional-modules\\AutoDy-Test-Center.autody-module.zip")'
+          block = r'''$uninstallerSource = Join-Path $Root "packaging\uninstall\Program.cs"
+          $uninstallerGeneratedSource = Join-Path $Work "Uninstall.AutoDy.generated.cs"
+          $uninstallerExe = Join-Path $Stage "Uninstall AutoDy.exe"
+          $cscCandidates = @(
+              (Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"),
+              (Join-Path $env:WINDIR "Microsoft.NET\Framework\v4.0.30319\csc.exe")
+          )
+          $csc = $cscCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if (-not $csc) { throw "Build AutoDy uninstaller requires the Windows .NET Framework C# compiler." }
+          $uninstallerCode = (Get-Content -Raw -LiteralPath $uninstallerSource).Replace('__PRODUCT_CODE__', $ProductCode)
+          [IO.File]::WriteAllText($uninstallerGeneratedSource, $uninstallerCode, (New-Object Text.UTF8Encoding($true)))
+          Write-Host "[BUILD] Build AutoDy uninstaller"
+          & $csc /nologo /target:winexe /optimize+ /platform:anycpu /reference:System.dll /reference:System.Windows.Forms.dll /reference:System.Drawing.dll "/out:$uninstallerExe" $uninstallerGeneratedSource
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $uninstallerExe -PathType Leaf)) {
+              throw "Build AutoDy uninstaller failed."
+          }
+
+          $allowedExact = @($releaseFiles.Values) + @(
+              "optional-modules\AutoDy-Test-Center.autody-module.zip",
+              "Uninstall AutoDy.exe"
+          )'''
+          if 'Write-Host "[BUILD] Build AutoDy uninstaller"' not in text:
+              if marker not in text:
+                  raise SystemExit('build-msi allowlist marker not found')
+              text = text.replace(marker, block, 1)
+          old_loop = '''    foreach ($file in ($stagedFiles | Sort-Object {
+              Get-StableId $_.FullName.Substring($Stage.Length + 1)
+          })) {'''
+          new_loop = '''    $generatedPayloadFiles = @($stagedFiles | Where-Object {
+              $_.FullName.Substring($Stage.Length + 1) -ne "Uninstall AutoDy.exe"
+          })
+          foreach ($file in ($generatedPayloadFiles | Sort-Object {
+              Get-StableId $_.FullName.Substring($Stage.Length + 1)
+          })) {'''
+          if old_loop in text:
+              text = text.replace(old_loop, new_loop, 1)
+          p.write_text(text, encoding='utf-8-sig', newline='\n')
+
+          # Release build now emits the Setup EXE after the canonical MSI.
+          p = Path('scripts/build-release-from-clean-source.ps1')
+          text = p.read_text(encoding='utf-8-sig')
+          marker = "& (Join-Path $PSScriptRoot 'build-msi.ps1') -Version $Version -Commit $Commit\nif ($LASTEXITCODE -ne 0) { throw 'MSI Release build failed.' }"
+          addition = marker + "\n& (Join-Path $PSScriptRoot 'build-setup-exe.ps1') -Version $Version -ArtifactDirectory $ReleaseDirectory\nif ($LASTEXITCODE -ne 0) { throw 'Setup EXE build failed.' }"
+          if "build-setup-exe.ps1" not in text:
+              if marker not in text:
+                  raise SystemExit('release build MSI marker not found')
+              text = text.replace(marker, addition, 1)
+          p.write_text(text, encoding='utf-8-sig', newline='\n')
+
+          # Manifest owns Setup EXE and checksum alongside MSI and Portable.
+          p = Path('scripts/write-release-manifest.ps1')
+          text = p.read_text(encoding='utf-8-sig')
+          marker = '$PortableChecksum = "$Portable.sha256"'
+          if '$Setup = Join-Path $ReleaseDirectory "AutoDy-Setup-$Version.exe"' not in text:
+              text = text.replace(marker, marker + '\n$Setup = Join-Path $ReleaseDirectory "AutoDy-Setup-$Version.exe"\n$SetupChecksum = "$Setup.sha256"', 1)
+          text = text.replace(
+              '$artifactPaths = @($Msi, $MsiChecksum, $Portable, $PortableChecksum)',
+              '$artifactPaths = @($Msi, $MsiChecksum, $Portable, $PortableChecksum, $Setup, $SetupChecksum)',
+              1,
+          )
+          text = text.replace(
+              'foreach ($pair in @(@($Msi, $MsiChecksum), @($Portable, $PortableChecksum))) {',
+              'foreach ($pair in @(@($Msi, $MsiChecksum), @($Portable, $PortableChecksum), @($Setup, $SetupChecksum))) {',
+              1,
+          )
+          p.write_text(text, encoding='utf-8-sig', newline='\n')
+
+          # Verification includes the Setup EXE and its sidecar.
+          p = Path('scripts/verify-release-artifacts.ps1')
+          text = p.read_text(encoding='utf-8-sig')
+          marker = '$PortableChecksum = "$Portable.sha256"'
+          if '$Setup = Join-Path $ArtifactRoot "AutoDy-Setup-$Version.exe"' not in text:
+              text = text.replace(marker, marker + '\n$Setup = Join-Path $ArtifactRoot "AutoDy-Setup-$Version.exe"\n$SetupChecksum = "$Setup.sha256"', 1)
+          text = text.replace(
+              'foreach ($artifact in @($Msi, $MsiChecksum, $Portable, $PortableChecksum)) {',
+              'foreach ($artifact in @($Msi, $MsiChecksum, $Portable, $PortableChecksum, $Setup, $SetupChecksum)) {',
+              1,
+          )
+          text = text.replace(
+              '(Test-Path -LiteralPath $PortableChecksum -PathType Leaf)\n)',
+              '(Test-Path -LiteralPath $PortableChecksum -PathType Leaf) -and\n    (Test-Path -LiteralPath $Setup -PathType Leaf) -and\n    (Test-Path -LiteralPath $SetupChecksum -PathType Leaf)\n)',
+              1,
+          )
+          text = text.replace(
+              'foreach ($pair in @(@($Msi, $MsiChecksum), @($Portable, $PortableChecksum))) {',
+              'foreach ($pair in @(@($Msi, $MsiChecksum), @($Portable, $PortableChecksum), @($Setup, $SetupChecksum))) {',
+              1,
+          )
+          p.write_text(text, encoding='utf-8-sig', newline='\n')
+
+          # Canonical release notes and changelog for the new public identity.
+          p = Path('CHANGELOG.md')
+          text = p.read_text(encoding='utf-8')
+          if '## [1.5.4] - 2026-09-04' not in text:
+              text = text.replace('## [Unreleased]\n', '''## [Unreleased]\n\n## [1.5.4] - 2026-09-04\n\n### Added\n\n- 新增 `AutoDy-Setup-1.5.4.exe` 作为普通用户主安装入口，底层继续使用 canonical MSI 负责升级、Repair、rollback 与卸载生命周期。\n- 安装目录新增 `Uninstall AutoDy.exe`，开始菜单“卸载 AutoDy”统一打开该卸载程序；默认保留 `%LOCALAPPDATA%\\AutoDy`，用户可显式选择同时删除本地数据。\n\n### Fixed\n\n- 修复托盘启动健康检查在模块元数据快照暂缺 `required_autody_version` 时触发 PowerShell StrictMode 伪启动失败弹窗。\n- 收敛源码安装：前端按锁文件安装后构建、不完整 HKCU 注册残留安全处理、`install.cmd` 正确传播失败退出码。\n''', 1)
+              p.write_text(text, encoding='utf-8', newline='\n')
+
+          Path('docs/RELEASE_NOTES.md').write_text('''# AutoDy v1.5.4\n\nAutoDy v1.5.4 将当前已确认可用的发送与发送验证修复、源码安装修复和托盘启动修复收敛为新的公开发布身份，并新增面向普通用户的 EXE 安装入口。\n\n## 安装\n\n普通用户优先下载 `AutoDy-Setup-1.5.4.exe`。该 Setup EXE 使用 AutoDy 的 canonical MSI 作为安装 payload，因此既有升级、Repair、rollback、Scheduler 和 DataRoot 生命周期继续由 Windows Installer 管理。\n\n安装后 `D:\\AutoDy`（或安装时选定的程序目录）包含 `Uninstall AutoDy.exe`，开始菜单也提供“卸载 AutoDy”。卸载默认保留 `%LOCALAPPDATA%\\AutoDy` 用户数据；只有用户明确选择时才删除本地数据。\n\n## 发布资产\n\n- `AutoDy-Setup-1.5.4.exe`\n- `AutoDy-Setup-1.5.4.exe.sha256`\n- `AutoDy-1.5.4-x64.msi`\n- `AutoDy-1.5.4-x64.msi.sha256`\n- `AutoDy-Windows-Portable-1.5.4.zip`\n- `AutoDy-Windows-Portable-1.5.4.zip.sha256`\n- `release-manifest.json`\n\n## 修复\n\n- 保留当前可靠 post-send confirmation、当天投递证据和重复保护边界。\n- 修复模块元数据暂未就绪时的伪“AutoDy 启动失败”提示。\n- 源码安装按 `package-lock.json` 安装前端依赖后构建，可安全处理不完整 HKCU 注册残留，并正确传播安装失败退出码。\n''', encoding='utf-8', newline='\n')
+          PY
+
+      - name: Commit prepared packaging state
+        shell: bash
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml frontend/package.json frontend/package-lock.json packaging/wix/AutoDy.Package.wixproj packaging/wix/Product.wxs scripts/build-msi.ps1 scripts/build-portable.ps1 scripts/verify-msi-lifecycle.ps1 scripts/build-release-from-clean-source.ps1 scripts/write-release-manifest.ps1 scripts/verify-release-artifacts.ps1 CHANGELOG.md docs/RELEASE_NOTES.md
+          git commit -m "feat(release): prepare AutoDy 1.5.4 setup packaging"
+          git push origin HEAD:release/1.5.4-setup-exe
