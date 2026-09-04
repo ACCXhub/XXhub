@@ -1,0 +1,4 @@
+name: Publish AutoDy 1.5.4 existing tag
+
+on:
+  workflow_dispatch:
