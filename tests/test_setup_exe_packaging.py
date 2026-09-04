@@ -36,6 +36,11 @@ def test_setup_exe_is_a_wix_bundle_over_the_canonical_msi():
     assert 'AutoDy-Setup-$Version.exe' in setup_builder
     assert 'AutoDy-$Version-x64.msi' in setup_builder
     assert 'Get-FileHash -Algorithm SHA256' in setup_builder
+    assert setup_builder.index('$objRoot = Join-Path $Work "obj\\"') < setup_builder.index('& dotnet restore $Project')
+    restore_block = setup_builder[
+        setup_builder.index('& dotnet restore $Project') : setup_builder.index('if ($LASTEXITCODE -ne 0)')
+    ]
+    assert '"-p:BaseIntermediateOutputPath=$objRoot"' in restore_block
     assert "wixtoolset.sdk\\5.0.2\\tools\\net472\\x86\\wix.exe" in msi_builder
     assert "wixtoolset.ui.wixext\\5.0.2\\wixext5" in msi_builder
     assert "wixtoolset.util.wixext\\5.0.2\\wixext5" in msi_builder
