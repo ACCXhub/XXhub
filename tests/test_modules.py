@@ -59,6 +59,30 @@ def test_source_runtime_generates_current_package_without_reading_output_directo
     assert Path(info["path"]).is_file()
 
 
+def test_runtime_data_root_uses_program_root_test_center_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    program_root = tmp_path / "program"
+    data_root = tmp_path / "data-root"
+    (program_root / "src" / "autody").mkdir(parents=True)
+    (program_root / "src" / "autody" / "modules.py").write_text(
+        "# source marker",
+        encoding="utf-8",
+    )
+    build_module_archive(
+        data_root / "optional-modules" / "AutoDy-Test-Center.autody-module.zip",
+        version="1.1.0",
+    )
+    monkeypatch.setenv("AUTODY_PROGRAM_ROOT", str(program_root))
+    monkeypatch.setenv("AUTODY_HOME", str(data_root))
+
+    info = ensure_official_module_archive(data_root)
+
+    assert info["module_version"] == OFFICIAL_TEST_CENTER_VERSION
+    assert Path(info["path"]).resolve().is_relative_to(program_root.resolve())
+
+
 def test_stale_portable_bundle_is_rejected_instead_of_becoming_runtime_metadata(tmp_path: Path):
     build_module_archive(tmp_path / "optional-modules" / "AutoDy-Test-Center.autody-module.zip", version="1.1.0")
 
