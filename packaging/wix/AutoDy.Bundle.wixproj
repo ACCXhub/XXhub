@@ -2,13 +2,14 @@
   <PropertyGroup>
     <OutputType>Bundle</OutputType>
     <Platform>x64</Platform>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <ProductVersion Condition="'$(ProductVersion)' == ''">1.5.4</ProductVersion>
     <MsiPath Condition="'$(MsiPath)' == ''">$(MSBuildThisFileDirectory)..\..\output\release\v$(ProductVersion)\AutoDy-$(ProductVersion)-x64.msi</MsiPath>
     <DefineConstants>$(DefineConstants);ProductVersion=$(ProductVersion);MsiPath=$(MsiPath)</DefineConstants>
     <OutputName>AutoDy-Setup-$(ProductVersion)</OutputName>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Remove="Product.wxs" />
+    <Compile Include="Bundle.wxs" />
     <PackageReference Include="WixToolset.Bal.wixext" Version="5.0.2" />
   </ItemGroup>
 </Project>
