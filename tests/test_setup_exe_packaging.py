@@ -25,8 +25,11 @@ def test_setup_exe_is_a_wix_bundle_over_the_canonical_msi():
     assert 'PackageReference Include="WixToolset.UI.wixext" Version="5.0.2"' in package_project
     assert 'PackageReference Include="WixToolset.Util.wixext" Version="5.0.2"' in package_project
     assert '<OutputType>Bundle</OutputType>' in project
-    assert '<Compile Remove="Product.wxs" />' in project
-    assert '<Compile Remove="Bundle.wxs" />' in package_project
+    assert '<EnableDefaultCompileItems>false</EnableDefaultCompileItems>' in project
+    assert '<Compile Include="Bundle.wxs" />' in project
+    assert '<EnableDefaultCompileItems>false</EnableDefaultCompileItems>' in package_project
+    assert '<Compile Include="Product.wxs" />' in package_project
+    assert '<Compile Include="$(GeneratedWxs)" />' in package_project
     assert 'bal:WixStandardBootstrapperApplication' in bundle
     assert 'MsiPackage SourceFile="$(var.MsiPath)"' in bundle
     assert 'AutoDy-Setup-$Version.exe' in builder
