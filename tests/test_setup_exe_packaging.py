@@ -19,8 +19,11 @@ def test_setup_exe_is_a_wix_bundle_over_the_canonical_msi():
     bundle = Path("packaging/wix/Bundle.wxs").read_text(encoding="utf-8")
     builder = Path("scripts/build-setup-exe.ps1").read_text(encoding="utf-8-sig")
 
-    assert 'Sdk="WixToolset.Sdk/7.0.0"' in project
-    assert 'PackageReference Include="WixToolset.Bal.wixext" Version="7.0.0"' in project
+    assert 'Sdk="WixToolset.Sdk/5.0.2"' in project
+    assert 'Sdk="WixToolset.Sdk/5.0.2"' in package_project
+    assert 'PackageReference Include="WixToolset.Bal.wixext" Version="5.0.2"' in project
+    assert 'PackageReference Include="WixToolset.UI.wixext" Version="5.0.2"' in package_project
+    assert 'PackageReference Include="WixToolset.Util.wixext" Version="5.0.2"' in package_project
     assert '<OutputType>Bundle</OutputType>' in project
     assert '<Compile Remove="Product.wxs" />' in project
     assert '<Compile Remove="Bundle.wxs" />' in package_project
