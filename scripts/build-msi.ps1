@@ -37,9 +37,9 @@ $NuGetPackages = if ([string]::IsNullOrWhiteSpace($env:NUGET_PACKAGES)) {
 } else {
     $env:NUGET_PACKAGES
 }
-$WixCli = Join-Path $NuGetPackages 'wixtoolset.sdk\7.0.0\tools\net8.0\wix.dll'
-$WixUiExtension = Join-Path $NuGetPackages 'wixtoolset.ui.wixext\7.0.0\wixext7\WixToolset.UI.wixext.dll'
-$WixUtilExtension = Join-Path $NuGetPackages 'wixtoolset.util.wixext\7.0.0\wixext7\WixToolset.Util.wixext.dll'
+$WixCli = Join-Path $NuGetPackages 'wixtoolset.sdk\5.0.2\tools\net472\x86\wix.exe'
+$WixUiExtension = Join-Path $NuGetPackages 'wixtoolset.ui.wixext\5.0.2\wixext5\WixToolset.UI.wixext.dll'
+$WixUtilExtension = Join-Path $NuGetPackages 'wixtoolset.util.wixext\5.0.2\wixext5\WixToolset.Util.wixext.dll'
 $BuiltMsi = Join-Path $DotnetOutput "AutoDy-$Version-x64.msi"
 if (Test-Path -LiteralPath (Join-Path $Root '.git')) {
     $head = (& git -C $Root rev-parse HEAD).Trim()
@@ -79,11 +79,10 @@ $CompileArguments = @(
     "-p:ProductCode=$ProductCode",
     "-p:StageDir=$Stage",
     "-p:GeneratedWxs=$GeneratedWxs",
-    '-p:AcceptEula=wix7',
     "-p:OutputPath=$WixLibraryOutput"
 )
 $LinkArguments = @(
-    $WixCli, 'build', '--acceptEula', 'wix7', '--nologo',
+    'build', '--nologo',
     $WixLibrary,
     '-ext', $WixUiExtension,
     '-ext', $WixUtilExtension,
@@ -707,9 +706,9 @@ Set-WixLibrarySummaryInformation -Path $WixLibrary -StablePackageCode $PackageCo
 New-Item -ItemType Directory -Force -Path $DotnetOutput | Out-Null
 if (-not (Test-Path -LiteralPath $WixCli -PathType Leaf) -or
     -not (Test-Path -LiteralPath $WixUiExtension -PathType Leaf)) {
-    throw 'Restored WiX 7 tooling is missing.'
+    throw 'Restored WiX 5 tooling is missing.'
 }
-Invoke-NativeChecked "Link WiX MSI" "dotnet" $LinkArguments
+Invoke-NativeChecked "Link WiX MSI" $WixCli $LinkArguments
 if (-not (Test-Path -LiteralPath $BuiltMsi -PathType Leaf)) {
     throw "WiX build did not produce the expected MSI."
 }
