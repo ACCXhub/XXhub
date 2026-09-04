@@ -97,9 +97,14 @@ internal static class Program
                 }
             }
         }
-        catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
+        catch (Win32Exception ex)
         {
-            return 0;
+            if (ex.NativeErrorCode == 1223)
+            {
+                return 0;
+            }
+            MessageBox.Show("卸载失败：" + ex.Message, "卸载 AutoDy", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return 1;
         }
         catch (Exception ex)
         {
