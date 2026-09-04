@@ -2,12 +2,15 @@ name: Release
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - "v1.5.4"
 
 permissions:
   contents: write
 
 env:
-  AUTODY_RELEASE_VERSION: "1.5.3"
+  AUTODY_RELEASE_VERSION: "1.5.4"
   AUTODY_PREVIOUS_VERSION: "1.4.4"
 
 jobs:
@@ -79,6 +82,9 @@ jobs:
           .\scripts\build-msi.ps1 `
             -Version $env:AUTODY_RELEASE_VERSION `
             -Commit $env:GITHUB_SHA
+          .\scripts\build-setup-exe.ps1 `
+            -Version $env:AUTODY_RELEASE_VERSION `
+            -ArtifactDirectory "output\release\v$env:AUTODY_RELEASE_VERSION"
           .\scripts\verify-msi-lifecycle.ps1 `
             -Version $env:AUTODY_RELEASE_VERSION `
             -PreviousVersion $env:AUTODY_PREVIOUS_VERSION `
@@ -101,11 +107,13 @@ jobs:
         with:
           fail_on_unmatched_files: true
           files: |
-            output/release/v1.5.3/AutoDy-1.5.3-x64.msi
-            output/release/v1.5.3/AutoDy-1.5.3-x64.msi.sha256
-            output/release/v1.5.3/AutoDy-Windows-Portable-1.5.3.zip
-            output/release/v1.5.3/AutoDy-Windows-Portable-1.5.3.zip.sha256
-            output/release/v1.5.3/release-manifest.json
+            output/release/v1.5.4/AutoDy-Setup-1.5.4.exe
+            output/release/v1.5.4/AutoDy-Setup-1.5.4.exe.sha256
+            output/release/v1.5.4/AutoDy-1.5.4-x64.msi
+            output/release/v1.5.4/AutoDy-1.5.4-x64.msi.sha256
+            output/release/v1.5.4/AutoDy-Windows-Portable-1.5.4.zip
+            output/release/v1.5.4/AutoDy-Windows-Portable-1.5.4.zip.sha256
+            output/release/v1.5.4/release-manifest.json
           body_path: docs/RELEASE_NOTES.md
 
   verify-public-assets:
@@ -124,6 +132,8 @@ jobs:
           gh release download "v$env:AUTODY_RELEASE_VERSION" --dir $download
           $names = @(Get-ChildItem $download -File | Select-Object -ExpandProperty Name | Sort-Object)
           $expected = @(
+            "AutoDy-Setup-$env:AUTODY_RELEASE_VERSION.exe",
+            "AutoDy-Setup-$env:AUTODY_RELEASE_VERSION.exe.sha256",
             "AutoDy-$env:AUTODY_RELEASE_VERSION-x64.msi",
             "AutoDy-$env:AUTODY_RELEASE_VERSION-x64.msi.sha256",
             "AutoDy-Windows-Portable-$env:AUTODY_RELEASE_VERSION.zip",
