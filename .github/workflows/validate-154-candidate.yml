@@ -54,6 +54,30 @@ jobs:
             -PreviousVersion 1.4.4 `
             -PreviousMsiPath "output\baselines\v1.4.4\AutoDy-1.4.4-x64.msi" `
             -Commit $env:GITHUB_SHA
+      - name: Dump MSI CustomAction table after build failure
+        if: failure()
+        shell: powershell
+        run: |
+          $msi = "output\release\v1.5.4\AutoDy-1.5.4-x64.msi"
+          if (-not (Test-Path -LiteralPath $msi -PathType Leaf)) {
+            Write-Host "MSI unavailable; nothing to inspect."
+            exit 0
+          }
+          $installer = New-Object -ComObject WindowsInstaller.Installer
+          $database = $installer.OpenDatabase((Resolve-Path $msi).Path, 0)
+          try {
+            $view = $database.OpenView('SELECT `Action`,`Type`,`Source`,`Target` FROM `CustomAction` ORDER BY `Action`')
+            [void]$view.Execute()
+            while ($record = $view.Fetch()) {
+              Write-Host ("CUSTOMACTION|{0}|{1}|{2}|{3}" -f $record.StringData(1), $record.IntegerData(2), $record.StringData(3), $record.StringData(4))
+              [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($record)
+            }
+            [void]$view.Close()
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($view)
+          } finally {
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($database)
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($installer)
+          }
       - name: Verify candidate asset set
         shell: powershell
         run: |
