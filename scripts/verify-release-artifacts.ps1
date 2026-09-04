@@ -364,6 +364,8 @@ try {
                 [pscustomobject]@{ Action = 'RepairInstalledAutoDyTasks'; Type = '3073'; Source = 'Wix4UtilCA_X64'; Target = 'WixQuietExec' },
                 [pscustomobject]@{ Action = 'SetRemoveInstalledAutoDyTasksData'; Type = '51'; Source = 'RemoveInstalledAutoDyTasks'; Target = '"[SystemFolder]WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "[INSTALLFOLDER]scripts\remove-task.ps1"' },
                 [pscustomobject]@{ Action = 'RemoveInstalledAutoDyTasks'; Type = '3073'; Source = 'Wix4UtilCA_X64'; Target = 'WixQuietExec' },
+                [pscustomobject]@{ Action = 'WixUIPrintEula_X64'; Type = '65'; Source = 'WixUiCa_X64'; Target = 'PrintEula' },
+                [pscustomobject]@{ Action = 'WixUIValidatePath_X64'; Type = '65'; Source = 'WixUiCa_X64'; Target = 'ValidatePath' },
                 [pscustomobject]@{ Action = 'Wix4RemoveFoldersEx_X64'; Type = '65'; Source = 'Wix4UtilCA_X64'; Target = 'WixRemoveFoldersEx' }
             )
             $unexpectedCustomAction = $customActionRows.Count -ne $expectedCustomActions.Count

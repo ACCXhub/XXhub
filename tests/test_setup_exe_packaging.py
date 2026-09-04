@@ -70,6 +70,7 @@ def test_release_pipeline_builds_and_publishes_setup_exe_assets():
         encoding="utf-8-sig"
     )
     manifest = Path("scripts/write-release-manifest.ps1").read_text(encoding="utf-8-sig")
+    verifier = Path("scripts/verify-release-artifacts.ps1").read_text(encoding="utf-8-sig")
     workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
 
     assert "build-setup-exe.ps1" in release_script
@@ -79,3 +80,5 @@ def test_release_pipeline_builds_and_publishes_setup_exe_assets():
     assert "output/release/v1.5.4/AutoDy-Setup-1.5.4.exe.sha256" in workflow
     assert '"AutoDy-Setup-$env:AUTODY_RELEASE_VERSION.exe"' in workflow
     assert '"AutoDy-Setup-$env:AUTODY_RELEASE_VERSION.exe.sha256"' in workflow
+    assert "WixUIPrintEula_X64" in verifier
+    assert "WixUIValidatePath_X64" in verifier
