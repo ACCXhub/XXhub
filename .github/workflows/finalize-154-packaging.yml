@@ -1,0 +1,67 @@
+name: Finalize AutoDy 1.5.4 packaging
+
+on:
+  push:
+    branches:
+      - release/1.5.4-setup-exe
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/1.5.4-setup-exe
+          fetch-depth: 0
+      - name: Fix canonical MSI ownership and verifier
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          # Product.wxs: define the helper component exactly once.
+          p = Path('packaging/wix/Product.wxs')
+          text = p.read_text(encoding='utf-8')
+          marker = '''    <Component\n      Id="ShortcutComponent"\n      Directory="INSTALLFOLDER"\n      Guid="0D3D1771-81B4-4D42-8DD8-1E13D093399B">'''
+          helper = '''    <Component\n      Id="UninstallHelperComponent"\n      Directory="INSTALLFOLDER"\n      Guid="7B7FCB2D-C2F5-4BB0-9D95-933C7C16C09D">\n      <File\n        Id="UninstallHelperExe"\n        Source="$(var.StageDir)\\Uninstall AutoDy.exe"\n        Name="Uninstall AutoDy.exe"\n        KeyPath="yes" />\n    </Component>\n'''
+          if '<Component\n      Id="UninstallHelperComponent"' not in text:
+              if marker not in text:
+                  raise SystemExit('ShortcutComponent marker not found')
+              text = text.replace(marker, helper + marker, 1)
+          p.write_text(text, encoding='utf-8', newline='\n')
+
+          # build-msi.ps1: the explicit helper component owns the EXE, so remove it
+          # from the generic generated payload component group.
+          p = Path('scripts/build-msi.ps1')
+          text = p.read_text(encoding='utf-8-sig')
+          old = '''    foreach ($file in ($stagedFiles | Sort-Object {\n        Get-StableId $_.FullName.Substring($Stage.Length + 1)\n    })) {'''
+          new = '''    $generatedPayloadFiles = @($stagedFiles | Where-Object {\n        $_.FullName.Substring($Stage.Length + 1) -ne "Uninstall AutoDy.exe"\n    })\n    foreach ($file in ($generatedPayloadFiles | Sort-Object {\n        Get-StableId $_.FullName.Substring($Stage.Length + 1)\n    })) {'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif '$generatedPayloadFiles = @($stagedFiles | Where-Object {' not in text:
+              raise SystemExit('generic payload loop marker not found')
+          p.write_text(text, encoding='utf-8-sig', newline='\n')
+
+          # Release verification now expects the visible uninstall shortcut.
+          p = Path('scripts/verify-release-artifacts.ps1')
+          text = p.read_text(encoding='utf-8-sig')
+          old = '''                [pscustomobject]@{\n                    Id = 'UninstallShortcut'\n                    Target = '[SystemFolder]msiexec.exe'\n                    Arguments = '/x [ProductCode]'\n                }'''
+          new = '''                [pscustomobject]@{\n                    Id = 'UninstallShortcut'\n                    Target = '[INSTALLFOLDER]Uninstall AutoDy.exe'\n                    Arguments = ''\n                }'''
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif "Target = '[INSTALLFOLDER]Uninstall AutoDy.exe'" not in text:
+              raise SystemExit('uninstall shortcut verifier marker not found')
+          p.write_text(text, encoding='utf-8-sig', newline='\n')
+          PY
+      - name: Commit final packaging fixes
+        shell: bash
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packaging/wix/Product.wxs scripts/build-msi.ps1 scripts/verify-release-artifacts.ps1
+          git commit -m "fix(packaging): finalize uninstall helper ownership"
+          git push origin HEAD:release/1.5.4-setup-exe
