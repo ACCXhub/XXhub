@@ -627,7 +627,10 @@ try {
     $writer.WriteStartElement("Fragment")
     $writer.WriteStartElement("ComponentGroup")
     $writer.WriteAttributeString("Id", "PayloadComponents")
-    foreach ($file in ($stagedFiles | Sort-Object {
+    $generatedPayloadFiles = @($stagedFiles | Where-Object {
+        $_.FullName.Substring($Stage.Length + 1) -ne "Uninstall AutoDy.exe"
+    })
+    foreach ($file in ($generatedPayloadFiles | Sort-Object {
         Get-StableId $_.FullName.Substring($Stage.Length + 1)
     })) {
         $relative = $file.FullName.Substring($Stage.Length + 1)

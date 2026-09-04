@@ -327,8 +327,8 @@ try {
                 },
                 [pscustomobject]@{
                     Id = 'UninstallShortcut'
-                    Target = '[SystemFolder]msiexec.exe'
-                    Arguments = '/x [ProductCode]'
+                    Target = '[INSTALLFOLDER]Uninstall AutoDy.exe'
+                    Arguments = ''
                 }
             )
             if ($shortcutRows.Count -ne $expectedShortcuts.Count) {
