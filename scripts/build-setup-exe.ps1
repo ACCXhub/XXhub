@@ -24,6 +24,8 @@ $Project = Join-Path $Root "packaging\wix\AutoDy.Bundle.wixproj"
 $Work = Join-Path $Root "output\work\setup-exe\v$Version"
 $OutputName = "AutoDy-Setup-$Version.exe"
 $OutputPath = Join-Path $ArtifactDirectory $OutputName
+$binRoot = Join-Path $Work "bin\"
+$objRoot = Join-Path $Work "obj\"
 
 if (Test-Path -LiteralPath $Work) {
     Remove-Item -LiteralPath $Work -Recurse -Force
@@ -31,13 +33,13 @@ if (Test-Path -LiteralPath $Work) {
 New-Item -ItemType Directory -Force -Path $Work, $ArtifactDirectory | Out-Null
 
 Write-Host "[BUILD] Building AutoDy Setup EXE over canonical MSI."
-& dotnet restore $Project --nologo
+& dotnet restore $Project `
+    --nologo `
+    "-p:BaseIntermediateOutputPath=$objRoot"
 if ($LASTEXITCODE -ne 0) {
     throw "Restore AutoDy setup bundle failed with exit code $LASTEXITCODE."
 }
 
-$binRoot = Join-Path $Work "bin\"
-$objRoot = Join-Path $Work "obj\"
 & dotnet build $Project `
     -c Release `
     --no-restore `
