@@ -1,6 +1,6 @@
-param(
+﻿param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '1.5.3',
+    [string]$Version = '1.5.4',
     [ValidatePattern('^$|^[0-9a-fA-F]{40}$')]
     [string]$Commit = ''
 )
@@ -14,6 +14,8 @@ $Msi = Join-Path $ReleaseDirectory "AutoDy-$Version-x64.msi"
 $MsiChecksum = "$Msi.sha256"
 $Portable = Join-Path $ReleaseDirectory "AutoDy-Windows-Portable-$Version.zip"
 $PortableChecksum = "$Portable.sha256"
+$Setup = Join-Path $ReleaseDirectory "AutoDy-Setup-$Version.exe"
+$SetupChecksum = "$Setup.sha256"
 $PrivacyReport = Join-Path $ReleaseDirectory 'release-privacy-report.json'
 $LifecycleReport = Join-Path $ReleaseDirectory 'msi-lifecycle-report.json'
 $ManifestPath = Join-Path $ReleaseDirectory 'release-manifest.json'
@@ -42,11 +44,11 @@ if ($pyproject -notmatch "(?m)^version\s*=\s*`"$([regex]::Escape($Version))`"\s*
     throw 'Source version does not match the requested release version.'
 }
 
-$artifactPaths = @($Msi, $MsiChecksum, $Portable, $PortableChecksum)
+$artifactPaths = @($Msi, $MsiChecksum, $Portable, $PortableChecksum, $Setup, $SetupChecksum)
 foreach ($path in $artifactPaths) {
     $null = Assert-CanonicalReleaseArtifact -Root $Root -Version $Version -Path $path
 }
-foreach ($pair in @(@($Msi, $MsiChecksum), @($Portable, $PortableChecksum))) {
+foreach ($pair in @(@($Msi, $MsiChecksum), @($Portable, $PortableChecksum), @($Setup, $SetupChecksum))) {
     $file = $pair[0]
     $sidecar = $pair[1]
     $expected = "$(Get-ReleaseFileSha256 -Path $file)  $([IO.Path]::GetFileName($file))"

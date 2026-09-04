@@ -1,10 +1,10 @@
-[build-system]
+﻿[build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
 name = "autody"
-version = "1.5.3"
+version = "1.5.4"
 description = "Windows-local daily Douyin spark message automation"
 requires-python = ">=3.11"
 dependencies = [

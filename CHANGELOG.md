@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [1.5.4] - 2026-09-04
+
+### Added
+
+- 新增 `AutoDy-Setup-1.5.4.exe` 作为普通用户主安装入口，底层继续使用 canonical MSI 负责升级、Repair、rollback 与卸载生命周期。
+- 安装目录新增 `Uninstall AutoDy.exe`，开始菜单“卸载 AutoDy”统一打开该卸载程序；默认保留 `%LOCALAPPDATA%\AutoDy`，用户可显式选择同时删除本地数据。
+
+### Fixed
+
+- 修复托盘启动健康检查在模块元数据快照暂缺 `required_autody_version` 时触发 PowerShell StrictMode 伪启动失败弹窗。
+- 收敛源码安装：前端按锁文件安装后构建、不完整 HKCU 注册残留安全处理、`install.cmd` 正确传播失败退出码。
+
 ## [1.5.3] - 2026-09-02
 
 ### Fixed

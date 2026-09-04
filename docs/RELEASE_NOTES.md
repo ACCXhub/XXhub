@@ -1,15 +1,25 @@
-# AutoDy 当前源码状态
+# AutoDy v1.5.4
 
-当前 `main` 是维护与本机运行的 canonical source。源码版本线仍为 1.5.3，但 v1.5.2/v1.5.3 的公开 Release 与标签已经退役，不再作为可下载安装来源。
+AutoDy v1.5.4 将当前已确认可用的发送与发送验证修复、源码安装修复和托盘启动修复收敛为新的公开发布身份，并新增面向普通用户的 EXE 安装入口。
 
-## 当前已收敛修复
+## 安装
 
-- 恢复可靠的发送后确认与当天投递证据边界。
-- 源码安装会先按 `package-lock.json` 执行 `npm ci`，再构建前端。
-- 源码安装可容忍仅残留部分 HKCU AutoDy 注册值，不再因缺失 `InstallFolder` / `DataRoot` 直接失败。
-- `install.cmd` 会把 PowerShell 安装异常正确传播为非零退出码。
-- 托盘启动健康检查会先验证模块元数据字段是否存在；暂时缺少 `required_autody_version` 时按未就绪处理，不再弹出伪“AutoDy 启动失败”。
+普通用户优先下载 `AutoDy-Setup-1.5.4.exe`。该 Setup EXE 使用 AutoDy 的 canonical MSI 作为安装 payload，因此既有升级、Repair、rollback、Scheduler 和 DataRoot 生命周期继续由 Windows Installer 管理。
 
-## 发布状态
+安装后 `D:\AutoDy`（或安装时选定的程序目录）包含 `Uninstall AutoDy.exe`，开始菜单也提供“卸载 AutoDy”。卸载默认保留 `%LOCALAPPDATA%\AutoDy` 用户数据；只有用户明确选择时才删除本地数据。
 
-当前公开推荐安装基线为 v1.4.4。下一次公开发布应使用新的版本身份，并从当前 `main` 重新构建、校验 MSI/Portable、checksum 与 release manifest 后再发布。
+## 发布资产
+
+- `AutoDy-Setup-1.5.4.exe`
+- `AutoDy-Setup-1.5.4.exe.sha256`
+- `AutoDy-1.5.4-x64.msi`
+- `AutoDy-1.5.4-x64.msi.sha256`
+- `AutoDy-Windows-Portable-1.5.4.zip`
+- `AutoDy-Windows-Portable-1.5.4.zip.sha256`
+- `release-manifest.json`
+
+## 修复
+
+- 保留当前可靠 post-send confirmation、当天投递证据和重复保护边界。
+- 修复模块元数据暂未就绪时的伪“AutoDy 启动失败”提示。
+- 源码安装按 `package-lock.json` 安装前端依赖后构建，可安全处理不完整 HKCU 注册残留，并正确传播安装失败退出码。

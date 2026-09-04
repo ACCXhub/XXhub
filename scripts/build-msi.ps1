@@ -1,6 +1,6 @@
-param(
+﻿param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = "1.5.3",
+    [string]$Version = "1.5.4",
     [ValidatePattern('^$|^[0-9a-fA-F]{40}$')]
     [string]$Commit = '',
     [switch]$ReuseRuntime,
@@ -528,7 +528,27 @@ $moduleCommand = "from pathlib import Path; from autody.modules import build_off
 Invoke-NativeChecked "Build optional Test Center package" $HostPython @("-c", $moduleCommand)
 "installed" | Set-Content -LiteralPath (Join-Path $Stage "runtime\distribution-mode.txt") -Encoding ascii -NoNewline
 
-$allowedExact = @($releaseFiles.Values) + @("optional-modules\AutoDy-Test-Center.autody-module.zip")
+$uninstallerSource = Join-Path $Root "packaging\uninstall\Program.cs"
+$uninstallerGeneratedSource = Join-Path $Work "Uninstall.AutoDy.generated.cs"
+$uninstallerExe = Join-Path $Stage "Uninstall AutoDy.exe"
+$cscCandidates = @(
+    (Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"),
+    (Join-Path $env:WINDIR "Microsoft.NET\Framework\v4.0.30319\csc.exe")
+)
+$csc = $cscCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+if (-not $csc) { throw "Build AutoDy uninstaller requires the Windows .NET Framework C# compiler." }
+$uninstallerCode = (Get-Content -Raw -LiteralPath $uninstallerSource).Replace('__PRODUCT_CODE__', $ProductCode)
+[IO.File]::WriteAllText($uninstallerGeneratedSource, $uninstallerCode, (New-Object Text.UTF8Encoding($true)))
+Write-Host "[BUILD] Build AutoDy uninstaller"
+& $csc /nologo /target:winexe /optimize+ /platform:anycpu /reference:System.dll /reference:System.Windows.Forms.dll /reference:System.Drawing.dll "/out:$uninstallerExe" $uninstallerGeneratedSource
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $uninstallerExe -PathType Leaf)) {
+    throw "Build AutoDy uninstaller failed."
+}
+
+$allowedExact = @($releaseFiles.Values) + @(
+    "optional-modules\AutoDy-Test-Center.autody-module.zip",
+    "Uninstall AutoDy.exe"
+)
 $stagedFiles = @(Get-ChildItem -LiteralPath $Stage -Recurse -Force -File)
 foreach ($file in $stagedFiles) {
     $relative = $file.FullName.Substring($Stage.Length + 1)

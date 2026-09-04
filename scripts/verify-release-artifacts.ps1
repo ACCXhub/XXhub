@@ -1,6 +1,6 @@
-param(
+﻿param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = "1.5.3",
+    [string]$Version = "1.5.4",
     [string]$ArtifactDirectory,
     [string]$ReportDirectory
 )
@@ -30,6 +30,8 @@ $Msi = Join-Path $ArtifactRoot "AutoDy-$Version-x64.msi"
 $Portable = Join-Path $ArtifactRoot "AutoDy-Windows-Portable-$Version.zip"
 $MsiChecksum = "$Msi.sha256"
 $PortableChecksum = "$Portable.sha256"
+$Setup = Join-Path $ArtifactRoot "AutoDy-Setup-$Version.exe"
+$SetupChecksum = "$Setup.sha256"
 $ReportJson = Join-Path $ReportRoot "release-privacy-report.json"
 $ReportMarkdown = Join-Path $ReportRoot "release-privacy-report.md"
 $Work = Join-Path $Output "work\release-privacy-v$Version"
@@ -162,7 +164,7 @@ $counts = [ordered]@{
 $artifacts = @()
 $d3dCompiler = $null
 
-foreach ($artifact in @($Msi, $MsiChecksum, $Portable, $PortableChecksum)) {
+foreach ($artifact in @($Msi, $MsiChecksum, $Portable, $PortableChecksum, $Setup, $SetupChecksum)) {
     if (-not (Test-Path -LiteralPath $artifact -PathType Leaf)) {
         [void]$findings.Add([ordered]@{
             category = "missing_artifact"
@@ -183,10 +185,12 @@ if (
     (Test-Path -LiteralPath $Msi -PathType Leaf) -and
     (Test-Path -LiteralPath $MsiChecksum -PathType Leaf) -and
     (Test-Path -LiteralPath $Portable -PathType Leaf) -and
-    (Test-Path -LiteralPath $PortableChecksum -PathType Leaf)
+    (Test-Path -LiteralPath $PortableChecksum -PathType Leaf) -and
+    (Test-Path -LiteralPath $Setup -PathType Leaf) -and
+    (Test-Path -LiteralPath $SetupChecksum -PathType Leaf)
 ) {
     $checksumMismatch = $false
-    foreach ($pair in @(@($Msi, $MsiChecksum), @($Portable, $PortableChecksum))) {
+    foreach ($pair in @(@($Msi, $MsiChecksum), @($Portable, $PortableChecksum), @($Setup, $SetupChecksum))) {
         $expected = "$(Get-ReleaseFileSha256 -Path $pair[0])  $([IO.Path]::GetFileName($pair[0]))"
         if ((Get-Content -Raw -LiteralPath $pair[1]).Trim() -ne $expected) {
             $checksumMismatch = $true

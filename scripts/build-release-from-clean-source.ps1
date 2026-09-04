@@ -1,6 +1,6 @@
-param(
+﻿param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '1.5.3',
+    [string]$Version = '1.5.4',
     [ValidatePattern('^\d+\.\d+\.\d+$')]
     [string]$PreviousVersion = '1.4.4',
     [string]$PreviousMsiPath,
@@ -39,6 +39,8 @@ Write-Host '[INFO] Skipping long release_build reproducibility tests for the lig
 if ($LASTEXITCODE -ne 0) { throw 'Portable build failed.' }
 & (Join-Path $PSScriptRoot 'build-msi.ps1') -Version $Version -Commit $Commit
 if ($LASTEXITCODE -ne 0) { throw 'MSI Release build failed.' }
+& (Join-Path $PSScriptRoot 'build-setup-exe.ps1') -Version $Version -ArtifactDirectory $ReleaseDirectory
+if ($LASTEXITCODE -ne 0) { throw 'Setup EXE build failed.' }
 & (Join-Path $PSScriptRoot 'verify-release-artifacts.ps1') `
     -Version $Version -ArtifactDirectory $ReleaseDirectory -ReportDirectory $ReleaseDirectory
 if ($LASTEXITCODE -ne 0) { throw 'Release artifact verification failed.' }

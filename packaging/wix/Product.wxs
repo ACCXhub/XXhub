@@ -184,6 +184,7 @@
     </InstallExecuteSequence>
     <Feature Id="MainFeature" Title="AutoDy" Level="1" AllowAdvertise="no">
       <ComponentGroupRef Id="PayloadComponents" />
+      <ComponentRef Id="UninstallHelperComponent" />
       <ComponentRef Id="DataRootComponent" />
       <ComponentRef Id="ShortcutComponent" />
     </Feature>
@@ -250,8 +251,8 @@
         Directory="AutoDyProgramMenuFolder"
         Name="卸载 AutoDy"
         Description="卸载 AutoDy"
-        Target="[SystemFolder]msiexec.exe"
-        Arguments="/x [ProductCode]"
+        Target="[INSTALLFOLDER]Uninstall AutoDy.exe"
+        WorkingDirectory="INSTALLFOLDER"
         Icon="AutoDyIcon" />
       <RemoveFolder Id="RemoveAutoDyProgramMenuFolder" Directory="AutoDyProgramMenuFolder" On="uninstall" />
       <RegistryValue

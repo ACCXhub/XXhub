@@ -1,8 +1,8 @@
-<Project Sdk="WixToolset.Sdk/7.0.0">
+﻿<Project Sdk="WixToolset.Sdk/7.0.0">
   <PropertyGroup>
     <OutputType>Package</OutputType>
     <Platform>x64</Platform>
-    <ProductVersion Condition="'$(ProductVersion)' == ''">1.5.3</ProductVersion>
+    <ProductVersion Condition="'$(ProductVersion)' == ''">1.5.4</ProductVersion>
     <ProductCode Condition="'$(ProductCode)' == ''">*</ProductCode>
     <StageDir Condition="'$(StageDir)' == ''">$(MSBuildProjectDirectory)\stage</StageDir>
     <GeneratedWxs Condition="'$(GeneratedWxs)' == ''">$(MSBuildProjectDirectory)\GeneratedFiles.wxs</GeneratedWxs>
