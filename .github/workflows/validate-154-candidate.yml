@@ -33,13 +33,16 @@ jobs:
           python -m pytest tests/test_setup_exe_packaging.py -q
       - name: Download verified v1.4.4 baseline
         shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $baseline = "output\baselines\v1.4.4"
           New-Item -ItemType Directory -Force $baseline | Out-Null
+          gh release download v1.4.4 `
+            --repo ACCXhub/XXhub `
+            --pattern "AutoDy-1.4.4-x64.msi" `
+            --dir $baseline
           $previous = Join-Path $baseline "AutoDy-1.4.4-x64.msi"
-          Invoke-WebRequest `
-            -Uri "https://github.com/ACCXhub/XXhub/releases/download/v1.4.4/AutoDy-1.4.4-x64.msi" `
-            -OutFile $previous -UseBasicParsing
           if ((Get-FileHash -Algorithm SHA256 $previous).Hash.ToLowerInvariant() -ne "bea7a7e7495c0137d33463f504d2999dcef250e7df7766c90eb0dbcb4a1daa10") {
             throw "v1.4.4 baseline hash mismatch"
           }
