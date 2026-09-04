@@ -441,8 +441,24 @@ function Get-ExpectedVersions {
 function Test-HealthyAutoDy($Snapshot, $Expected) {
     if (-not (Test-OwnedAutoDy $Snapshot $Expected.Core) -or $null -eq $Snapshot.Modules) { return $false }
     $module = @($Snapshot.Modules.modules | Where-Object { $_.id -eq "autody-test-center" }) | Select-Object -First 1
-    return $Snapshot.Identity.version -eq $Expected.Core -and $module.bundled_version -eq $Expected.Module -and
-        $module.bundled_package.required_autody_version -eq ">=1.3.0,<2.0.0" -and $module.bundled_available
+    if ($null -eq $module) { return $false }
+
+    $bundledVersionProperty = $module.PSObject.Properties["bundled_version"]
+    $bundledPackageProperty = $module.PSObject.Properties["bundled_package"]
+    $bundledAvailableProperty = $module.PSObject.Properties["bundled_available"]
+    if ($null -eq $bundledVersionProperty -or $null -eq $bundledPackageProperty -or $null -eq $bundledAvailableProperty) {
+        return $false
+    }
+
+    $bundledPackage = $bundledPackageProperty.Value
+    if ($null -eq $bundledPackage) { return $false }
+    $requiredVersionProperty = $bundledPackage.PSObject.Properties["required_autody_version"]
+    if ($null -eq $requiredVersionProperty) { return $false }
+
+    return $Snapshot.Identity.version -eq $Expected.Core -and
+        $bundledVersionProperty.Value -eq $Expected.Module -and
+        $requiredVersionProperty.Value -eq ">=1.3.0,<2.0.0" -and
+        [bool]$bundledAvailableProperty.Value
 }
 
 function Stop-ManagedService {
