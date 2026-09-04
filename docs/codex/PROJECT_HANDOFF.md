@@ -1,21 +1,29 @@
 # AutoDy 项目交接
 
-## 当前检查点
+## 当前 Master
 
-- `v1.5.3` release source 是 `39e413b64d8174a7e1e71107b0f5b154f7a69779`，已推送到 `origin/main`；annotated tag `v1.5.3` 的对象为 `fa41d5a69a37ac4c959bd3ec8e2a0e85a1aadebd`，指向该 source。不要移动 tag 或替换公开资产。
-- 正式 Release workflow `33629891971` 已成功：`build-accept-publish` 与 `verify-public-assets` 均通过。公开 MSI、Portable、两份 SHA-256 和 `release-manifest.json` 已发布，且已在本机重新下载并经 `scripts/verify-release-artifacts.ps1` 验证。
-- 已由公开 `AutoDy-1.5.3-x64.msi` 完成本机管理员升级；已安装服务的 Python、package 与静态资源均归属 `D:\AutoDy`，版本为 `1.5.3`。三个 Scheduler task 均启用并指向该 ProgramRoot。
-- 持久 DataRoot 的 `state.json`、两份投递历史、`config.yaml` 和 `messages.txt` 在升级前后及最终验收中保持哈希一致。当天 9 个启用目标均为 `pending`，成功数为 0、未完成，且没有投递 runner；本次验收未访问抖音、未输入、未发送。
-- 下一个交接记录提交只更新本文档，位于 release tag 之后；它不属于不可变的 v1.5.3 release source，因此 `main` 将领先 `v1.5.3`。
+- Canonical repo：`ACCXhub/XXhub`，canonical branch：`main`。
+- 当前可用运行时代码检查点：`2ee9c22e2059f8a78570e7e7c5925ab5949706d5`。
+- 当前源码版本线：`1.5.3`；本机维护继续以源码直运行为主。
+- 当前公开推荐安装基线：`v1.4.4`。
 
-## 已执行的 release 证据
+## 当前已收敛
 
-- 针对修复的 focused Python suite 为 `5 passed`；完整非 `release_build` Python suite 为 `616 passed, 2 deselected`。Vitest `66 passed`、frontend build、PowerShell parser checks 与 `git diff --check` 均通过。
-- Portable 与 MSI 的 release 可复现性测试均在独占 staging 条件下通过。此前共享 `output\\work` 的并发和 Chromium 文件锁只造成一次非产品脚本失败，独占重跑已完成；无需改动产品代码。
-- BrowserRoot 的 headless `doctor_playwright` 启动检查通过；发布与安装验收期间均没有访问抖音、没有输入或发送。
+- 发送与发送验证：可靠 post-send confirmation、当天投递证据与重复保护已恢复。
+- 源码安装：locked frontend dependencies 在 build 前安装；不完整 HKCU 注册残留可安全忽略；`install.cmd` 正确传播 PowerShell 失败退出码。
+- 托盘启动：模块状态快照暂时缺少 `required_autody_version` 等字段时返回未就绪，不再因 PowerShell StrictMode 产生伪启动失败弹窗。
+- 旧修复分支已收敛；保留 `fix/required-autody-version-startup` 作为本次小修分支，并与 `main` 对齐。
+
+## Release 状态
+
+- v1.5.0/v1.5.1 失败候选标签已退役。
+- v1.5.2/v1.5.3 的公开 Release 与标签已退役。
+- v1.4.0、v1.4.1、v1.4.3、v1.4.4 为历史公开发布；没有证据表明它们属于不可运行资产，因此不按坏版本删除。当前推荐公开安装基线为 v1.4.4。
+- `.github/workflows/release.yml` 仅保留手动诊断入口，避免重新发布已经退役的 v1.5.3。下一次正式 Release 先更新到新的版本身份。
 
 ## 稳定指针
 
-- 项目边界、运行时根、module owners 与副作用限制：`AGENTS.md`。
+- 项目边界与运行时根：`AGENTS.md`。
+- 安装 owner：`install.cmd`、`scripts/install.ps1`。
+- 托盘启动 owner：`scripts/autody-tray.ps1`。
 - 发布/验证 owner：`.github/workflows/release.yml`、`scripts/build-release-from-clean-source.ps1`、`scripts/verify-release-artifacts.ps1`、`scripts/verify-msi-lifecycle.ps1`。
-- Release/version truth：`pyproject.toml`、`frontend/package.json`、`.github/workflows/release.yml`、`CHANGELOG.md`、`docs/RELEASE_NOTES.md`。

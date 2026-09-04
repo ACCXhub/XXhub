@@ -1,22 +1,15 @@
-# AutoDy v1.5.3
+# AutoDy 当前源码状态
 
-AutoDy v1.5.3 修正与旧版持久投递记录的兼容投影。发送前身份验证、重复保护、全局浏览器锁和 fail-closed 边界保持不变。
+当前 `main` 是维护与本机运行的 canonical source。源码版本线仍为 1.5.3，但 v1.5.2/v1.5.3 的公开 Release 与标签已经退役，不再作为可下载安装来源。
 
-## 修复
+## 当前已收敛修复
 
-- Friends 的“最近成功”只接受具有 `post_send_observed` 的 `confirmed` 或 `retry_confirmed` 证据。
-- 旧记录中的裸 `succeeded`、裸确认或 `consumed` 标记不再制造当天成功历史，也不会令当前每日状态错误显示为完成。
+- 恢复可靠的发送后确认与当天投递证据边界。
+- 源码安装会先按 `package-lock.json` 执行 `npm ci`，再构建前端。
+- 源码安装可容忍仅残留部分 HKCU AutoDy 注册值，不再因缺失 `InstallFolder` / `DataRoot` 直接失败。
+- `install.cmd` 会把 PowerShell 安装异常正确传播为非零退出码。
+- 托盘启动健康检查会先验证模块元数据字段是否存在；暂时缺少 `required_autody_version` 时按未就绪处理，不再弹出伪“AutoDy 启动失败”。
 
-## 安装与升级
+## 发布状态
 
-目标正式资产：
-
-- `AutoDy-1.5.3-x64.msi`
-- `AutoDy-1.5.3-x64.msi.sha256`
-- `AutoDy-Windows-Portable-1.5.3.zip`
-- `AutoDy-Windows-Portable-1.5.3.zip.sha256`
-- `release-manifest.json`
-
-**这些文件只有在 GitHub `ACCXhub/XXhub` v1.5.3 Release 页面正式出现并通过 public asset verification 后才属于公开发布件。CI 中间产物和失败 run 生成的 runner 候选不得当作正式下载包。**
-
-v1.4.3 及后续版本均为 per-machine 安装；普通卸载和升级保留原交互用户 DataRoot。下载后应以同一 Release 的 `.sha256` 和 `release-manifest.json` 核对文件。MSI 当前未声明代码签名，Windows/组织策略可能显示信任提示。
+当前公开推荐安装基线为 v1.4.4。下一次公开发布应使用新的版本身份，并从当前 `main` 重新构建、校验 MSI/Portable、checksum 与 release manifest 后再发布。
