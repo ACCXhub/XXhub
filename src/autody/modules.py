@@ -54,6 +54,21 @@ def _project_source_present(root: Path) -> bool:
     return (root / "src" / "autody" / "modules.py").is_file()
 
 
+def _runtime_program_root(root: Path) -> Path:
+    """Resolve the runtime DataRoot back to the ProgramRoot that owns bundled assets."""
+    resolved = root.resolve()
+    data_root = os.environ.get("AUTODY_HOME")
+    program_root = os.environ.get("AUTODY_PROGRAM_ROOT")
+    if not data_root or not program_root:
+        return resolved
+    try:
+        if resolved != Path(data_root).resolve():
+            return resolved
+        return Path(program_root).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return resolved
+
+
 def official_module_archive_path(root: Path) -> Path:
     """Return the sole package location for this installation.
 
@@ -61,7 +76,7 @@ def official_module_archive_path(root: Path) -> Path:
     portable installations use the package copied into their own root.  In
     particular, an ``output`` directory is never an input at runtime.
     """
-    root = root.resolve()
+    root = _runtime_program_root(root)
     if _project_source_present(root):
         return root / "data" / "module-cache" / MODULE_FILENAME
     return root / "optional-modules" / MODULE_FILENAME
@@ -93,7 +108,7 @@ def ensure_official_module_archive(root: Path) -> dict:
     rewrites only its generated cache atomically; installed module data and
     registries are never touched here.
     """
-    root = root.resolve()
+    root = _runtime_program_root(root)
     package = official_module_archive_path(root)
     if _project_source_present(root) or not package.is_file():
         # A test/project fixture (or a partial portable repair) has no bundled
