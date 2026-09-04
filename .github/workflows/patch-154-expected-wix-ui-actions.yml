@@ -1,0 +1,68 @@
+name: Patch AutoDy 1.5.4 expected WiX UI actions
+
+on:
+  push:
+    branches:
+      - release/1.5.4-setup-exe
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: release/1.5.4-setup-exe
+          fetch-depth: 0
+      - name: Align release verifier with authored WiX UI actions
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          verifier = Path('scripts/verify-release-artifacts.ps1')
+          text = verifier.read_text(encoding='utf-8-sig')
+          marker = "                [pscustomobject]@{ Action = 'Wix4RemoveFoldersEx_X64'; Type = '65'; Source = 'Wix4UtilCA_X64'; Target = 'WixRemoveFoldersEx' }"
+          additions = "\n".join([
+              "                [pscustomobject]@{ Action = 'WixUIPrintEula_X64'; Type = '65'; Source = 'WixUiCa_X64'; Target = 'PrintEula' },",
+              "                [pscustomobject]@{ Action = 'WixUIValidatePath_X64'; Type = '65'; Source = 'WixUiCa_X64'; Target = 'ValidatePath' },",
+          ])
+          if 'WixUIPrintEula_X64' not in text or 'WixUIValidatePath_X64' not in text:
+              if marker not in text:
+                  raise SystemExit('expected CustomAction marker missing')
+              text = text.replace(marker, additions + "\n" + marker, 1)
+              verifier.write_text(text, encoding='utf-8-sig', newline='\n')
+
+          tests = Path('tests/test_setup_exe_packaging.py')
+          test_text = tests.read_text(encoding='utf-8')
+          needle = "    manifest = Path(\"scripts/write-release-manifest.ps1\").read_text(encoding=\"utf-8-sig\")\n"
+          if 'verifier = Path("scripts/verify-release-artifacts.ps1")' not in test_text:
+              if needle not in test_text:
+                  raise SystemExit('expected packaging test marker missing')
+              test_text = test_text.replace(
+                  needle,
+                  needle + "    verifier = Path(\"scripts/verify-release-artifacts.ps1\").read_text(encoding=\"utf-8-sig\")\n",
+                  1,
+              )
+          anchor = "    assert '\"AutoDy-Setup-$env:AUTODY_RELEASE_VERSION.exe.sha256\"' in workflow\n"
+          extra = (
+              "    assert \"WixUIPrintEula_X64\" in verifier\n"
+              "    assert \"WixUIValidatePath_X64\" in verifier\n"
+          )
+          if 'assert "WixUIPrintEula_X64" in verifier' not in test_text:
+              if anchor not in test_text:
+                  raise SystemExit('expected packaging assertion marker missing')
+              test_text = test_text.replace(anchor, anchor + extra, 1)
+              tests.write_text(test_text, encoding='utf-8', newline='\n')
+          PY
+      - name: Commit verifier alignment
+        shell: bash
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scripts/verify-release-artifacts.ps1 tests/test_setup_exe_packaging.py
+          git commit -m "fix(release): accept authored WiX UI custom actions"
+          git push origin HEAD:release/1.5.4-setup-exe
