@@ -15,12 +15,15 @@ def test_release_version_is_154_everywhere():
 
 def test_setup_exe_is_a_wix_bundle_over_the_canonical_msi():
     project = Path("packaging/wix/AutoDy.Bundle.wixproj").read_text(encoding="utf-8")
+    package_project = Path("packaging/wix/AutoDy.Package.wixproj").read_text(encoding="utf-8")
     bundle = Path("packaging/wix/Bundle.wxs").read_text(encoding="utf-8")
     builder = Path("scripts/build-setup-exe.ps1").read_text(encoding="utf-8-sig")
 
     assert 'Sdk="WixToolset.Sdk/7.0.0"' in project
     assert 'PackageReference Include="WixToolset.Bal.wixext" Version="7.0.0"' in project
     assert '<OutputType>Bundle</OutputType>' in project
+    assert '<Compile Remove="Product.wxs" />' in project
+    assert '<Compile Remove="Bundle.wxs" />' in package_project
     assert 'bal:WixStandardBootstrapperApplication' in bundle
     assert 'MsiPackage SourceFile="$(var.MsiPath)"' in bundle
     assert 'AutoDy-Setup-$Version.exe' in builder
