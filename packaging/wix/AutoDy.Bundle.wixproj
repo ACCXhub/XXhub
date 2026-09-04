@@ -8,6 +8,7 @@
     <OutputName>AutoDy-Setup-$(ProductVersion)</OutputName>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="Product.wxs" />
     <PackageReference Include="WixToolset.Bal.wixext" Version="7.0.0" />
   </ItemGroup>
 </Project>
