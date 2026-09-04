@@ -42,6 +42,7 @@ def test_msi_installs_a_visible_uninstaller_exe_and_start_menu_shortcut():
     assert '/x' in uninstaller
     assert '是否同时删除用户数据' in uninstaller
     assert 'LocalApplicationData' in uninstaller
+    assert 'catch (Win32Exception ex) when' not in uninstaller
 
 
 def test_release_pipeline_builds_and_publishes_setup_exe_assets():
