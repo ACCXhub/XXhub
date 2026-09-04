@@ -2,6 +2,7 @@
   <PropertyGroup>
     <OutputType>Package</OutputType>
     <Platform>x64</Platform>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <ProductVersion Condition="'$(ProductVersion)' == ''">1.5.4</ProductVersion>
     <ProductCode Condition="'$(ProductCode)' == ''">*</ProductCode>
     <StageDir Condition="'$(StageDir)' == ''">$(MSBuildProjectDirectory)\stage</StageDir>
@@ -13,7 +14,7 @@
     <SuppressIces>ICE60</SuppressIces>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Remove="Bundle.wxs" />
+    <Compile Include="Product.wxs" />
     <Compile Include="$(GeneratedWxs)" />
     <PackageReference Include="WixToolset.UI.wixext" Version="5.0.2" />
     <PackageReference Include="WixToolset.Util.wixext" Version="5.0.2" />
