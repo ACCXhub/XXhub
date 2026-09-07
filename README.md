@@ -82,6 +82,28 @@ D: 不可用时回退到：
 - 托盘单实例、service identity 与动态端口；8765 被无关程序占用时安全回退到 8766–8799。
 - Watchdog 只恢复经过 AutoDy service identity 验证的服务，带 health 迟滞与恢复熔断。
 
+## 界面预览
+
+下面展示当前 1.5.4 Dashboard 的主要管理页面；截图中的账号、头像和好友信息以脱敏内容展示。
+
+<table>
+  <tr>
+    <td width="50%"><strong>好友管理</strong><br><img src="assets/screenshots/friends.jpg" alt="好友管理" width="100%"></td>
+    <td width="50%"><strong>文案库</strong><br><img src="assets/screenshots/message-library.jpg" alt="文案库" width="100%"></td>
+  </tr>
+  <tr>
+    <td><strong>文案包</strong><br><img src="assets/screenshots/message-packs.jpg" alt="文案包" width="100%"></td>
+    <td><strong>定时任务</strong><br><img src="assets/screenshots/scheduled-tasks.jpg" alt="定时任务" width="100%"></td>
+  </tr>
+  <tr>
+    <td><strong>运行日志</strong><br><img src="assets/screenshots/run-logs.jpg" alt="运行日志" width="100%"></td>
+    <td><strong>备份迁移</strong><br><img src="assets/screenshots/backup-migration.jpg" alt="备份迁移" width="100%"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><strong>设置</strong><br><img src="assets/screenshots/settings.jpg" alt="设置" width="100%"></td>
+  </tr>
+</table>
+
 ## 源码维护
 
 当前开发/维护环境仍以源码仓库作为 canonical runtime：

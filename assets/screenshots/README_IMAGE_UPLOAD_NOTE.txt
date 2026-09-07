@@ -1,1 +1,0 @@
-Screenshots are being added to README.
