@@ -71,43 +71,43 @@ AutoDy 是一个面向 **Windows 桌面** 的本地化抖音续火工作流工�
 
 管理续火目标、扫描候选好友，并查看目标状态与最近成功时间。
 
-![好友管理](assets/screenshots/friends.jpg)
+![好友管理](assets/screenshots/friends.webp)
 
 ### 文案库
 
 集中维护发送文案，支持搜索、TXT 导入导出、精简去重与直接编辑。
 
-![文案库](assets/screenshots/message-library.jpg)
+![文案库](assets/screenshots/message-library.webp)
 
 ### 文案包
 
 把不同风格或用途的文案拆成独立文案包，并设置默认包或同步到全局库。
 
-![文案包](assets/screenshots/message-packs.jpg)
+![文案包](assets/screenshots/message-packs.webp)
 
 ### 定时任务
 
 可视化配置每日续火、登录健康检查、每周检查与安全重试截止时间。
 
-![定时任务](assets/screenshots/scheduled-tasks.jpg)
+![定时任务](assets/screenshots/scheduled-tasks.webp)
 
 ### 运行日志
 
 按日期、级别、任务和状态筛选日志，查看任务结果并导出脱敏诊断信息。
 
-![运行日志](assets/screenshots/run-logs.jpg)
+![运行日志](assets/screenshots/run-logs.webp)
 
 ### 备份迁移
 
 选择需要备份的本地配置，导出 ZIP；导入前先进行预检和冲突检查。
 
-![备份迁移](assets/screenshots/backup-migration.jpg)
+![备份迁移](assets/screenshots/backup-migration.webp)
 
 ### 设置
 
 集中调整运行延迟、超时、失败重试、好友顺序、文案选择、通知和后台运行。
 
-![设置](assets/screenshots/settings.jpg)
+![设置](assets/screenshots/settings.webp)
 
 ---
 
