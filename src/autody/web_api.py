@@ -69,6 +69,10 @@ from autody.history import TaskHistoryStore, bootstrap_legacy_daily_history
 from autody.log_center import archive_historical_logs, archive_logs, automatic_cleanup_once_daily, cleanup_logs, log_storage_summary, log_summary, query_logs, record_cleanup_result
 from autody.message_packs import ImportMode, MessagePackError, MessagePackService
 from autody.message_pack_catalog import MessagePackConflict
+from autody.native_stickers import (
+    NativeStickerCatalogError,
+    NativeStickerCatalogStore,
+)
 from autody.modules import (
     MODULE_ID,
     OFFICIAL_TEST_CENTER_VERSION,
@@ -203,6 +207,19 @@ class ReorderMessagePacksRequest(RevisionRequest):
 
 class MessagePackTextRequest(RevisionRequest):
     text: str = Field(min_length=1, max_length=500)
+
+
+class NativeStickerEntryRequest(RevisionRequest):
+    logical_id: str = Field(min_length=1, max_length=160)
+    display_name: str = Field(min_length=1, max_length=160)
+    resource_key: str | None = Field(default=None, max_length=500)
+    machine_id: str | None = Field(default=None, max_length=500)
+    accessible_name: str | None = Field(default=None, max_length=500)
+    category: str | None = Field(default=None, max_length=160)
+
+
+class ReorderPackEntriesRequest(RevisionRequest):
+    entry_ids: list[str]
 
 
 class FuseMessagePackRequest(RevisionRequest):
@@ -911,6 +928,9 @@ def create_app(
         ):
             return HTTPException(503, message)
         return HTTPException(422, message)
+
+    def native_sticker_store() -> NativeStickerCatalogStore:
+        return NativeStickerCatalogStore(runtime_context.data_root, now=current_time)
     try:
         bundled_module = ensure_official_module_archive(root)
         bundled_module_error = None
@@ -2657,6 +2677,54 @@ def create_app(
         except MessagePackError as exc:
             raise message_pack_http_exception(exc) from exc
 
+    @app.post("/api/message-packs/{pack_id}/native-stickers")
+    def add_message_pack_native_sticker(
+        pack_id: str,
+        payload: NativeStickerEntryRequest,
+    ):
+        try:
+            return message_pack_service().add_native_sticker(
+                pack_id,
+                logical_id=payload.logical_id,
+                display_name=payload.display_name,
+                resource_key=payload.resource_key,
+                machine_id=payload.machine_id,
+                accessible_name=payload.accessible_name,
+                category=payload.category,
+                expected_revision=payload.expected_revision,
+            )
+        except MessagePackError as exc:
+            raise message_pack_http_exception(exc) from exc
+
+    @app.put("/api/message-packs/{pack_id}/entries/order")
+    def reorder_message_pack_entries(
+        pack_id: str,
+        payload: ReorderPackEntriesRequest,
+    ):
+        try:
+            return message_pack_service().reorder_entries(
+                pack_id,
+                payload.entry_ids,
+                payload.expected_revision,
+            )
+        except MessagePackError as exc:
+            raise message_pack_http_exception(exc) from exc
+
+    @app.delete("/api/message-packs/{pack_id}/entries/{entry_id}")
+    def delete_message_pack_entry(
+        pack_id: str,
+        entry_id: str,
+        payload: RevisionRequest,
+    ):
+        try:
+            return message_pack_service().delete_entry(
+                pack_id,
+                entry_id,
+                payload.expected_revision,
+            )
+        except MessagePackError as exc:
+            raise message_pack_http_exception(exc) from exc
+
     @app.post("/api/message-packs/{source_id}/fuse")
     def fuse_message_pack(source_id: str, payload: FuseMessagePackRequest):
         try:
@@ -2693,6 +2761,86 @@ def create_app(
                 payload.mode,
             )
         except MessagePackError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/native-stickers")
+    def native_sticker_catalog():
+        profile = load_account_profile(runtime_context.data_root)
+        if profile is None:
+            return {
+                "account_profile_id": None,
+                "revision": 0,
+                "scanned_at": None,
+                "stickers": [],
+            }
+        try:
+            catalog = native_sticker_store().load(profile.account_profile_id)
+        except NativeStickerCatalogError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if catalog is None:
+            return {
+                "account_profile_id": profile.account_profile_id,
+                "revision": 0,
+                "scanned_at": None,
+                "stickers": [],
+            }
+        return catalog
+
+    @app.post("/api/native-stickers/scan")
+    def scan_native_stickers():
+        config = load_config(config_path)
+        profile = load_account_profile(runtime_context.data_root)
+        if profile is None:
+            raise HTTPException(409, "当前账号尚未完成验证，无法扫描原生表情")
+        discovered = load_discovered_friends(
+            config.state_file.parent / "discovered_friends.json"
+        )
+        guarded = bindings_revalidation_required(config.state_file.parent)
+        selected = None
+        for target in enabled_execution_targets(config):
+            resolution = resolve_stable_binding(
+                target,
+                discovered,
+                profile,
+                revalidation_required=guarded,
+                now=current_time(),
+            )
+            if resolution.valid and resolution.conversation_id:
+                selected = (target, resolution.conversation_id)
+                break
+        if selected is None:
+            raise HTTPException(409, "没有可用于只读扫描的已验证会话")
+        target, conversation_id = selected
+        try:
+            with SingleInstanceLock(config.lock_file):
+                with open_chat(
+                    config.profile_dir,
+                    config.page_load_timeout_ms,
+                    config.headless,
+                    config.artifact_dir,
+                    home=runtime_context.data_root,
+                ) as page:
+                    chat = DouyinChat(
+                        page,
+                        DOUYIN_SELECTORS,
+                        config.artifact_dir,
+                        DOUYIN_CONFIRMATION_SELECTORS,
+                        friend_search_timeout_ms=config.friend_search_timeout_ms,
+                    )
+                    identity = chat.open_conversation_identity(
+                        target.stable_id or "",
+                        conversation_id,
+                        target.name,
+                        timeout_ms=config.friend_search_timeout_ms,
+                    )
+                    if not identity.identity_match:
+                        raise RuntimeError("会话身份验证失败，未扫描原生表情")
+                    discovered_stickers = chat.scan_native_stickers()
+            return native_sticker_store().replace(
+                profile.account_profile_id,
+                discovered_stickers,
+            )
+        except (TaskAlreadyRunning, FatalChatError, RuntimeError, NativeStickerCatalogError) as exc:
             raise HTTPException(422, str(exc)) from exc
 
     @app.post("/api/friends/scan", status_code=202)

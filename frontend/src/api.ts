@@ -129,6 +129,27 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ source_id: sourceId, expected_revision: revision })
     }),
+  nativeStickerCatalog: () =>
+    request<import("./types").NativeStickerCatalog>("/api/native-stickers"),
+  scanNativeStickers: () =>
+    request<import("./types").NativeStickerCatalog>("/api/native-stickers/scan", {
+      method: "POST"
+    }),
+  addNativeSticker: (packId: string, sticker: import("./types").NativeStickerReference, revision: number) =>
+    request<PackMutationResult>(`/api/message-packs/${encodeURIComponent(packId)}/native-stickers`, {
+      method: "POST",
+      body: JSON.stringify({ ...sticker, expected_revision: revision })
+    }),
+  reorderMessagePackEntries: (packId: string, entryIds: string[], revision: number) =>
+    request<PackMutationResult>(`/api/message-packs/${encodeURIComponent(packId)}/entries/order`, {
+      method: "PUT",
+      body: JSON.stringify({ entry_ids: entryIds, expected_revision: revision })
+    }),
+  deleteMessagePackEntry: (packId: string, entryId: string, revision: number) =>
+    request<PackMutationResult>(`/api/message-packs/${encodeURIComponent(packId)}/entries/${encodeURIComponent(entryId)}`, {
+      method: "DELETE",
+      body: JSON.stringify({ expected_revision: revision })
+    }),
   previewMessagePack: (id: string) =>
     request<PackPreview>(`/api/message-packs/${encodeURIComponent(id)}`),
   importMessagePack: (id: string, mode: "merge" | "replace" | "preview_only") =>

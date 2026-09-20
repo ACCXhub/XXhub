@@ -22,6 +22,7 @@ from autody import runner as runner_module
 from autody.failures import failure_detail
 from autody.logging_setup import DailyAppendFileHandler
 from autody.message_packs import MessagePackService
+from autody.native_stickers import NativeStickerCatalogStore, NativeStickerDescriptor
 from autody.runner import (
     RunStatus,
     TodayDeliveryReconciliationPlan,
@@ -145,6 +146,47 @@ def test_second_run_same_day_sends_nothing(tmp_path: Path):
     assert len(chat.sent) == 2
     assert len({message for _, message in chat.sent}) == 1
     assert chat.sent[0][1].endswith(" —— gpt小助手")
+
+
+def test_confirmed_text_blocks_later_same_day_sticker_selection(tmp_path: Path):
+    config = make_config(tmp_path)
+    first = run_daily(config, FakeChat(), date(2026, 9, 20))
+    pack_dir = tmp_path / "message-packs"
+    pack_dir.mkdir()
+    (pack_dir / "sticker.txt").write_text("seed\n", encoding="utf-8")
+    (pack_dir / "index.json").write_text(
+        '{"packs":[{"id":"stickers","name":"表情包","description":"","version":"1","file":"sticker.txt","count":1,"category":"test"}]}',
+        encoding="utf-8",
+    )
+    service = MessagePackService(tmp_path, tmp_path)
+    seed = service.preview("stickers").entries[0]
+    service.delete_message("stickers", seed.id, service.catalog().revision)
+    service.add_native_sticker(
+        "stickers",
+        logical_id="heart",
+        display_name="比心",
+        resource_key="heart.webp",
+        expected_revision=service.catalog().revision,
+    )
+    config.default_message_pack = "stickers"
+
+    class NoSecondDelivery:
+        def send(self, *_args, **_kwargs):
+            raise AssertionError("confirmed text must block later text delivery")
+
+        def send_native_sticker(self, *_args, **_kwargs):
+            raise AssertionError("confirmed text must block later sticker delivery")
+
+    second = run_daily(
+        config,
+        NoSecondDelivery(),
+        date(2026, 9, 20),
+        runtime_context=resolve_runtime_context(tmp_path, program_root=tmp_path),
+    )
+
+    assert first.status is RunStatus.COMPLETED
+    assert second.status is RunStatus.ALREADY_DONE
+    assert second.sent_count == 0
 
 
 def test_automatic_gate_stops_before_browser_when_all_targets_succeeded(
@@ -2264,6 +2306,273 @@ def test_one_for_all_message_pack_reuses_today_then_advances_after_completion(
     assert len(set(second_day_messages)) == 1
     assert first_day_messages[0] != second_day_messages[0]
     assert second_day.status is RunStatus.COMPLETED
+
+
+def test_native_sticker_pack_persists_exact_typed_selection_and_dispatches_only_sticker(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    pack_dir = tmp_path / "message-packs"
+    pack_dir.mkdir()
+    (pack_dir / "empty.txt").write_text("seed\n", encoding="utf-8")
+    (pack_dir / "index.json").write_text(
+        '{"packs":[{"id":"stickers","name":"表情包","description":"","version":"1","file":"empty.txt","count":1,"category":"test"}]}',
+        encoding="utf-8",
+    )
+    service = MessagePackService(tmp_path, tmp_path)
+    seed = service.preview("stickers").entries[0]
+    service.delete_message("stickers", seed.id, service.catalog().revision)
+    service.add_native_sticker(
+        "stickers",
+        logical_id="shared-fire",
+        display_name="续火花",
+        resource_key="fire.webp",
+        expected_revision=service.catalog().revision,
+    )
+    config.default_message_pack = "stickers"
+    write_verified_retry_scope(tmp_path, [])
+    NativeStickerCatalogStore(tmp_path).replace(
+        "account-" + "a" * 24,
+        [
+            NativeStickerDescriptor(
+                logical_id="account-a-fire",
+                display_name="续火花",
+                resource_key="fire.webp",
+            )
+        ],
+    )
+
+    class StickerChat:
+        def __init__(self):
+            self.stickers = []
+            self.selection_at_send_boundary = []
+
+        def send(self, *_args, **_kwargs):
+            raise AssertionError("sticker entry must not use text delivery")
+
+        def send_native_sticker(self, target, sticker, **_kwargs):
+            daily_state = json.loads(config.state_file.read_text(encoding="utf-8"))[
+                "daily"
+            ]["2026-09-20"]
+            self.selection_at_send_boundary.append(
+                daily_state["selected_content_by_target"]
+            )
+            self.stickers.append((target, sticker.logical_id))
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMED,
+                send_attempts=1,
+                confirmation_provenance=(
+                    DeliveryConfirmationProvenance.POST_SEND_OBSERVED
+                ),
+            )
+
+    first_chat = StickerChat()
+    first = run_daily(
+        config,
+        first_chat,
+        date(2026, 9, 20),
+        runtime_context=resolve_runtime_context(tmp_path, program_root=tmp_path),
+    )
+    stored = json.loads(config.state_file.read_text(encoding="utf-8"))["daily"][
+        "2026-09-20"
+    ]
+    second_chat = StickerChat()
+    second = run_daily(
+        config,
+        second_chat,
+        date(2026, 9, 20),
+        runtime_context=resolve_runtime_context(tmp_path, program_root=tmp_path),
+    )
+
+    assert first.status is RunStatus.COMPLETED
+    assert first_chat.stickers == [
+        ("小明", "account-a-fire"),
+        ("小红", "account-a-fire"),
+    ]
+    assert all(snapshot for snapshot in first_chat.selection_at_send_boundary)
+    assert all(
+        next(iter(snapshot.values()))["kind"] == "native_sticker"
+        for snapshot in first_chat.selection_at_send_boundary
+    )
+    assert list(stored["selected_content_by_target"].values()) == [
+        {
+            "schema_version": 1,
+            "entry_id": service.preview("stickers").entries[0].id,
+            "kind": "native_sticker",
+            "pack_id": "stickers",
+            "sticker": {
+                "logical_id": "shared-fire",
+                "display_name": "续火花",
+                "resource_key": "fire.webp",
+                "machine_id": None,
+                "accessible_name": None,
+                "category": None,
+            },
+        }
+    ]
+    assert second.status is RunStatus.ALREADY_DONE
+    assert second_chat.stickers == []
+
+
+def test_persisted_sticker_selection_survives_process_state_reload(tmp_path: Path):
+    config = make_config(tmp_path)
+    pack_dir = tmp_path / "message-packs"
+    pack_dir.mkdir()
+    (pack_dir / "stickers.txt").write_text("seed\n", encoding="utf-8")
+    (pack_dir / "index.json").write_text(
+        '{"packs":[{"id":"stickers","name":"表情包","description":"","version":"1","file":"stickers.txt","count":1,"category":"test"}]}',
+        encoding="utf-8",
+    )
+    service = MessagePackService(tmp_path, tmp_path)
+    seed = service.preview("stickers").entries[0]
+    service.delete_message("stickers", seed.id, service.catalog().revision)
+    for logical_id, resource_key in (("first", "first.webp"), ("second", "second.webp")):
+        service.add_native_sticker(
+            "stickers",
+            logical_id=logical_id,
+            display_name=logical_id,
+            resource_key=resource_key,
+            expected_revision=service.catalog().revision,
+        )
+    config.default_message_pack = "stickers"
+    day = date(2026, 9, 20)
+    daily = {"message": "", "messages_by_target": {}}
+    rotation = StateStore(config.state_file).load().rotation
+    first = runner_module._resolve_target_content(
+        config.targets[0],
+        config,
+        day,
+        daily,
+        ["unused"],
+        rotation,
+        runtime_context=resolve_runtime_context(tmp_path, program_root=tmp_path),
+    )
+
+    reloaded_daily = json.loads(json.dumps(daily))
+    second = runner_module._resolve_target_content(
+        config.targets[0],
+        config,
+        day,
+        reloaded_daily,
+        ["unused"],
+        rotation,
+        runtime_context=resolve_runtime_context(tmp_path, program_root=tmp_path),
+    )
+
+    assert first.kind == "native_sticker"
+    assert second.state_payload() == first.state_payload()
+
+
+def test_per_friend_mixed_pack_persists_one_complete_typed_entry_per_target(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.message_selection = "per_friend"
+    pack_dir = tmp_path / "message-packs"
+    pack_dir.mkdir()
+    (pack_dir / "mixed.txt").write_text("早安\n", encoding="utf-8")
+    (pack_dir / "index.json").write_text(
+        '{"packs":[{"id":"mixed","name":"混合","description":"","version":"1","file":"mixed.txt","count":1,"category":"test"}]}',
+        encoding="utf-8",
+    )
+    service = MessagePackService(tmp_path, tmp_path)
+    service.add_native_sticker(
+        "mixed",
+        logical_id="shared-heart",
+        display_name="比心",
+        resource_key="heart.webp",
+        expected_revision=service.catalog().revision,
+    )
+    config.default_message_pack = "mixed"
+    daily = {"message": "", "messages_by_target": {}}
+    state = StateStore(config.state_file).load()
+
+    resolved = [
+        runner_module._resolve_target_content(
+            target,
+            config,
+            date(2026, 9, 20),
+            daily,
+            ["早安", "晚安"],
+            state.rotation,
+            runtime_context=resolve_runtime_context(tmp_path, program_root=tmp_path),
+        )
+        for target in config.targets
+    ]
+
+    assert len(daily["selected_content_by_target"]) == 2
+    assert {item["kind"] for item in daily["selected_content_by_target"].values()} <= {
+        "text",
+        "native_sticker",
+    }
+    assert all(content.entry_id for content in resolved)
+
+
+def test_live_today_audit_blocks_a_restarted_sticker_delivery_before_catalog_resolution(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.targets = [
+        Target(name="目标", stable_id="target-a", candidate_id="candidate-a")
+    ]
+    write_verified_retry_scope(tmp_path, ["candidate-a"])
+    bind_authoritatively(config)
+    _set_discovered_conversation_id(tmp_path, "candidate-a", "conversation-a")
+    pack_dir = tmp_path / "message-packs"
+    pack_dir.mkdir()
+    (pack_dir / "sticker.txt").write_text("seed\n", encoding="utf-8")
+    (pack_dir / "index.json").write_text(
+        '{"packs":[{"id":"sticker-pack","name":"表情","description":"","version":"1","file":"sticker.txt","count":1,"category":"test"}]}',
+        encoding="utf-8",
+    )
+    service = MessagePackService(tmp_path, tmp_path)
+    seed = service.preview("sticker-pack").entries[0]
+    service.delete_message("sticker-pack", seed.id, service.catalog().revision)
+    service.add_native_sticker(
+        "sticker-pack",
+        logical_id="shared-fire",
+        display_name="续火花",
+        resource_key="fire.webp",
+        expected_revision=service.catalog().revision,
+    )
+    config.default_message_pack = "sticker-pack"
+    day = date(2026, 9, 20)
+    state = StateStore(config.state_file).load()
+    state.daily[day.isoformat()] = {
+        "message": "",
+        "succeeded": [],
+        "failures": {"目标": "previous failure"},
+        "confirmation_results": {},
+        "confirmation_provenance": {},
+        "consumed": False,
+    }
+    StateStore(config.state_file).save(state)
+
+    class AuditChat:
+        friend_search_timeout_ms = 30_000
+
+        def open_conversation_identity(self, *_args, **_kwargs):
+            return SimpleNamespace(identity_match=True)
+
+        def audit_today_outgoing(self, _today):
+            return TodayOutgoingAudit(TodayOutgoingStatus.CONFIRMED_SENT)
+
+        def send(self, *_args, **_kwargs):
+            raise AssertionError("confirmed sticker audit must block text send")
+
+        def send_native_sticker(self, *_args, **_kwargs):
+            raise AssertionError("confirmed sticker audit must block sticker send")
+
+    result = run_daily(
+        config,
+        AuditChat(),
+        day,
+        runtime_context=resolve_runtime_context(tmp_path, program_root=tmp_path),
+    )
+
+    assert result.status is RunStatus.COMPLETED
+    assert result.today_audit_outcomes == {"target-a": "confirmed_sent"}
+    assert result.sent_count == 0
 
 
 def test_target_pack_uses_managed_catalog_without_changing_selection(

@@ -229,6 +229,15 @@ input:focus, textarea:focus, select:focus { border-color: #5797ef; box-shadow: 0
 .pack-preview { margin-top: 14px; overflow: hidden; }
 .pack-preview ol { margin: 0; padding: 16px 24px 20px 48px; columns: 2; column-gap: 36px; }
 .pack-preview li { padding: 5px 0; color: #47566d; font-size: 12px; break-inside: avoid; }
+.pack-preview li small { color: #8793a5; }
+.entry-actions { display: inline-flex; gap: 5px; margin-left: 10px; }
+.entry-actions button { padding: 2px 6px; color: #28517f; border: 1px solid #dce4ee; border-radius: 5px; background: #fff; cursor: pointer; font-size: 10px; }
+.entry-actions button:disabled { opacity: .45; cursor: not-allowed; }
+.sticker-chooser { max-height: 320px; padding: 15px; overflow: auto; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.sticker-chooser button { min-width: 0; padding: 10px 8px; display: grid; place-items: center; gap: 6px; color: #47566d; border: 1px solid #dce4ee; border-radius: 8px; background: #fff; cursor: pointer; font-size: 11px; }
+.sticker-chooser button:hover:not(:disabled) { border-color: #90b8e8; background: #f5f9ff; }
+.sticker-chooser button:disabled { opacity: .5; cursor: not-allowed; }
+.sticker-chooser img { width: 38px; height: 38px; object-fit: contain; }
 .discovery-panel { margin-top: 14px; overflow: hidden; }
 .candidate-grid { padding: 15px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
 .candidate { position: relative; min-height: 58px; padding: 9px 11px; display: grid; grid-template-columns: 40px 1fr; gap: 3px 8px; align-items: center; border: 1px solid #e2e8ef; border-radius: 8px; cursor: pointer; background: #fff; text-align: left; }
@@ -381,6 +390,7 @@ input:focus, textarea:focus, select:focus { border-color: #5797ef; box-shadow: 0
   .pack-grid { grid-template-columns: 1fr; }
   .candidate-grid { grid-template-columns: 1fr; }
   .pack-preview ol { columns: 1; }
+  .sticker-chooser { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .settings-form label { align-items: flex-start; flex-direction: column; }
   .settings-form input:not([type="checkbox"]), .settings-form select, .preview-setting code { width: 100%; }
   .module-card { flex-direction: column; }

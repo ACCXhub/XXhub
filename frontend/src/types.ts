@@ -275,9 +275,33 @@ export interface PackMutationResult {
   catalog: PackCatalog;
 }
 
+export interface NativeStickerReference {
+  logical_id: string;
+  display_name: string;
+  resource_key: string | null;
+  machine_id: string | null;
+  accessible_name: string | null;
+  category: string | null;
+}
+
+export interface NativeStickerDescriptor extends NativeStickerReference {
+  preview_url: string | null;
+  diagnostic_index: number | null;
+  last_seen_at: string | null;
+}
+
+export interface NativeStickerCatalog {
+  account_profile_id: string | null;
+  revision: number;
+  scanned_at: string | null;
+  stickers: NativeStickerDescriptor[];
+}
+
 export interface PackEntry {
   id: string;
-  text: string;
+  kind: "text" | "native_sticker";
+  text: string | null;
+  sticker: NativeStickerReference | null;
   origin_pack_id: string;
   origin_pack_name: string;
   native: boolean;
@@ -314,6 +338,7 @@ export interface PackImportResult {
   total_count: number;
   backup_path?: string | null;
   mode: "merge" | "replace" | "preview_only";
+  excluded_non_text_count: number;
 }
 
 export interface FriendCandidate {

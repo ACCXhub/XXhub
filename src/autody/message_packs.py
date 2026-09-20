@@ -12,12 +12,14 @@ from autody.config import load_config, serialize_config
 from autody.message_pack_catalog import (
     CatalogDocument,
     FusedSourceItem,
-    MessageItem,
+    NativeStickerItem,
+    NativeStickerRecord,
     MessagePackConflict,
     MessagePackCatalogStore,
     MessagePackError,
     MessageRecord,
     PackageRecord,
+    TextItem,
 )
 from autody.locking import SingleInstanceLock, TaskAlreadyRunning
 
@@ -50,7 +52,9 @@ class PackCatalog:
 @dataclass(frozen=True)
 class PackEntry:
     id: str
-    text: str
+    kind: str
+    text: str | None
+    sticker: NativeStickerRecord | None
     origin_pack_id: str
     origin_pack_name: str
     native: bool
@@ -86,6 +90,7 @@ class ImportResult:
     total_count: int
     backup_path: Path | None
     mode: ImportMode
+    excluded_non_text_count: int = 0
 
 
 class MessagePackService:
@@ -122,13 +127,15 @@ class MessagePackService:
             revision=catalog.revision,
         )
 
-    def _message_ids(self, catalog: CatalogDocument, pack_id: str) -> list[str]:
+    def _content_ids(self, catalog: CatalogDocument, pack_id: str) -> list[str]:
         result: list[str] = []
         for item in catalog.packages[pack_id].items:
-            if isinstance(item, MessageItem):
+            if isinstance(item, TextItem):
                 result.append(item.message_id)
+            elif isinstance(item, NativeStickerItem):
+                result.append(item.sticker_id)
             elif isinstance(item, FusedSourceItem):
-                result.extend(self._message_ids(catalog, item.pack_id))
+                result.extend(self._content_ids(catalog, item.pack_id))
         return result
 
     def _pack_payload(self, catalog: CatalogDocument, pack_id: str) -> MessagePack:
@@ -144,7 +151,7 @@ class MessagePackService:
             description=package.description,
             version=package.version,
             file="",
-            count=len(self._message_ids(catalog, pack_id)),
+            count=len(self._content_ids(catalog, pack_id)),
             category=package.category,
             direct_fused_sources=[
                 self._pack_payload(catalog, source_id)
@@ -184,12 +191,27 @@ class MessagePackService:
         result: list[PackEntry] = []
         package = catalog.packages[pack_id]
         for item in package.items:
-            if isinstance(item, MessageItem):
+            if isinstance(item, TextItem):
                 message = catalog.messages[item.message_id]
                 result.append(
                     PackEntry(
                         id=message.id,
+                        kind="text",
                         text=message.text,
+                        sticker=None,
+                        origin_pack_id=package.id,
+                        origin_pack_name=package.name,
+                        native=package.id == root_pack_id,
+                    )
+                )
+            elif isinstance(item, NativeStickerItem):
+                sticker = catalog.native_stickers[item.sticker_id]
+                result.append(
+                    PackEntry(
+                        id=sticker.id,
+                        kind="native_sticker",
+                        text=None,
+                        sticker=sticker,
                         origin_pack_id=package.id,
                         origin_pack_name=package.name,
                         native=package.id == root_pack_id,
@@ -212,7 +234,11 @@ class MessagePackService:
         entries = self._entries(catalog, pack_id, root_pack_id=pack_id)
         return PackPreview(
             pack=self._pack_payload(catalog, pack_id),
-            messages=[entry.text for entry in entries],
+            messages=[
+                entry.text
+                for entry in entries
+                if entry.kind == "text" and entry.text is not None
+            ],
             duplicate_count=package.seed_duplicate_count,
             entries=entries,
         )
@@ -227,6 +253,7 @@ class MessagePackService:
             not candidate
             or candidate in catalog.packages
             or candidate in catalog.messages
+            or candidate in catalog.native_stickers
         ):
             raise MessagePackError("无法生成唯一文案包或消息 ID")
         return candidate
@@ -346,7 +373,7 @@ class MessagePackService:
 
         def change(catalog: CatalogDocument) -> str:
             pack_id = self._next_id(catalog)
-            items: list[MessageItem] = []
+            items: list[TextItem] = []
             for row in rows:
                 message_id = self._next_id(catalog)
                 catalog.messages[message_id] = MessageRecord(
@@ -355,7 +382,7 @@ class MessagePackService:
                     created_at=self.now(),
                     updated_at=self.now(),
                 )
-                items.append(MessageItem(message_id=message_id))
+                items.append(TextItem(message_id=message_id))
             catalog.packages[pack_id] = PackageRecord(
                 id=pack_id,
                 name=display_name,
@@ -394,7 +421,7 @@ class MessagePackService:
                 updated_at=timestamp,
             )
             catalog.packages[pack_id].items.append(
-                MessageItem(message_id=message_id)
+                TextItem(message_id=message_id)
             )
             return message_id
 
@@ -403,6 +430,57 @@ class MessagePackService:
             item
             for item in self._entries(catalog, pack_id, root_pack_id=pack_id)
             if item.id == message_id
+        )
+        return MessageMutationResult(
+            revision=catalog.revision,
+            pack=self._pack_payload(catalog, pack_id),
+            entry=entry,
+            catalog=self._catalog_payload(catalog),
+        )
+
+    def add_native_sticker(
+        self,
+        pack_id: str,
+        *,
+        logical_id: str,
+        display_name: str,
+        expected_revision: int,
+        resource_key: str | None = None,
+        machine_id: str | None = None,
+        accessible_name: str | None = None,
+        category: str | None = None,
+    ) -> MessageMutationResult:
+        logical = logical_id.strip()
+        name = display_name.strip()
+        if not logical or not name:
+            raise MessagePackError("原生表情必须包含稳定逻辑标识和名称")
+
+        def change(catalog: CatalogDocument) -> str:
+            if pack_id not in catalog.top_level_pack_ids:
+                raise MessagePackError("只能向顶层文案包新增原生表情")
+            sticker_id = self._next_id(catalog)
+            timestamp = self.now()
+            catalog.native_stickers[sticker_id] = NativeStickerRecord(
+                id=sticker_id,
+                logical_id=logical,
+                display_name=name,
+                resource_key=resource_key,
+                machine_id=machine_id,
+                accessible_name=accessible_name,
+                category=category,
+                created_at=timestamp,
+                updated_at=timestamp,
+            )
+            catalog.packages[pack_id].items.append(
+                NativeStickerItem(sticker_id=sticker_id)
+            )
+            return sticker_id
+
+        sticker_id, catalog = self._mutate(expected_revision, change)
+        entry = next(
+            item
+            for item in self._entries(catalog, pack_id, root_pack_id=pack_id)
+            if item.id == sticker_id
         )
         return MessageMutationResult(
             revision=catalog.revision,
@@ -471,11 +549,92 @@ class MessagePackService:
                 item
                 for item in package.items
                 if not (
-                    isinstance(item, MessageItem)
+                    isinstance(item, TextItem)
                     and item.message_id == message_id
                 )
             ]
             del catalog.messages[message_id]
+
+        _unused, catalog = self._mutate(expected_revision, change)
+        return PackMutationResult(
+            revision=catalog.revision,
+            pack=self._pack_payload(catalog, pack_id),
+            catalog=self._catalog_payload(catalog),
+        )
+
+    def delete_entry(
+        self,
+        pack_id: str,
+        entry_id: str,
+        expected_revision: int,
+    ) -> PackMutationResult:
+        def change(catalog: CatalogDocument) -> None:
+            owner = self._owning_package_id(catalog, pack_id, entry_id)
+            if owner is None:
+                raise MessagePackError("指定内容不属于该文案包")
+            package = catalog.packages[owner]
+            removed_kind: str | None = None
+            retained = []
+            for item in package.items:
+                if isinstance(item, TextItem) and item.message_id == entry_id:
+                    removed_kind = "text"
+                    continue
+                if (
+                    isinstance(item, NativeStickerItem)
+                    and item.sticker_id == entry_id
+                ):
+                    removed_kind = "native_sticker"
+                    continue
+                retained.append(item)
+            if removed_kind is None:
+                raise MessagePackError("指定内容不属于该文案包")
+            package.items = retained
+            if removed_kind == "text":
+                del catalog.messages[entry_id]
+            else:
+                del catalog.native_stickers[entry_id]
+
+        _unused, catalog = self._mutate(expected_revision, change)
+        return PackMutationResult(
+            revision=catalog.revision,
+            pack=self._pack_payload(catalog, pack_id),
+            catalog=self._catalog_payload(catalog),
+        )
+
+    def reorder_entries(
+        self,
+        pack_id: str,
+        entry_ids: list[str],
+        expected_revision: int,
+    ) -> PackMutationResult:
+        def change(catalog: CatalogDocument) -> None:
+            if pack_id not in catalog.top_level_pack_ids:
+                raise MessagePackError("只能调整顶层文案包的直接内容")
+            package = catalog.packages[pack_id]
+            direct_items = [
+                item
+                for item in package.items
+                if isinstance(item, (TextItem, NativeStickerItem))
+            ]
+            direct_ids = [
+                item.message_id
+                if isinstance(item, TextItem)
+                else item.sticker_id
+                for item in direct_items
+            ]
+            if (
+                len(entry_ids) != len(set(entry_ids))
+                or set(entry_ids) != set(direct_ids)
+            ):
+                raise MessagePackError("内容排序必须包含该文案包的全部直接内容")
+            by_id = dict(zip(direct_ids, direct_items, strict=True))
+            reordered = iter(by_id[entry_id] for entry_id in entry_ids)
+            package.items = [
+                next(reordered)
+                if isinstance(item, (TextItem, NativeStickerItem))
+                else item
+                for item in package.items
+            ]
 
         _unused, catalog = self._mutate(expected_revision, change)
         return PackMutationResult(
@@ -615,11 +774,19 @@ class MessagePackService:
                 item.message_id
                 for subtree_id in subtree_ids
                 for item in catalog.packages[subtree_id].items
-                if isinstance(item, MessageItem)
+                if isinstance(item, TextItem)
+            }
+            sticker_ids = {
+                item.sticker_id
+                for subtree_id in subtree_ids
+                for item in catalog.packages[subtree_id].items
+                if isinstance(item, NativeStickerItem)
             }
             catalog.top_level_pack_ids.remove(pack_id)
             for message_id in message_ids:
                 del catalog.messages[message_id]
+            for sticker_id in sticker_ids:
+                del catalog.native_stickers[sticker_id]
             for subtree_id in subtree_ids:
                 del catalog.packages[subtree_id]
 
@@ -672,7 +839,10 @@ class MessagePackService:
                 total_count=len(existing),
                 backup_path=None,
                 mode=mode,
+                excluded_non_text_count=len(preview.entries) - len(preview.messages),
             )
+        if mode is ImportMode.REPLACE and not preview.messages:
+            raise MessagePackError("该文案包没有文字内容，不能覆盖全局文案库")
         backup = self._backup(messages_file)
         if mode is ImportMode.MERGE:
             existing_set = set(existing)
@@ -693,4 +863,5 @@ class MessagePackService:
             total_count=len(final),
             backup_path=backup,
             mode=mode,
+            excluded_non_text_count=len(preview.entries) - len(preview.messages),
         )

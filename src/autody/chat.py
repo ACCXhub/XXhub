@@ -12,6 +12,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 from autody.runtime import configure_runtime
+from autody.native_stickers import NativeStickerDescriptor
 
 
 CHAT_URL = "https://www.douyin.com/chat"
@@ -131,10 +132,40 @@ class ChatSelectors:
 class ConfirmationSelectors:
     outgoing_message_text: str
     history_container: str
+    outgoing_message_row: str = ""
+    outgoing_sticker_payload: str = ""
 
     @classmethod
     def test_defaults(cls):
-        return cls('[data-e2e="message-text"]', '[data-e2e="message-list"]')
+        return cls(
+            '[data-e2e="message-text"]',
+            '[data-e2e="message-list"]',
+            '[data-message-id], [data-messageid], [data-msg-id], [data-msgid], [data-e2e="message-text"]',
+            '[data-e2e="sticker-message"], img',
+        )
+
+
+@dataclass(frozen=True)
+class StickerSelectors:
+    open_button: tuple[str, ...]
+    panel: tuple[str, ...]
+    item: str
+    publish_button: tuple[str, ...]
+    staged_payload: tuple[str, ...]
+    pending_marker: str
+    failure_marker: str
+
+    @classmethod
+    def test_defaults(cls):
+        return cls(
+            ('[data-e2e="sticker-button"]',),
+            ('[data-e2e="sticker-panel"]',),
+            '[data-e2e="sticker-item"]',
+            ('[data-e2e="sticker-publish"]',),
+            ('[data-e2e="staged-sticker"]',),
+            '[data-e2e="send-pending"]',
+            '[data-e2e="send-failed"]',
+        )
 
 
 @dataclass(frozen=True)
@@ -352,6 +383,47 @@ def classify_page_condition(
 DOUYIN_CONFIRMATION_SELECTORS = ConfirmationSelectors(
     outgoing_message_text=".componentsRightPanelwrapper .MessageBoxContentactiveClickArea .MessageItemTextisFromMe .TextMessageTextpureText",
     history_container=".componentsRightPanelwrapper .messageMessageListlist",
+    outgoing_message_row=(
+        ".componentsRightPanelwrapper .messageMessageBoxmessageBox:has(.messageMessageBoxisFromMe), "
+        ".componentsRightPanelwrapper [data-message-id]:has(.MessageItemTextisFromMe)"
+    ),
+    outgoing_sticker_payload=(
+        '[data-e2e="msg-item-content"] img, .MessageItemTextisFromMe img'
+    ),
+)
+
+
+DOUYIN_STICKER_SELECTORS = StickerSelectors(
+    open_button=(
+        'button[aria-label*="表情"]',
+        '[role="button"][aria-label*="表情"]',
+        '[title*="表情"]',
+        'svg.messageMsgInputiconAction',
+    ),
+    panel=(
+        '.componentsemojiemojiPanel',
+        '[class*="emojiPanel"]',
+        '[role="dialog"]',
+    ),
+    item=(
+        '.emojiEmojiItememojiItem, [data-sticker-id], '
+        '[role="button"]:has(img), button:has(img)'
+    ),
+    publish_button=(
+        '[class*="messageMsgInputpublishBtn"]',
+        '.e2e-send-msg-bt',
+        'button[aria-label*="发送"]',
+    ),
+    staged_payload=(
+        '[data-e2e="staged-sticker"]',
+        '[class*="stickerPreview"]',
+        '[class*="emojiPreview"]',
+    ),
+    pending_marker='.semi-spin, [class*="im-saas-message-spin"], [data-icon="spin"]',
+    failure_marker=(
+        '[aria-label*="重试"], [title*="重试"], '
+        '[class*="ContentSideSendStatusretry"], [class*="SendStatusretry"]'
+    ),
 )
 
 
@@ -439,6 +511,7 @@ class DouyinChat:
         confirmation_delay_ms: int = 2_000,
         confirmation_retries: int = 2,
         friend_search_timeout_ms: int = 30_000,
+        sticker_selectors: StickerSelectors | None = None,
     ):
         self.page = page
         self.selectors = selectors
@@ -451,6 +524,11 @@ class DouyinChat:
         self.confirmation_delay_ms = confirmation_delay_ms
         self.confirmation_retries = confirmation_retries
         self.friend_search_timeout_ms = friend_search_timeout_ms
+        self.sticker_selectors = sticker_selectors or (
+            StickerSelectors.test_defaults()
+            if selectors.login_marker.startswith('[data-e2e=')
+            else DOUYIN_STICKER_SELECTORS
+        )
 
     def page_failure(self) -> tuple[str, str] | None:
         """Classify only explicitly visible, selector-owned page conditions.
@@ -571,16 +649,31 @@ class DouyinChat:
             snapshots = 0
             scrolls = 0
             for _ in range(max_scrolls):
+                generic_outgoing_selector = (
+                    self.confirmation_selectors.outgoing_message_row
+                    or self.confirmation_selectors.outgoing_message_text
+                )
                 snapshot = history.evaluate(
-                    """(element, outgoingSelector) => {
-                        const outgoing = Array.from(element.querySelectorAll(outgoingSelector))
+                    """(element, selectors) => {
+                        const outgoing = Array.from(element.querySelectorAll(selectors.outgoing))
                           .map(node => {
                             const row = node.closest('[data-message-id], [data-messageid], [data-msg-id], [data-msgid]') || node;
+                            const textNode = row.matches(selectors.text) ? row : row.querySelector(selectors.text);
+                            const stickerNode = selectors.sticker
+                              ? (row.matches(selectors.sticker) ? row : row.querySelector(selectors.sticker))
+                              : null;
                             const timestamp = [node, row].flatMap(item => item ? [
                               item.getAttribute('data-timestamp'), item.getAttribute('data-time'),
                               item.getAttribute('datetime'), item.getAttribute('title')
                             ] : []).filter(Boolean);
-                            return { text: node.innerText || node.textContent || '', timestamp };
+                            return {
+                              text: textNode ? (textNode.innerText || textNode.textContent || '') : '',
+                              sticker: stickerNode ? (
+                                stickerNode.getAttribute('src') || stickerNode.getAttribute('alt') ||
+                                stickerNode.getAttribute('aria-label') || stickerNode.getAttribute('title') || ''
+                              ) : '',
+                              timestamp
+                            };
                           });
                         const markers = Array.from(element.querySelectorAll(
                           'time, [datetime], [data-e2e*="time" i], [data-e2e*="date" i], '
@@ -596,7 +689,11 @@ class DouyinChat:
                           atTop: element.scrollTop <= 1
                         };
                     }""",
-                    self.confirmation_selectors.outgoing_message_text,
+                    {
+                        "outgoing": generic_outgoing_selector,
+                        "text": self.confirmation_selectors.outgoing_message_text,
+                        "sticker": self.confirmation_selectors.outgoing_sticker_payload,
+                    },
                 )
                 if not isinstance(snapshot, dict):
                     return TodayOutgoingAudit(
@@ -1178,6 +1275,373 @@ class DouyinChat:
             composer_empty=reason == "empty",
             reason=reason,
         )
+
+    def _first_visible(self, selectors: tuple[str, ...]):
+        for selector in selectors:
+            locator = self.page.locator(selector)
+            for index in range(locator.count()):
+                candidate = locator.nth(index)
+                if candidate.is_visible():
+                    return candidate
+        return None
+
+    def _open_sticker_panel(self):
+        panel = self._first_visible(self.sticker_selectors.panel)
+        if panel is not None:
+            return panel
+        button = self._first_visible(self.sticker_selectors.open_button)
+        if button is None:
+            raise RuntimeError("无法打开抖音原生表情面板")
+        button.click()
+        panel = self._first_visible(self.sticker_selectors.panel)
+        if panel is None:
+            raise RuntimeError("抖音原生表情面板不可用")
+        return panel
+
+    @staticmethod
+    def _resource_key(source: str | None) -> str | None:
+        if not source:
+            return None
+        try:
+            key = Path(urlsplit(source).path).name
+        except ValueError:
+            return None
+        return key or None
+
+    def _sticker_rows(self, panel) -> list[dict[str, object]]:
+        rows = panel.locator(self.sticker_selectors.item).evaluate_all(
+            """elements => elements
+                .filter(element => {
+                    const style = getComputedStyle(element);
+                    return style.display !== 'none' && style.visibility !== 'hidden';
+                })
+                .map((element, index) => {
+                    const image = element.matches('img') ? element : element.querySelector('img');
+                    const value = name => element.getAttribute(name) || image?.getAttribute(name) || null;
+                    const displayName = value('aria-label') || value('alt') || value('title')
+                        || element.innerText || element.textContent || '';
+                    return {
+                        displayName: displayName.trim(),
+                        accessibleName: (value('aria-label') || value('alt') || value('title') || '').trim(),
+                        resourceUrl: value('src') || value('data-src') || value('data-url'),
+                        machineId: value('data-sticker-id') || value('data-emoji-id')
+                            || value('data-resource-id') || value('data-id'),
+                        category: value('data-category') || element.closest('[data-category]')?.getAttribute('data-category'),
+                        diagnosticIndex: index
+                    };
+                })"""
+        )
+        return [row for row in rows if isinstance(row, dict)]
+
+    @staticmethod
+    def _logical_sticker_id(row: dict[str, object]) -> str | None:
+        identity: tuple[str, str] | None = None
+        resource_key = DouyinChat._resource_key(str(row.get("resourceUrl") or ""))
+        if resource_key:
+            identity = ("resource", resource_key)
+        elif row.get("machineId"):
+            identity = ("machine", str(row["machineId"]))
+        elif row.get("accessibleName"):
+            identity = ("accessible", str(row["accessibleName"]))
+        elif row.get("category") and row.get("displayName"):
+            identity = (
+                "category-name",
+                f"{row['category']}\0{row['displayName']}",
+            )
+        if identity is None:
+            return None
+        digest = hashlib.sha256(
+            f"{identity[0]}\0{identity[1]}".encode("utf-8")
+        ).hexdigest()[:24]
+        return f"native-sticker-{digest}"
+
+    def scan_native_stickers(self) -> list[NativeStickerDescriptor]:
+        """Enumerate sticker metadata without clicking any sticker item."""
+        self._raise_if_page_failure()
+        panel = self._open_sticker_panel()
+        descriptors: list[NativeStickerDescriptor] = []
+        seen: set[str] = set()
+        previous_top: int | None = None
+        for _ in range(20):
+            for row in self._sticker_rows(panel):
+                logical_id = self._logical_sticker_id(row)
+                display_name = str(
+                    row.get("displayName") or row.get("accessibleName") or ""
+                ).strip()
+                if not logical_id or not display_name or logical_id in seen:
+                    continue
+                seen.add(logical_id)
+                source = str(row.get("resourceUrl") or "") or None
+                descriptors.append(
+                    NativeStickerDescriptor(
+                        logical_id=logical_id,
+                        display_name=display_name,
+                        resource_key=self._resource_key(source),
+                        machine_id=str(row.get("machineId") or "") or None,
+                        accessible_name=str(row.get("accessibleName") or "") or None,
+                        category=str(row.get("category") or "") or None,
+                        preview_url=source,
+                        diagnostic_index=(
+                            int(row["diagnosticIndex"])
+                            if isinstance(row.get("diagnosticIndex"), int)
+                            else None
+                        ),
+                    )
+                )
+            position = panel.evaluate(
+                """element => ({
+                    top: Math.max(0, Math.round(element.scrollTop)),
+                    height: Math.max(0, Math.round(element.scrollHeight)),
+                    client: Math.max(0, Math.round(element.clientHeight))
+                })"""
+            )
+            top = int(position.get("top", 0))
+            height = int(position.get("height", 0))
+            client = int(position.get("client", 0))
+            if client <= 0 or top + client >= height or top == previous_top:
+                break
+            previous_top = top
+            panel.evaluate(
+                "element => { element.scrollTop = Math.min(element.scrollHeight, element.scrollTop + Math.max(40, element.clientHeight * 0.8)); }"
+            )
+            self.page.wait_for_timeout(25)
+        if not descriptors:
+            raise RuntimeError("未发现可可靠识别的抖音原生表情")
+        return descriptors
+
+    @staticmethod
+    def _sticker_row_matches(
+        row: dict[str, object],
+        sticker: NativeStickerDescriptor,
+        level: str,
+    ) -> bool:
+        if level == "resource":
+            return bool(
+                sticker.resource_key
+                and DouyinChat._resource_key(str(row.get("resourceUrl") or ""))
+                == sticker.resource_key
+            )
+        if level == "machine":
+            return bool(
+                sticker.machine_id
+                and str(row.get("machineId") or "") == sticker.machine_id
+            )
+        if level == "accessible":
+            expected = sticker.accessible_name or sticker.display_name
+            return str(row.get("accessibleName") or "") == expected
+        return bool(
+            sticker.category
+            and str(row.get("category") or "") == sticker.category
+            and str(row.get("displayName") or "") == sticker.display_name
+        )
+
+    def _resolve_sticker_locator(self, sticker: NativeStickerDescriptor):
+        panel = self._open_sticker_panel()
+        levels = ("resource", "machine", "accessible", "category-name")
+        for attempt in range(2):
+            rows = self._sticker_rows(panel)
+            items = panel.locator(self.sticker_selectors.item)
+            for level in levels:
+                matches = [
+                    int(row["diagnosticIndex"])
+                    for row in rows
+                    if isinstance(row.get("diagnosticIndex"), int)
+                    and self._sticker_row_matches(row, sticker, level)
+                ]
+                if len(matches) == 1:
+                    return items.nth(matches[0])
+                if len(matches) > 1:
+                    break
+            if attempt == 0:
+                panel.evaluate(
+                    "element => { element.scrollTop = element.scrollHeight; }"
+                )
+                self.page.wait_for_timeout(25)
+        raise RuntimeError(
+            f"已保存的原生表情「{sticker.display_name}」当前无法在抖音页面中可靠定位，请刷新原生表情。"
+        )
+
+    def _outgoing_sticker_payloads(self) -> dict[str, dict[str, object]]:
+        selector = (
+            self.confirmation_selectors.outgoing_message_row
+            or self.confirmation_selectors.outgoing_sticker_payload
+        )
+        if not selector:
+            return {}
+        try:
+            observed = self.page.locator(selector).evaluate_all(
+                """(elements, selectors) => elements.map(node => {
+                    const row = node.closest('[data-message-id], [data-messageid], [data-msg-id], [data-msgid]') || node;
+                    const value = (element, names) => {
+                        for (const name of names) {
+                            const found = element?.getAttribute(name);
+                            if (found) return found;
+                        }
+                        return null;
+                    };
+                    const identity = value(row, ['data-message-id', 'data-messageid', 'data-msg-id', 'data-msgid'])
+                        || value(row, ['data-timestamp', 'data-time', 'datetime']);
+                    const sticker = selectors.sticker
+                        ? (row.matches(selectors.sticker) ? row : row.querySelector(selectors.sticker))
+                        : null;
+                    return {
+                        identity,
+                        resourceUrl: value(sticker, ['src', 'data-src', 'data-url']),
+                        accessibleName: value(sticker, ['aria-label', 'alt', 'title']),
+                        machineId: value(sticker, ['data-sticker-id', 'data-emoji-id', 'data-resource-id', 'data-id']),
+                        pending: Boolean(selectors.pending && row.querySelector(selectors.pending)),
+                        failed: Boolean(selectors.failed && row.querySelector(selectors.failed))
+                    };
+                }).filter(item => item.identity && (item.resourceUrl || item.accessibleName || item.machineId))""",
+                {
+                    "sticker": self.confirmation_selectors.outgoing_sticker_payload,
+                    "pending": self.sticker_selectors.pending_marker,
+                    "failed": self.sticker_selectors.failure_marker,
+                },
+            )
+        except Exception:
+            return {}
+        return {
+            str(item["identity"]): item
+            for item in observed
+            if isinstance(item, dict) and item.get("identity")
+        }
+
+    @classmethod
+    def _outgoing_sticker_matches(
+        cls,
+        payload: dict[str, object],
+        sticker: NativeStickerDescriptor,
+    ) -> bool:
+        resource_key = cls._resource_key(str(payload.get("resourceUrl") or ""))
+        if sticker.resource_key and resource_key:
+            return sticker.resource_key == resource_key
+        if sticker.machine_id and payload.get("machineId"):
+            return sticker.machine_id == str(payload["machineId"])
+        expected_name = sticker.accessible_name or sticker.display_name
+        return bool(
+            expected_name
+            and str(payload.get("accessibleName") or "") == expected_name
+        )
+
+    def _confirm_sticker_delivery(
+        self,
+        sticker: NativeStickerDescriptor,
+        *,
+        pre_send_identities: set[str],
+    ) -> tuple[DeliveryStatus | None, int]:
+        for attempt in range(1, self.confirmation_retries + 2):
+            if self.confirmation_delay_ms:
+                self.page.wait_for_timeout(self.confirmation_delay_ms)
+            payloads = self._outgoing_sticker_payloads()
+            for identity, payload in payloads.items():
+                if (
+                    identity not in pre_send_identities
+                    and self._outgoing_sticker_matches(payload, sticker)
+                    and not payload.get("pending")
+                    and not payload.get("failed")
+                ):
+                    return (
+                        DeliveryStatus.CONFIRMED
+                        if attempt == 1
+                        else DeliveryStatus.RETRY_CONFIRMED,
+                        attempt,
+                    )
+        return None, self.confirmation_retries + 1
+
+    def _publish_staged_sticker(self) -> bool:
+        staged = None
+        for selector in self.sticker_selectors.staged_payload:
+            locator = self.page.locator(selector)
+            for index in range(locator.count()):
+                candidate = locator.nth(index)
+                if candidate.evaluate(
+                    "element => !element.hidden && getComputedStyle(element).display !== 'none' && getComputedStyle(element).visibility !== 'hidden'"
+                ):
+                    staged = candidate
+                    break
+            if staged is not None:
+                break
+        publish = self._first_visible(self.sticker_selectors.publish_button)
+        if staged is None or publish is None:
+            return False
+        publish.click()
+        return True
+
+    def send_native_sticker(
+        self,
+        target: str,
+        sticker: NativeStickerDescriptor,
+        *,
+        selected_target_id: str | None = None,
+        expected_conversation_id: str | None = None,
+        conversation_verified: bool = False,
+    ) -> DeliveryResult:
+        send_attempted = False
+        try:
+            self._raise_if_page_failure()
+            if expected_conversation_id is not None and not conversation_verified:
+                identity = self.open_conversation_identity(
+                    selected_target_id or "",
+                    expected_conversation_id,
+                    target,
+                    timeout_ms=self.friend_search_timeout_ms,
+                )
+                if not identity.identity_match:
+                    return DeliveryResult(
+                        DeliveryStatus.BLOCKED,
+                        error=identity.identity_match_reason,
+                        failure_stage="identity_verified",
+                        reason_code="identity_verification_failed",
+                    )
+            elif expected_conversation_id is None:
+                self.open_verified_conversation(target)
+            self._raise_if_page_failure()
+            locator = self._resolve_sticker_locator(sticker)
+            before = set(self._outgoing_sticker_payloads())
+            send_attempted = True
+            locator.click()
+            status, attempts = self._confirm_sticker_delivery(
+                sticker,
+                pre_send_identities=before,
+            )
+            if status is None and self._publish_staged_sticker():
+                status, publish_attempts = self._confirm_sticker_delivery(
+                    sticker,
+                    pre_send_identities=before,
+                )
+                attempts += publish_attempts
+            if status is not None:
+                return DeliveryResult(
+                    status,
+                    send_attempts=1,
+                    confirmation_attempts=attempts,
+                    confirmation_provenance=(
+                        DeliveryConfirmationProvenance.POST_SEND_OBSERVED
+                    ),
+                )
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMATION_FAILED,
+                send_attempts=1,
+                confirmation_attempts=attempts,
+                error="post-send sticker observation unavailable",
+                failure_stage="confirmation_observed",
+                reason_code="confirmation_failed_uncertain",
+            )
+        except (RuntimeError, PlaywrightTimeoutError) as exc:
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMATION_FAILED if send_attempted else DeliveryStatus.BLOCKED,
+                send_attempts=int(send_attempted),
+                error=str(exc),
+                failure_stage=(
+                    "send_boundary_reached" if send_attempted else "conversation_selected"
+                ),
+                reason_code=(
+                    "confirmation_failed_uncertain"
+                    if send_attempted
+                    else "native_sticker_unavailable"
+                ),
+            )
 
     def send(
         self,

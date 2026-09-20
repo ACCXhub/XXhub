@@ -107,6 +107,178 @@ def test_replace_import_backs_up_and_replaces(tmp_path: Path):
     assert messages.read_text(encoding="utf-8") == "早安呀\n今天顺利\n"
 
 
+def test_mixed_pack_round_trips_typed_entries_and_keeps_native_provenance_meaning(
+    tmp_path: Path,
+):
+    data_root = tmp_path / "user-data"
+    service = MessagePackService(make_pack_root(tmp_path), data_root)
+    created = service.create_pack(service.catalog().revision, "混合内容")
+    text = service.add_message(created.pack.id, "早安", created.revision)
+
+    sticker = service.add_native_sticker(
+        created.pack.id,
+        logical_id="sticker-heart",
+        display_name="比心",
+        resource_key="heart.webp",
+        expected_revision=text.revision,
+    )
+    preview = MessagePackService(tmp_path, data_root).preview(
+        created.pack.id
+    )
+
+    assert preview.messages == ["早安"]
+    assert [entry.kind for entry in preview.entries] == ["text", "native_sticker"]
+    assert preview.entries[0].native is True
+    assert preview.entries[1].native is True
+    assert preview.entries[1].sticker.logical_id == "sticker-heart"
+    assert preview.entries[1].sticker.resource_key == "heart.webp"
+    assert sticker.entry.id == preview.entries[1].id
+    assert preview.pack.count == 2
+
+
+def test_legacy_catalog_upgrades_centrally_without_changing_ids_or_fusion(
+    tmp_path: Path,
+):
+    data_root = tmp_path / "user-data"
+    service = MessagePackService(make_pack_root(tmp_path), data_root)
+    source, message = create_pack_with_message(service, "来源", "来源文案")
+    destination = service.create_pack(service.catalog().revision, "目标").pack
+    config_path = data_root / "config.yaml"
+    make_config(config_path, source.id)
+    service.fuse(source.id, destination.id, service.catalog().revision, config_path)
+
+    path = service.store.catalog_path
+    legacy = json.loads(path.read_text(encoding="utf-8"))
+    legacy["schema_version"] = 1
+    legacy.pop("native_stickers", None)
+    for package in legacy["packages"].values():
+        for item in package["items"]:
+            if item["kind"] == "text":
+                item["kind"] = "message"
+    path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+
+    restarted = MessagePackService(tmp_path, data_root)
+    upgraded = restarted.catalog()
+
+    assert upgraded.schema_version == 2
+    assert source.id in upgraded.packages
+    assert destination.id in upgraded.packages
+    assert message.id in upgraded.messages
+    assert restarted.preview(destination.id).messages == ["来源文案"]
+    assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 2
+
+
+def test_native_sticker_requires_a_durable_logical_reference(tmp_path: Path):
+    service = MessagePackService(make_pack_root(tmp_path), tmp_path / "user-data")
+    created = service.create_pack(service.catalog().revision, "表情")
+
+    with pytest.raises(MessagePackError, match="原生表情"):
+        service.add_native_sticker(
+            created.pack.id,
+            logical_id="",
+            display_name="",
+            expected_revision=created.revision,
+        )
+
+
+def test_messages_txt_import_uses_only_text_and_blocks_zero_text_replace(
+    tmp_path: Path,
+):
+    service = MessagePackService(make_pack_root(tmp_path), tmp_path / "user-data")
+    mixed = service.create_pack(service.catalog().revision, "混合").pack
+    text = service.add_message(mixed.id, "保留文字", service.catalog().revision)
+    service.add_native_sticker(
+        mixed.id,
+        logical_id="sticker-heart",
+        display_name="比心",
+        expected_revision=text.revision,
+    )
+    messages = tmp_path / "messages.txt"
+    messages.write_text("旧文案\n", encoding="utf-8")
+
+    result = service.import_pack(mixed.id, messages, ImportMode.REPLACE)
+
+    assert result.excluded_non_text_count == 1
+    assert messages.read_text(encoding="utf-8") == "保留文字\n"
+
+    sticker_only = service.create_pack(service.catalog().revision, "纯表情").pack
+    service.add_native_sticker(
+        sticker_only.id,
+        logical_id="sticker-fire",
+        display_name="续火花",
+        expected_revision=service.catalog().revision,
+    )
+    before = messages.read_bytes()
+
+    with pytest.raises(MessagePackError, match="没有文字"):
+        service.import_pack(sticker_only.id, messages, ImportMode.REPLACE)
+
+    assert messages.read_bytes() == before
+
+
+def test_native_sticker_can_be_reordered_and_removed_as_a_direct_pack_entry(
+    tmp_path: Path,
+):
+    service = MessagePackService(make_pack_root(tmp_path), tmp_path / "user-data")
+    pack = service.create_pack(service.catalog().revision, "混合").pack
+    first = service.add_message(pack.id, "第一条", service.catalog().revision)
+    sticker = service.add_native_sticker(
+        pack.id,
+        logical_id="sticker-heart",
+        display_name="比心",
+        expected_revision=first.revision,
+    )
+    last = service.add_message(pack.id, "最后一条", sticker.revision)
+
+    reordered = service.reorder_entries(
+        pack.id,
+        [sticker.entry.id, first.entry.id, last.entry.id],
+        last.revision,
+    )
+    assert [entry.id for entry in service.preview(pack.id).entries] == [
+        sticker.entry.id,
+        first.entry.id,
+        last.entry.id,
+    ]
+
+    removed = service.delete_entry(pack.id, sticker.entry.id, reordered.revision)
+
+    assert [entry.kind for entry in service.preview(pack.id).entries] == ["text", "text"]
+    assert sticker.entry.id not in service.catalog().native_stickers
+    assert removed.pack.count == 2
+
+
+def test_fused_child_native_sticker_keeps_identity_and_origin_after_split(
+    tmp_path: Path,
+):
+    data_root = tmp_path / "user-data"
+    service = MessagePackService(make_pack_root(tmp_path), data_root)
+    source = service.create_pack(service.catalog().revision, "来源").pack
+    sticker = service.add_native_sticker(
+        source.id,
+        logical_id="sticker-fire",
+        display_name="续火花",
+        expected_revision=service.catalog().revision,
+    )
+    destination = service.create_pack(sticker.revision, "目标").pack
+    config_path = data_root / "config.yaml"
+    make_config(config_path, source.id)
+
+    fused = service.fuse(
+        source.id,
+        destination.id,
+        service.catalog().revision,
+        config_path,
+    )
+    projected = service.preview(destination.id).entries
+    service.split(destination.id, source.id, fused.revision)
+
+    assert [(entry.id, entry.kind, entry.native) for entry in projected] == [
+        (sticker.entry.id, "native_sticker", False)
+    ]
+    assert service.preview(source.id).entries[0].id == sticker.entry.id
+
+
 def test_preview_rejects_pack_paths_outside_builtin_directory(tmp_path: Path):
     root = make_pack_root(tmp_path)
     (root / "outside.txt").write_text("不应读取\n", encoding="utf-8")

@@ -1,4 +1,5 @@
 from io import BytesIO
+from contextlib import contextmanager
 from datetime import datetime
 import json
 from pathlib import Path
@@ -17,6 +18,7 @@ from autody.runner import TodayDeliveryReconciliation, TodayDeliveryReconciliati
 from autody.modules import OFFICIAL_TEST_CENTER_CORE_RANGE, OFFICIAL_TEST_CENTER_VERSION, MODULE_ID, ModuleManager, build_module_archive
 from autody.account_profile import mark_bindings_for_revalidation
 from autody.failures import failure_detail
+from autody.native_stickers import NativeStickerDescriptor
 
 
 def make_project(tmp_path: Path) -> Path:
@@ -1015,7 +1017,7 @@ def test_official_module_status_and_generated_install_share_the_version_policy(t
     manifest = __import__("json").loads((tmp_path / "data" / "modules" / MODULE_ID / "manifest.json").read_text(encoding="utf-8"))
 
     assert status["bundled_version"] == OFFICIAL_TEST_CENTER_VERSION
-    assert status["core_version"] == "1.5.2"
+    assert status["core_version"] == "1.5.4"
     assert installed["version"] == OFFICIAL_TEST_CENTER_VERSION
     assert manifest["module_version"] == OFFICIAL_TEST_CENTER_VERSION
     assert manifest["required_autody_version"] == OFFICIAL_TEST_CENTER_CORE_RANGE
@@ -3183,6 +3185,112 @@ def test_message_pack_management_api_imports_edits_fuses_and_splits(tmp_path: Pa
     assert pack_id not in [pack["id"] for pack in fused.json()["catalog"]["packs"]]
     assert split.status_code == 200
     assert pack_id in [pack["id"] for pack in split.json()["catalog"]["packs"]]
+
+
+def test_message_pack_api_adds_reorders_and_removes_native_sticker_entries(
+    tmp_path: Path,
+):
+    client = TestClient(create_app(make_project(tmp_path)))
+    catalog = client.get("/api/message-packs").json()
+    created = client.post(
+        "/api/message-packs",
+        json={"name": "混合", "expected_revision": catalog["revision"]},
+    ).json()
+    pack_id = created["pack"]["id"]
+    sticker = client.post(
+        f"/api/message-packs/{pack_id}/native-stickers",
+        json={
+            "expected_revision": created["revision"],
+            "logical_id": "native-sticker-heart",
+            "display_name": "比心",
+            "resource_key": "heart.webp",
+        },
+    )
+    text = client.post(
+        f"/api/message-packs/{pack_id}/messages",
+        json={
+            "expected_revision": sticker.json()["revision"],
+            "text": "晚安",
+        },
+    )
+    sticker_id = sticker.json()["entry"]["id"]
+    text_id = text.json()["entry"]["id"]
+
+    reordered = client.put(
+        f"/api/message-packs/{pack_id}/entries/order",
+        json={
+            "expected_revision": text.json()["revision"],
+            "entry_ids": [text_id, sticker_id],
+        },
+    )
+    removed = client.request(
+        "DELETE",
+        f"/api/message-packs/{pack_id}/entries/{sticker_id}",
+        json={"expected_revision": reordered.json()["revision"]},
+    )
+    preview = client.get(f"/api/message-packs/{pack_id}").json()
+
+    assert sticker.status_code == 200
+    assert sticker.json()["entry"]["kind"] == "native_sticker"
+    assert [entry["id"] for entry in preview["entries"]] == [text_id]
+    assert removed.status_code == 200
+
+
+def test_native_sticker_scan_persists_success_and_preserves_previous_on_failure(
+    tmp_path: Path,
+    monkeypatch,
+):
+    config_path = make_project(tmp_path)
+    account_id = write_verified_account(tmp_path)
+    config = load_config(config_path)
+    config.targets[0].stable_id = "friend-stable-a"
+    config.targets[0].candidate_id = "candidate-a"
+    save_config(config_path, config)
+
+    @contextmanager
+    def fake_open_chat(*_args, **_kwargs):
+        yield object()
+
+    monkeypatch.setattr("autody.web_api.open_chat", fake_open_chat)
+    monkeypatch.setattr(
+        "autody.web_api.resolve_stable_binding",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            valid=True,
+            conversation_id="conversation-a",
+        ),
+    )
+    monkeypatch.setattr(
+        "autody.web_api.DouyinChat.open_conversation_identity",
+        lambda *_args, **_kwargs: SimpleNamespace(identity_match=True),
+    )
+    monkeypatch.setattr(
+        "autody.web_api.DouyinChat.scan_native_stickers",
+        lambda _self: [
+            NativeStickerDescriptor(
+                logical_id="native-sticker-fire",
+                display_name="续火花",
+                resource_key="fire.webp",
+            )
+        ],
+    )
+    client = TestClient(create_app(config_path))
+
+    scanned = client.post("/api/native-stickers/scan")
+    current = client.get("/api/native-stickers")
+
+    assert scanned.status_code == 200
+    assert scanned.json()["account_profile_id"] == account_id
+    assert current.json()["stickers"][0]["resource_key"] == "fire.webp"
+
+    monkeypatch.setattr(
+        "autody.web_api.DouyinChat.scan_native_stickers",
+        lambda _self: (_ for _ in ()).throw(RuntimeError("panel changed")),
+    )
+    failed = client.post("/api/native-stickers/scan")
+    preserved = client.get("/api/native-stickers")
+
+    assert failed.status_code == 422
+    assert preserved.json() == current.json()
 
 
 def test_message_pack_management_api_rejects_deleting_referenced_pack(tmp_path: Path):

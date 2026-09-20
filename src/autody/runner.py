@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from enum import Enum
 import copy
@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 import random
 import time
+from typing import Callable
 
 from autody.chat import (
     DeliveryConfirmationProvenance,
@@ -42,8 +43,14 @@ from autody.history import (
     TaskHistoryStore,
     TaskRunRecord,
 )
-from autody.message_packs import MessagePackError, MessagePackService
+from autody.message_packs import MessagePackError, MessagePackService, PackEntry
 from autody.messages import MessageRotation, format_message_with_suffix, read_messages
+from autody.native_stickers import (
+    NativeStickerCatalogError,
+    NativeStickerCatalogStore,
+    NativeStickerDescriptor,
+    NativeStickerReference,
+)
 from autody.retry_state import TaskOutcome, TaskOutcomeStore
 from autody.runtime import RuntimeContext, resolve_runtime_context
 from autody.state import StateStore
@@ -84,6 +91,57 @@ class RunResult:
 @dataclass(frozen=True)
 class TodayTargetMessage:
     text: str
+    kind: str = "text"
+    entry_id: str | None = None
+
+
+@dataclass(frozen=True)
+class SelectedContentEntry:
+    entry_id: str
+    kind: str
+    pack_id: str | None = None
+    text: str | None = None
+    sticker: NativeStickerReference | None = None
+    resolved_sticker: NativeStickerDescriptor | None = None
+
+    def state_payload(self) -> dict:
+        payload = {
+            "schema_version": 1,
+            "entry_id": self.entry_id,
+            "kind": self.kind,
+            "pack_id": self.pack_id,
+        }
+        if self.kind == "text":
+            payload["text"] = self.text
+        elif self.sticker is not None:
+            payload["sticker"] = self.sticker.model_dump(mode="json")
+        return payload
+
+    @classmethod
+    def from_state(cls, payload: object) -> "SelectedContentEntry | None":
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            return None
+        kind = payload.get("kind")
+        entry_id = payload.get("entry_id")
+        if kind == "text" and isinstance(entry_id, str) and isinstance(payload.get("text"), str):
+            return cls(
+                entry_id=entry_id,
+                kind="text",
+                pack_id=payload.get("pack_id"),
+                text=payload["text"],
+            )
+        if kind == "native_sticker" and isinstance(entry_id, str):
+            try:
+                reference = NativeStickerReference.model_validate(payload.get("sticker"))
+            except Exception:
+                return None
+            return cls(
+                entry_id=entry_id,
+                kind="native_sticker",
+                pack_id=payload.get("pack_id"),
+                sticker=reference,
+            )
+        return None
 
 
 @dataclass(frozen=True)
@@ -214,7 +272,7 @@ def _binding_failure_detail(
 def _send_target(
     chat,
     target: Target,
-    message: str,
+    message: str | SelectedContentEntry,
     *,
     expected_conversation_id: str | None = None,
     conversation_verified: bool = False,
@@ -226,7 +284,29 @@ def _send_target(
     The signature check keeps small test/extension senders compatible without
     hiding a TypeError raised from inside their implementation.
     """
-    parameters = inspect.signature(chat.send).parameters
+    content = (
+        message
+        if isinstance(message, SelectedContentEntry)
+        else SelectedContentEntry(
+            entry_id=f"legacy-{hashlib.sha256(message.encode()).hexdigest()[:16]}",
+            kind="text",
+            text=message,
+        )
+    )
+    sender = chat.send
+    send_value: object = content.text or ""
+    if content.kind == "native_sticker":
+        sender = getattr(chat, "send_native_sticker", None)
+        if not callable(sender) or content.resolved_sticker is None:
+            return DeliveryResult(
+                DeliveryStatus.BLOCKED,
+                send_attempts=0,
+                error="native sticker resolver unavailable",
+                failure_stage="message_prepared",
+                reason_code="native_sticker_unavailable",
+            )
+        send_value = content.resolved_sticker
+    parameters = inspect.signature(sender).parameters
     supports_binding = (
         "expected_conversation_id" in parameters
         or any(
@@ -255,13 +335,13 @@ def _send_target(
         ):
             send_kwargs["delivery_day"] = delivery_day
         return _delivery_result(
-            chat.send(
+            sender(
                 target.name,
-                message,
+                send_value,
                 **send_kwargs,
             )
         )
-    return _delivery_result(chat.send(target.name, message))
+    return _delivery_result(sender(target.name, send_value))
 
 
 @dataclass(frozen=True)
@@ -311,12 +391,15 @@ def _fatal_chat_execution(exc: FatalChatError) -> TodayTargetExecution:
 def _execute_today_target(
     chat,
     target: Target,
-    message: str | None,
+    message: str | SelectedContentEntry | None,
     today: date,
     *,
     expected_conversation_id: str | None,
     allow_send: bool = True,
     audit_before_send: bool = True,
+    prepare_send: Callable[
+        [str | SelectedContentEntry], str | SelectedContentEntry
+    ] | None = None,
 ) -> TodayTargetExecution:
     """Audit a verified conversation and, only when missing, send in place.
 
@@ -325,17 +408,44 @@ def _execute_today_target(
     they stay on their existing in-memory path and never represent a browser
     execution path.
     """
-    if allow_send and (
-        not _supports_today_target_pipeline(chat) or not expected_conversation_id
-    ):
+    def send_prepared(
+        value: str | SelectedContentEntry | None,
+        *,
+        audit: TodayOutgoingAudit | None = None,
+        conversation_verified: bool = False,
+    ) -> TodayTargetExecution:
+        if value is None:
+            raise ValueError("sending requires a prepared message")
+        try:
+            prepared = prepare_send(value) if prepare_send is not None else value
+        except RuntimeError as exc:
+            return TodayTargetExecution(
+                audit=audit,
+                delivery=DeliveryResult(
+                    DeliveryStatus.BLOCKED,
+                    send_attempts=0,
+                    error=str(exc),
+                    failure_stage="message_prepared",
+                    reason_code="native_sticker_unavailable",
+                ),
+            )
         return TodayTargetExecution(
+            audit=audit,
             delivery=_send_target(
                 chat,
                 target,
-                message,
+                prepared,
                 expected_conversation_id=expected_conversation_id,
-            )
+                conversation_verified=conversation_verified,
+                pre_send_audit=audit,
+                delivery_day=today,
+            ),
         )
+
+    if allow_send and (
+        not _supports_today_target_pipeline(chat) or not expected_conversation_id
+    ):
+        return send_prepared(message)
     if not expected_conversation_id or not callable(
         getattr(chat, "open_conversation_identity", None)
     ):
@@ -377,18 +487,7 @@ def _execute_today_target(
             )
         )
     if allow_send and not audit_before_send:
-        if message is None:
-            raise ValueError("sending requires a prepared message")
-        return TodayTargetExecution(
-            delivery=_send_target(
-                chat,
-                target,
-                message,
-                expected_conversation_id=expected_conversation_id,
-                conversation_verified=True,
-                delivery_day=today,
-            )
-        )
+        return send_prepared(message, conversation_verified=True)
     try:
         audit = chat.audit_today_outgoing(today)
     except FatalChatError as exc:
@@ -403,19 +502,10 @@ def _execute_today_target(
             return _fatal_chat_execution(exc)
     if audit.status is not TodayOutgoingStatus.CONFIRMED_MISSING or not allow_send:
         return TodayTargetExecution(audit=audit)
-    if message is None:
-        raise ValueError("sending requires a prepared message")
-    return TodayTargetExecution(
+    return send_prepared(
+        message,
         audit=audit,
-        delivery=_send_target(
-            chat,
-            target,
-            message,
-            expected_conversation_id=expected_conversation_id,
-            conversation_verified=True,
-            pre_send_audit=audit,
-            delivery_day=today,
-        ),
+        conversation_verified=True,
     )
 
 
@@ -826,7 +916,35 @@ def _selection_rng(day: date, scope: str, target: Target | None = None) -> rando
     return random.Random(int.from_bytes(seed, "big"))
 
 
-def _target_base_message(
+def _pack_entry_content(entry: PackEntry, pack_id: str) -> SelectedContentEntry:
+    if entry.kind == "text" and entry.text is not None:
+        return SelectedContentEntry(
+            entry_id=entry.id,
+            kind="text",
+            pack_id=pack_id,
+            text=entry.text,
+        )
+    if entry.kind == "native_sticker" and entry.sticker is not None:
+        return SelectedContentEntry(
+            entry_id=entry.id,
+            kind="native_sticker",
+            pack_id=pack_id,
+            sticker=NativeStickerReference.model_validate(
+                entry.sticker.model_dump(mode="json")
+            ),
+        )
+    raise MessagePackError("文案包包含无效内容条目")
+
+
+def _legacy_text_content(text: str, scope: str) -> SelectedContentEntry:
+    return SelectedContentEntry(
+        entry_id=f"legacy-{hashlib.sha256(f'{scope}:{text}'.encode()).hexdigest()[:24]}",
+        kind="text",
+        text=text,
+    )
+
+
+def _target_base_content(
     target: Target,
     config: AppConfig,
     daily: dict,
@@ -836,14 +954,14 @@ def _target_base_message(
     *,
     persist_catalog: bool = True,
     runtime_context: RuntimeContext,
-) -> str:
+) -> SelectedContentEntry:
     pack_id = (
         target.message_pack
         if target.message_pack is not None
         else config.default_message_pack
     )
     if not pack_id:
-        return daily["message"]
+        return _legacy_text_content(daily["message"], "daily")
     selection = target.message_selection or config.message_selection
     target_id = target_identity(target)
     key = (
@@ -851,22 +969,94 @@ def _target_base_message(
         if selection == "one_for_all"
         else f"pack:{target_id}"
     )
-    cached = daily.setdefault("messages_by_target", {}).get(key)
-    if cached:
-        return cached
-    pack_messages = MessagePackService(
+    selected_content = daily.setdefault("selected_content_by_target", {})
+    cached_content = SelectedContentEntry.from_state(selected_content.get(key))
+    if cached_content is not None:
+        return cached_content
+    legacy_cached = daily.setdefault("messages_by_target", {}).get(key)
+    if isinstance(legacy_cached, str) and legacy_cached:
+        adapted = _legacy_text_content(legacy_cached, key)
+        selected_content[key] = adapted.state_payload()
+        return adapted
+    preview = MessagePackService(
         runtime_context.program_root,
         runtime_context.data_root,
-    ).preview(pack_id, persist_catalog=persist_catalog).messages
-    selected = (
-        _selection_rng(day, "message-pack", target).choice(pack_messages)
+    ).preview(pack_id, persist_catalog=persist_catalog)
+    if not preview.entries:
+        raise MessagePackError("文案包没有可发送的内容条目")
+    selected_entry = (
+        _selection_rng(day, "message-pack", target).choice(preview.entries)
         if selection == "per_friend"
-        else MessageRotation(
-            _selection_rng(day, f"message-pack:{pack_id}")
-        ).peek(pack_messages, rotation_state)
+        else next(
+            entry
+            for entry in preview.entries
+            if entry.id
+            == MessageRotation(
+                _selection_rng(day, f"message-pack:{pack_id}")
+            ).peek([item.id for item in preview.entries], rotation_state)
+        )
     )
-    daily["messages_by_target"][key] = selected
+    selected = _pack_entry_content(selected_entry, pack_id)
+    selected_content[key] = selected.state_payload()
+    if selected.kind == "text" and selected.text is not None:
+        daily["messages_by_target"][key] = selected.text
     return selected
+
+
+def _resolve_target_content(
+    target: Target,
+    config: AppConfig,
+    day: date,
+    daily: dict,
+    messages: list[str],
+    rotation_state,
+    *,
+    persist_catalog: bool = True,
+    runtime_context: RuntimeContext,
+) -> SelectedContentEntry:
+    if target.message_pack is not None or config.default_message_pack:
+        base = _target_base_content(
+            target,
+            config,
+            daily,
+            messages,
+            day,
+            rotation_state,
+            persist_catalog=persist_catalog,
+            runtime_context=runtime_context,
+        )
+    elif (target.message_selection or config.message_selection) == "per_friend":
+        target_id = target_identity(target)
+        key = f"target:{target_id}"
+        selected = daily.setdefault("selected_content_by_target", {})
+        cached = SelectedContentEntry.from_state(selected.get(key))
+        if cached is not None:
+            base = cached
+        else:
+            per_target = daily.setdefault("messages_by_target", {})
+            text = per_target.get(key) or per_target.get(target.name)
+            if not text:
+                text = _selection_rng(day, "per-friend", target).choice(messages)
+                per_target[key] = text
+            base = _legacy_text_content(text, key)
+            selected[key] = base.state_payload()
+    else:
+        if not daily["message"]:
+            daily["message"] = MessageRotation(
+                _selection_rng(day, "daily")
+            ).peek(messages, rotation_state)
+        key = "global:one-for-all"
+        selected = daily.setdefault("selected_content_by_target", {})
+        base = SelectedContentEntry.from_state(selected.get(key)) or _legacy_text_content(
+            daily["message"], key
+        )
+        selected[key] = base.state_payload()
+    if base.kind == "text" and base.text is not None:
+        return replace(
+            base,
+            text=format_message_with_suffix(base.text, _target_suffix(target, config)),
+        )
+    return base
 
 
 def _resolve_target_message(
@@ -880,32 +1070,37 @@ def _resolve_target_message(
     persist_catalog: bool = True,
     runtime_context: RuntimeContext,
 ) -> str:
-    if target.message_pack is not None or config.default_message_pack:
-        base = _target_base_message(
-            target,
-            config,
-            daily,
-            messages,
-            day,
-            rotation_state,
-            persist_catalog=persist_catalog,
-            runtime_context=runtime_context,
-        )
-    elif (target.message_selection or config.message_selection) == "per_friend":
-        target_id = target_identity(target)
-        key = f"target:{target_id}"
-        per_target = daily.setdefault("messages_by_target", {})
-        base = per_target.get(key) or per_target.get(target.name)
-        if not base:
-            base = _selection_rng(day, "per-friend", target).choice(messages)
-            per_target[key] = base
-    else:
-        if not daily["message"]:
-            daily["message"] = MessageRotation(
-                _selection_rng(day, "daily")
-            ).peek(messages, rotation_state)
-        base = daily["message"]
-    return format_message_with_suffix(base, _target_suffix(target, config))
+    content = _resolve_target_content(
+        target,
+        config,
+        day,
+        daily,
+        messages,
+        rotation_state,
+        persist_catalog=persist_catalog,
+        runtime_context=runtime_context,
+    )
+    if content.kind != "text" or content.text is None:
+        return f"[原生表情] {content.sticker.display_name if content.sticker else ''}".strip()
+    return content.text
+
+
+def _resolve_active_sticker_content(
+    content: SelectedContentEntry,
+    runtime_context: RuntimeContext,
+) -> SelectedContentEntry:
+    if content.kind != "native_sticker" or content.sticker is None:
+        return content
+    profile = load_account_profile(runtime_context.data_root)
+    if profile is None or not profile.account_profile_id.startswith("account-"):
+        raise MessagePackError("当前账号尚未建立原生表情目录")
+    try:
+        descriptor = NativeStickerCatalogStore(
+            runtime_context.data_root
+        ).resolve(profile.account_profile_id, content.sticker)
+    except NativeStickerCatalogError as exc:
+        raise MessagePackError(str(exc)) from exc
+    return replace(content, resolved_sticker=descriptor)
 
 
 def preview_today_target_message(
@@ -935,17 +1130,25 @@ def preview_today_target_message(
     if not daily.get("message"):
         daily["message"] = MessageRotation(_selection_rng(day, "daily")).peek(messages, state.rotation)
     daily.setdefault("messages_by_target", {})
+    daily.setdefault("selected_content_by_target", {})
+    content = _resolve_target_content(
+        target,
+        config,
+        day,
+        daily,
+        messages,
+        state.rotation,
+        persist_catalog=False,
+        runtime_context=runtime_context,
+    )
     return TodayTargetMessage(
-        _resolve_target_message(
-            target,
-            config,
-            day,
-            daily,
-            messages,
-            state.rotation,
-            persist_catalog=False,
-            runtime_context=runtime_context,
-        )
+        text=(
+            content.text
+            if content.kind == "text" and content.text is not None
+            else f"[原生表情] {content.sticker.display_name if content.sticker else ''}".strip()
+        ),
+        kind=content.kind,
+        entry_id=content.entry_id,
     )
 
 
@@ -1734,7 +1937,11 @@ def run_daily(
                 blocking_failure_reason = (
                     blocking_failure_reason or detail.reason_code
                 )
-    def execute_target(target: Target, message: str, expected_conversation_id: str | None):
+    def execute_target(
+        target: Target,
+        content: SelectedContentEntry,
+        expected_conversation_id: str | None,
+    ):
         target_id = target_identity(target)
         target_failures = _stored_target_failures(daily)
         reconciliation = daily.get("delivery_reconciliation", {})
@@ -1748,16 +1955,23 @@ def run_daily(
             effective_status=effective_before_run.get(target_id),
             has_target_failure=target_id in target_failures,
             reconciliation_status=reconciliation_status,
+        ) or any(
+            status == "success" for status in effective_before_run.values()
         )
         try:
             return _execute_today_target(
                 chat,
                 target,
-                message,
+                content,
                 today,
                 expected_conversation_id=expected_conversation_id,
                 allow_send=not audit_only,
                 audit_before_send=audit_before_send,
+                prepare_send=lambda value: (
+                    _resolve_active_sticker_content(value, runtime_context)
+                    if isinstance(value, SelectedContentEntry)
+                    else value
+                ),
             )
         except FatalChatError as exc:
             return _fatal_chat_execution(exc)
@@ -1866,14 +2080,14 @@ def run_daily(
         store.save(state)
 
     run_started = time.monotonic()
-    locator_misses: list[tuple[Target, str, TodayTargetExecution]] = []
+    locator_misses: list[tuple[Target, SelectedContentEntry, TodayTargetExecution]] = []
     for target_index, target in enumerate(pending):
         target_name = target.name
         remaining = target.delay_offset_minutes * 60 - (time.monotonic() - run_started)
         if remaining > 0:
             time.sleep(remaining)
         try:
-            target_message = _resolve_target_message(
+            target_content = _resolve_target_content(
                 target,
                 config,
                 today,
@@ -1902,11 +2116,11 @@ def run_daily(
         store.save(state)
         execution = execute_target(
             target,
-            target_message,
+            target_content,
             conversation_ids.get(target.stable_id or ""),
         )
         if _is_conversation_locator_miss(execution):
-            locator_misses.append((target, target_message, execution))
+            locator_misses.append((target, target_content, execution))
             continue
         apply_execution(target, execution)
         if target_index < len(pending) - 1:
@@ -1918,10 +2132,10 @@ def run_daily(
             chat,
             [target for target, _, _ in locator_misses],
         )
-        for target_index, (target, target_message, initial) in enumerate(locator_misses):
+        for target_index, (target, target_content, initial) in enumerate(locator_misses):
             expected_id = refreshed_ids.get(target.stable_id or "")
             execution = (
-                execute_target(target, target_message, expected_id)
+                execute_target(target, target_content, expected_id)
                 if expected_id
                 else initial
             )
@@ -1948,6 +2162,13 @@ def run_daily(
             message
             for key, message in daily.get("messages_by_target", {}).items()
             if key.startswith("pack:one-for-all:") and message
+        )
+        rotated_messages.extend(
+            payload.get("entry_id")
+            for key, payload in daily.get("selected_content_by_target", {}).items()
+            if key.startswith("pack:one-for-all:")
+            and isinstance(payload, dict)
+            and payload.get("entry_id")
         )
         for message in dict.fromkeys(rotated_messages):
             rotation.consume(message, state.rotation)

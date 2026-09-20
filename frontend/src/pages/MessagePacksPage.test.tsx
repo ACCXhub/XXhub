@@ -11,6 +11,11 @@ vi.mock("../api", () => ({
     importMessagePackFile: vi.fn(),
     renameMessagePack: vi.fn(),
     reorderMessagePacks: vi.fn(),
+    nativeStickerCatalog: vi.fn(),
+    scanNativeStickers: vi.fn(),
+    addNativeSticker: vi.fn(),
+    reorderMessagePackEntries: vi.fn(),
+    deleteMessagePackEntry: vi.fn(),
     fuseMessagePack: vi.fn(),
     splitMessagePack: vi.fn(),
     importMessagePack: vi.fn(),
@@ -27,19 +32,122 @@ beforeEach(() => {
   vi.mocked(api.config).mockResolvedValue({ default_message_pack: "daily" } as never);
   vi.mocked(api.saveConfig).mockImplementation(async (value) => value);
   vi.mocked(api.messagePacks).mockResolvedValue(catalog);
+  vi.mocked(api.nativeStickerCatalog).mockResolvedValue({
+    account_profile_id: "account-aaaaaaaaaaaaaaaaaaaaaaaa",
+    revision: 0,
+    scanned_at: null,
+    stickers: []
+  });
   vi.mocked(api.previewMessagePack).mockResolvedValue({
     pack: daily,
     messages: ["早安呀", "今天顺利"],
     duplicate_count: 0,
     entries: [
-      { id: "m1", text: "早安呀", origin_pack_id: "daily", origin_pack_name: "日常问候", native: true },
-      { id: "m2", text: "今天顺利", origin_pack_id: "source", origin_pack_name: "来源包", native: false }
+      { id: "m1", kind: "text", text: "早安呀", sticker: null, origin_pack_id: "daily", origin_pack_name: "日常问候", native: true },
+      { id: "m2", kind: "text", text: "今天顺利", sticker: null, origin_pack_id: "source", origin_pack_name: "来源包", native: false }
     ]
   });
   vi.mocked(api.importMessagePack).mockResolvedValue({
     added_count: 2, duplicate_count: 0, total_count: 62,
-    backup_path: "data/backups/messages.txt", mode: "merge"
+    backup_path: "data/backups/messages.txt", mode: "merge", excluded_non_text_count: 0
   });
+});
+
+test("scans the current-account sticker catalog and adds a typed sticker to a pack", async () => {
+  vi.mocked(api.scanNativeStickers).mockResolvedValue({
+    account_profile_id: "account-aaaaaaaaaaaaaaaaaaaaaaaa",
+    revision: 1,
+    scanned_at: "2026-09-20T10:00:00",
+    stickers: [{
+      logical_id: "native-sticker-fire", display_name: "续火花",
+      resource_key: "fire.webp", machine_id: null, accessible_name: "续火花",
+      category: null, preview_url: "https://example.test/fire.webp", diagnostic_index: 0,
+      last_seen_at: "2026-09-20T10:00:00"
+    }]
+  });
+  vi.mocked(api.addNativeSticker).mockResolvedValue({
+    revision: 8, pack: { ...daily, count: 3 },
+    catalog: { revision: 8, packs: [{ ...daily, count: 3 }, other] }
+  });
+  render(<MessagePacksPage notify={vi.fn()} />);
+  await screen.findAllByText("日常问候");
+
+  fireEvent.click(screen.getAllByRole("button", { name: "添加原生表情" })[0]);
+  expect(await screen.findByText("当前账号尚未扫描原生表情。" )).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "扫描原生表情" }));
+  fireEvent.click(await screen.findByRole("button", { name: "添加 续火花" }));
+
+  await waitFor(() => expect(api.addNativeSticker).toHaveBeenCalledWith(
+    "daily",
+    expect.objectContaining({ logical_id: "native-sticker-fire", resource_key: "fire.webp" }),
+    7
+  ));
+});
+
+test("renders a fused native sticker with provenance in the existing preview", async () => {
+  vi.mocked(api.previewMessagePack).mockResolvedValue({
+    pack: daily,
+    messages: ["早安呀"],
+    duplicate_count: 0,
+    entries: [
+      { id: "m1", kind: "text", text: "早安呀", sticker: null, origin_pack_id: "daily", origin_pack_name: "日常问候", native: true },
+      { id: "s1", kind: "native_sticker", text: null, sticker: { logical_id: "native-sticker-heart", display_name: "比心", resource_key: "heart.webp", machine_id: null, accessible_name: "比心", category: null }, origin_pack_id: "source", origin_pack_name: "来源包", native: false }
+    ]
+  });
+  render(<MessagePacksPage notify={vi.fn()} />);
+  await screen.findAllByText("日常问候");
+
+  fireEvent.click(screen.getAllByRole("button", { name: "预览" })[0]);
+
+  expect(await screen.findByText("原生表情 · 比心")).toBeInTheDocument();
+  expect(screen.getByText(/来源：来源包/)).toBeInTheDocument();
+});
+
+test("reorders and removes a direct sticker by typed entry id", async () => {
+  const mixedPreview = {
+    pack: daily,
+    messages: ["早安呀"],
+    duplicate_count: 0,
+    entries: [
+      { id: "m1", kind: "text" as const, text: "早安呀", sticker: null, origin_pack_id: "daily", origin_pack_name: "日常问候", native: true },
+      { id: "s1", kind: "native_sticker" as const, text: null, sticker: { logical_id: "native-sticker-heart", display_name: "比心", resource_key: "heart.webp", machine_id: null, accessible_name: "比心", category: null }, origin_pack_id: "daily", origin_pack_name: "日常问候", native: true }
+    ]
+  };
+  vi.mocked(api.previewMessagePack).mockResolvedValue(mixedPreview);
+  vi.mocked(api.reorderMessagePackEntries).mockResolvedValue({
+    revision: 8, pack: daily, catalog: { revision: 8, packs: catalog.packs }
+  });
+  vi.mocked(api.deleteMessagePackEntry).mockResolvedValue({
+    revision: 9, pack: { ...daily, count: 1 }, catalog: { revision: 9, packs: [{ ...daily, count: 1 }, other] }
+  });
+  render(<MessagePacksPage notify={vi.fn()} />);
+  await screen.findAllByText("日常问候");
+
+  fireEvent.click(screen.getAllByRole("button", { name: "预览" })[0]);
+  fireEvent.click(await screen.findByRole("button", { name: "上移 比心" }));
+  await waitFor(() => expect(api.reorderMessagePackEntries).toHaveBeenCalledWith("daily", ["s1", "m1"], 7));
+  await waitFor(() => expect(screen.getByRole("button", { name: "删除 比心" })).not.toBeDisabled());
+  fireEvent.click(screen.getByRole("button", { name: "删除 比心" }));
+  await waitFor(() => expect(api.deleteMessagePackEntry).toHaveBeenCalledWith("daily", "s1", 8));
+});
+
+test("blocks messages.txt replacement when a pack contains only stickers", async () => {
+  vi.mocked(api.previewMessagePack).mockResolvedValue({
+    pack: { ...daily, count: 1 },
+    messages: [],
+    duplicate_count: 0,
+    entries: [{ id: "s1", kind: "native_sticker", text: null, sticker: { logical_id: "native-sticker-heart", display_name: "比心", resource_key: "heart.webp", machine_id: null, accessible_name: "比心", category: null }, origin_pack_id: "daily", origin_pack_name: "日常问候", native: true }]
+  });
+  render(<MessagePacksPage notify={vi.fn()} />);
+  await screen.findAllByText("日常问候");
+
+  fireEvent.click(screen.getAllByRole("button", { name: "覆盖全局文案" })[0]);
+
+  const dialog = await screen.findByRole("dialog", { name: "确认覆盖全局文案" });
+  expect(dialog).toHaveTextContent("没有文字内容，不能覆盖全局文案");
+  expect(dialog).toHaveTextContent("1 条原生表情不会写入 messages.txt");
+  expect(screen.getByRole("button", { name: "确认覆盖" })).toBeDisabled();
+  expect(api.importMessagePack).not.toHaveBeenCalled();
 });
 
 test("shows the canonical default pack and can change it by stable id", async () => {
@@ -73,14 +181,14 @@ test("lists provenance, previews a pack, and keeps global import action", async 
 test("requires confirmation before replacing the global message library", async () => {
   vi.mocked(api.importMessagePack).mockResolvedValue({
     added_count: 2, duplicate_count: 0, total_count: 2,
-    backup_path: "data/backups/messages.txt", mode: "replace"
+    backup_path: "data/backups/messages.txt", mode: "replace", excluded_non_text_count: 0
   });
   render(<MessagePacksPage notify={vi.fn()} />);
   await screen.findAllByText("日常问候");
 
   fireEvent.click(screen.getAllByRole("button", { name: "覆盖全局文案" })[0]);
 
-  const dialog = screen.getByRole("dialog", { name: "确认覆盖全局文案" });
+  const dialog = await screen.findByRole("dialog", { name: "确认覆盖全局文案" });
   expect(dialog).toHaveTextContent("将用「日常问候」的 2 条文案覆盖当前全局文案。原有全局文案将被替换。");
   expect(api.importMessagePack).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "确认覆盖" }));
@@ -92,7 +200,7 @@ test("cancelling global message replacement does not call the import api", async
   await screen.findAllByText("日常问候");
 
   fireEvent.click(screen.getAllByRole("button", { name: "覆盖全局文案" })[0]);
-  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  fireEvent.click(await screen.findByRole("button", { name: "取消" }));
 
   expect(screen.queryByRole("dialog", { name: "确认覆盖全局文案" })).not.toBeInTheDocument();
   expect(api.importMessagePack).not.toHaveBeenCalled();

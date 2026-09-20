@@ -12,6 +12,7 @@ import uuid
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from autody.locking import SingleInstanceLock, TaskAlreadyRunning
+from autody.native_stickers import NativeStickerReference
 
 
 class MessagePackError(RuntimeError):
@@ -31,9 +32,14 @@ class CatalogMigrations(BaseModel):
     builtin_seed_v1: CatalogMigrationState
 
 
-class MessageItem(BaseModel):
-    kind: Literal["message"] = "message"
+class TextItem(BaseModel):
+    kind: Literal["text"] = "text"
     message_id: str = Field(min_length=1)
+
+
+class NativeStickerItem(BaseModel):
+    kind: Literal["native_sticker"] = "native_sticker"
+    sticker_id: str = Field(min_length=1)
 
 
 class FusedSourceItem(BaseModel):
@@ -43,7 +49,10 @@ class FusedSourceItem(BaseModel):
     restore_index: int = Field(ge=0)
 
 
-PackItem = Annotated[MessageItem | FusedSourceItem, Field(discriminator="kind")]
+PackItem = Annotated[
+    TextItem | NativeStickerItem | FusedSourceItem,
+    Field(discriminator="kind"),
+]
 
 
 class PackageRecord(BaseModel):
@@ -64,13 +73,20 @@ class MessageRecord(BaseModel):
     updated_at: datetime
 
 
+class NativeStickerRecord(NativeStickerReference):
+    id: str = Field(min_length=1)
+    created_at: datetime
+    updated_at: datetime
+
+
 class CatalogDocument(BaseModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     revision: int = Field(default=1, ge=1)
     migrations: CatalogMigrations
     top_level_pack_ids: list[str]
     packages: dict[str, PackageRecord]
     messages: dict[str, MessageRecord]
+    native_stickers: dict[str, NativeStickerRecord] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_membership(self):
@@ -82,16 +98,24 @@ class CatalogDocument(BaseModel):
 
         parents: dict[str, str] = {}
         referenced_messages: set[str] = set()
+        referenced_stickers: set[str] = set()
         for key, package in self.packages.items():
             if key != package.id:
                 raise ValueError("message pack key does not match its ID")
             for item in package.items:
-                if isinstance(item, MessageItem):
+                if isinstance(item, TextItem):
                     if item.message_id not in self.messages:
                         raise ValueError("message pack contains an unknown message")
                     if item.message_id in referenced_messages:
                         raise ValueError("message belongs to more than one package")
                     referenced_messages.add(item.message_id)
+                    continue
+                if isinstance(item, NativeStickerItem):
+                    if item.sticker_id not in self.native_stickers:
+                        raise ValueError("message pack contains an unknown native sticker")
+                    if item.sticker_id in referenced_stickers:
+                        raise ValueError("native sticker entry belongs to more than one package")
+                    referenced_stickers.add(item.sticker_id)
                     continue
                 if item.pack_id not in self.packages:
                     raise ValueError("fused source package does not exist")
@@ -105,9 +129,14 @@ class CatalogDocument(BaseModel):
             raise ValueError("message pack is orphaned")
         if set(self.messages) != referenced_messages:
             raise ValueError("message record is orphaned")
+        if set(self.native_stickers) != referenced_stickers:
+            raise ValueError("native sticker record is orphaned")
         for key, message in self.messages.items():
             if key != message.id:
                 raise ValueError("message key does not match its ID")
+        for key, sticker in self.native_stickers.items():
+            if key != sticker.id:
+                raise ValueError("native sticker key does not match its ID")
 
         visiting: set[str] = set()
         visited: set[str] = set()
@@ -178,13 +207,17 @@ class MessagePackCatalogStore:
         if self.pending_path.exists():
             raise MessagePackConflict("文案包存在待恢复事务，请先打开文案包页面")
         if self.catalog_path.exists():
-            return self._read_validated()
+            catalog, _migrated = self._read_validated()
+            return catalog
         return self._seed_from_builtin_index()
 
     def load_locked(self) -> CatalogDocument:
         self.recover_pending_transaction()
         if self.catalog_path.exists():
-            return self._read_validated()
+            catalog, migrated = self._read_validated()
+            if migrated:
+                self._atomic_write(catalog)
+            return catalog
         catalog = self._seed_from_builtin_index()
         self._atomic_write(catalog)
         return catalog
@@ -203,11 +236,25 @@ class MessagePackCatalogStore:
             + "\n"
         ).encode("utf-8")
 
-    def _read_validated(self) -> CatalogDocument:
+    def _read_validated(self) -> tuple[CatalogDocument, bool]:
         try:
             payload = json.loads(self.catalog_path.read_text(encoding="utf-8"))
-            return CatalogDocument.model_validate(payload)
-        except (OSError, json.JSONDecodeError, ValidationError) as exc:
+            migrated = payload.get("schema_version") == 1
+            if migrated:
+                payload["schema_version"] = 2
+                payload.setdefault("native_stickers", {})
+                for package in payload.get("packages", {}).values():
+                    for item in package.get("items", []):
+                        if item.get("kind") == "message":
+                            item["kind"] = "text"
+            return CatalogDocument.model_validate(payload), migrated
+        except (
+            OSError,
+            json.JSONDecodeError,
+            ValidationError,
+            AttributeError,
+            TypeError,
+        ) as exc:
             raise MessagePackError(f"文案包目录无效：{exc}") from exc
 
     def _seed_from_builtin_index(self) -> CatalogDocument:
@@ -256,7 +303,7 @@ class MessagePackCatalogStore:
                     created_at=created_at,
                     updated_at=created_at,
                 )
-                items.append(MessageItem(message_id=message_id))
+                items.append(TextItem(message_id=message_id))
             packages[pack_id] = PackageRecord(
                 id=pack_id,
                 name=name,

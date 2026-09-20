@@ -41,6 +41,7 @@ _RUNTIME_FILES = (
 _RUNTIME_DIRS = (
     "avatar-cache",
     "history",
+    "native-stickers",
     "notifications",
     "modules/autody-test-center/data",
 )

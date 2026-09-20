@@ -11,6 +11,7 @@ from autody.chat import (
     ChatSelectors,
     DOUYIN_CONFIRMATION_SELECTORS,
     DOUYIN_SELECTORS,
+    DeliveryConfirmationProvenance,
     DeliveryStatus,
     DouyinChat,
     TodayOutgoingAudit,
@@ -22,6 +23,7 @@ from autody.chat import (
     normalize_message_text,
     open_chat,
 )
+from autody.native_stickers import NativeStickerDescriptor
 
 
 @pytest.fixture
@@ -166,6 +168,239 @@ def test_generic_today_marker_does_not_date_an_unrelated_old_outgoing(page, fake
     audit = fake_chat.audit_today_outgoing(date(2026, 8, 30))
 
     assert audit.status is not TodayOutgoingStatus.CONFIRMED_SENT
+
+
+def test_today_audit_recognizes_native_sticker_outgoing_with_message_timestamp(
+    page, fake_chat
+):
+    page.locator('[data-e2e="message-list"]').evaluate(
+        """el => {
+            const row = document.createElement('div');
+            row.dataset.messageId = 'sticker-today';
+            row.dataset.timestamp = '1788057600000';
+            const sticker = document.createElement('img');
+            sticker.dataset.e2e = 'sticker-message';
+            sticker.src = 'https://example.test/stickers/fire.webp';
+            sticker.alt = '续火花';
+            row.append(sticker); el.append(row);
+        }"""
+    )
+
+    audit = fake_chat.audit_today_outgoing(date(2026, 8, 30))
+
+    assert audit.status is TodayOutgoingStatus.CONFIRMED_SENT
+    assert audit.boundary == "message_timestamp"
+
+
+def test_sticker_scan_is_read_only_and_never_clicks_a_sticker(page, fake_chat):
+    page.locator("body").evaluate(
+        """body => {
+            window.stickerClicks = 0;
+            const open = document.createElement('button');
+            open.dataset.e2e = 'sticker-button'; open.textContent = '表情';
+            const panel = document.createElement('div'); panel.dataset.e2e = 'sticker-panel';
+            const item = document.createElement('button'); item.dataset.e2e = 'sticker-item';
+            item.dataset.stickerId = 'machine-fire'; item.setAttribute('aria-label', '续火花');
+            const image = document.createElement('img'); image.src = 'https://example.test/fire.webp'; image.alt = '续火花';
+            item.append(image); item.addEventListener('click', () => window.stickerClicks++);
+            panel.append(item); body.append(open, panel);
+        }"""
+    )
+
+    stickers = fake_chat.scan_native_stickers()
+
+    assert [(item.display_name, item.resource_key, item.machine_id) for item in stickers] == [
+        ("续火花", "fire.webp", "machine-fire")
+    ]
+    assert page.evaluate("window.stickerClicks") == 0
+    assert page.locator('[data-e2e="chat-input"]').text_content() == ""
+
+
+def test_sticker_scan_scrolls_bounded_panel_without_clicking_lazy_items(page, fake_chat):
+    page.locator("body").evaluate(
+        """body => {
+            window.stickerClicks = 0;
+            const open = document.createElement('button'); open.dataset.e2e = 'sticker-button';
+            const panel = document.createElement('div'); panel.dataset.e2e = 'sticker-panel';
+            panel.style.height = '40px'; panel.style.overflow = 'auto';
+            const first = document.createElement('button'); first.dataset.e2e = 'sticker-item'; first.setAttribute('aria-label', '续火花');
+            const firstImage = document.createElement('img'); firstImage.src = 'https://example.test/fire.webp'; first.append(firstImage);
+            const spacer = document.createElement('div'); spacer.style.height = '200px';
+            panel.append(first, spacer);
+            panel.addEventListener('scroll', () => {
+              if (panel.dataset.loaded) return;
+              panel.dataset.loaded = '1';
+              const second = document.createElement('button'); second.dataset.e2e = 'sticker-item'; second.setAttribute('aria-label', '比心');
+              const image = document.createElement('img'); image.src = 'https://example.test/heart.webp'; second.append(image);
+              second.addEventListener('click', () => window.stickerClicks++); panel.append(second);
+            });
+            body.append(open, panel);
+        }"""
+    )
+
+    stickers = fake_chat.scan_native_stickers()
+
+    assert {item.resource_key for item in stickers} == {"fire.webp", "heart.webp"}
+    assert page.evaluate("window.stickerClicks") == 0
+
+
+def test_native_sticker_immediate_send_requires_new_matching_outgoing_and_never_enter(
+    page, fake_chat
+):
+    page.locator("body").evaluate(
+        """body => {
+            window.enterCount = 0;
+            document.addEventListener('keydown', event => { if (event.key === 'Enter') window.enterCount++; });
+            const open = document.createElement('button'); open.dataset.e2e = 'sticker-button';
+            const panel = document.createElement('div'); panel.dataset.e2e = 'sticker-panel';
+            const item = document.createElement('button'); item.dataset.e2e = 'sticker-item'; item.setAttribute('aria-label', '续火花');
+            const image = document.createElement('img'); image.src = 'https://example.test/fire.webp'; image.alt = '续火花'; item.append(image);
+            item.addEventListener('click', () => {
+              const row = document.createElement('div'); row.dataset.messageId = 'sent-sticker-1';
+              const sent = image.cloneNode(true); sent.dataset.e2e = 'sticker-message'; row.append(sent);
+              document.querySelector('[data-e2e="message-list"]').append(row);
+            });
+            panel.append(item); body.append(open, panel);
+        }"""
+    )
+
+    result = fake_chat.send_native_sticker(
+        "小明",
+        NativeStickerDescriptor(
+            logical_id="account-fire",
+            display_name="续火花",
+            resource_key="fire.webp",
+        ),
+    )
+
+    assert result.successful is True
+    assert result.send_attempts == 1
+    assert page.evaluate("window.enterCount") == 0
+
+
+def test_native_sticker_staged_send_clicks_publish_only_when_staged_state_is_visible(
+    page, fake_chat
+):
+    page.locator("body").evaluate(
+        """body => {
+            window.enterCount = 0; window.publishCount = 0;
+            document.addEventListener('keydown', event => { if (event.key === 'Enter') window.enterCount++; });
+            const open = document.createElement('button'); open.dataset.e2e = 'sticker-button';
+            const panel = document.createElement('div'); panel.dataset.e2e = 'sticker-panel';
+            const item = document.createElement('button'); item.dataset.e2e = 'sticker-item'; item.setAttribute('aria-label', '比心');
+            const image = document.createElement('img'); image.src = 'https://example.test/heart.webp'; image.alt = '比心'; item.append(image);
+            const staged = document.createElement('div'); staged.dataset.e2e = 'staged-sticker'; staged.hidden = true;
+            const publish = document.createElement('button'); publish.dataset.e2e = 'sticker-publish'; publish.hidden = true;
+            item.addEventListener('click', () => { staged.hidden = false; publish.hidden = false; });
+            publish.addEventListener('click', () => {
+              window.publishCount++;
+              const row = document.createElement('div'); row.dataset.messageId = 'sent-sticker-2';
+              const sent = image.cloneNode(true); sent.dataset.e2e = 'sticker-message'; row.append(sent);
+              document.querySelector('[data-e2e="message-list"]').append(row);
+            });
+            panel.append(item); body.append(open, panel, staged, publish);
+        }"""
+    )
+
+    result = fake_chat.send_native_sticker(
+        "小明",
+        NativeStickerDescriptor(
+            logical_id="account-heart",
+            display_name="比心",
+            resource_key="heart.webp",
+        ),
+    )
+
+    assert result.successful is True
+    assert page.evaluate("window.publishCount") == 1
+    assert page.evaluate("window.enterCount") == 0
+
+
+def test_native_sticker_resolution_ambiguity_fails_before_any_item_click(page, fake_chat):
+    page.locator("body").evaluate(
+        """body => {
+            window.stickerClicks = 0;
+            const open = document.createElement('button'); open.dataset.e2e = 'sticker-button';
+            const panel = document.createElement('div'); panel.dataset.e2e = 'sticker-panel';
+            for (let index = 0; index < 2; index++) {
+              const item = document.createElement('button'); item.dataset.e2e = 'sticker-item';
+              const image = document.createElement('img'); image.src = 'https://example.test/fire.webp'; image.alt = '续火花';
+              item.append(image); item.addEventListener('click', () => window.stickerClicks++); panel.append(item);
+            }
+            body.append(open, panel);
+        }"""
+    )
+
+    result = fake_chat.send_native_sticker(
+        "小明",
+        NativeStickerDescriptor(
+            logical_id="account-fire",
+            display_name="续火花",
+            resource_key="fire.webp",
+        ),
+    )
+
+    assert result.status is DeliveryStatus.BLOCKED
+    assert result.send_attempts == 0
+    assert page.evaluate("window.stickerClicks") == 0
+
+
+def test_native_sticker_old_same_payload_does_not_confirm_a_new_click(page, fake_chat):
+    page.locator("body").evaluate(
+        """body => {
+            const history = document.querySelector('[data-e2e="message-list"]');
+            const old = document.createElement('div'); old.dataset.messageId = 'old-sticker';
+            const oldImage = document.createElement('img'); oldImage.dataset.e2e = 'sticker-message';
+            oldImage.src = 'https://example.test/fire.webp'; oldImage.alt = '续火花'; old.append(oldImage); history.append(old);
+            const open = document.createElement('button'); open.dataset.e2e = 'sticker-button';
+            const panel = document.createElement('div'); panel.dataset.e2e = 'sticker-panel';
+            const item = document.createElement('button'); item.dataset.e2e = 'sticker-item'; item.setAttribute('aria-label', '续火花');
+            const image = oldImage.cloneNode(true); item.append(image); panel.append(item); body.append(open, panel);
+        }"""
+    )
+
+    result = fake_chat.send_native_sticker(
+        "小明",
+        NativeStickerDescriptor(
+            logical_id="account-fire",
+            display_name="续火花",
+            resource_key="fire.webp",
+        ),
+    )
+
+    assert result.status is DeliveryStatus.CONFIRMATION_FAILED
+    assert result.reason_code == "confirmation_failed_uncertain"
+    assert result.send_attempts == 1
+
+
+def test_native_sticker_pending_outgoing_is_not_terminal_success(page, fake_chat):
+    page.locator("body").evaluate(
+        """body => {
+            const open = document.createElement('button'); open.dataset.e2e = 'sticker-button';
+            const panel = document.createElement('div'); panel.dataset.e2e = 'sticker-panel';
+            const item = document.createElement('button'); item.dataset.e2e = 'sticker-item'; item.setAttribute('aria-label', '比心');
+            const image = document.createElement('img'); image.src = 'https://example.test/heart.webp'; image.alt = '比心'; item.append(image);
+            item.addEventListener('click', () => {
+              const row = document.createElement('div'); row.dataset.messageId = 'pending-sticker';
+              const pending = document.createElement('i'); pending.dataset.e2e = 'send-pending';
+              const sent = image.cloneNode(true); sent.dataset.e2e = 'sticker-message'; row.append(sent, pending);
+              document.querySelector('[data-e2e="message-list"]').append(row);
+            });
+            panel.append(item); body.append(open, panel);
+        }"""
+    )
+
+    result = fake_chat.send_native_sticker(
+        "小明",
+        NativeStickerDescriptor(
+            logical_id="account-heart",
+            display_name="比心",
+            resource_key="heart.webp",
+        ),
+    )
+
+    assert result.status is DeliveryStatus.CONFIRMATION_FAILED
+    assert result.confirmation_provenance is DeliveryConfirmationProvenance.NONE
 
 
 def test_composer_clear_without_new_outgoing_never_confirms(page, fake_chat):

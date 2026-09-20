@@ -233,6 +233,29 @@ def test_two_profiles_keep_targets_schedules_candidates_test_center_and_auth_iso
     ).read_text(encoding="utf-8")
 
 
+def test_two_profiles_keep_native_sticker_catalogs_isolated(tmp_path: Path):
+    config_path = _make_project(tmp_path)
+    store = MultiAccountStore(tmp_path, config_path)
+    first = store.ensure_migrated()["active_profile_id"]
+    catalog = tmp_path / "data" / "native-stickers" / "catalog.json"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text('{"account":"a"}', encoding="utf-8")
+    store.persist_active()
+    second = store.create_empty_profile()["profile_id"]
+
+    store.activate(second)
+    assert not catalog.exists()
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text('{"account":"b"}', encoding="utf-8")
+    store.persist_active()
+
+    store.activate(first)
+    assert json.loads(catalog.read_text(encoding="utf-8"))["account"] == "a"
+
+    store.activate(second)
+    assert json.loads(catalog.read_text(encoding="utf-8"))["account"] == "b"
+
+
 def test_logout_affects_only_active_auth_and_preserves_profile_settings(
     tmp_path: Path,
 ):
