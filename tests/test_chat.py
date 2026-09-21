@@ -1464,8 +1464,9 @@ def test_page_failure_keeps_a_hidden_marker_on_the_generic_safe_path(tmp_path: P
         (("risk_control_required", "verification"), "risk_control_required"),
     ],
 )
+@pytest.mark.parametrize("content_kind", ["text", "native_sticker"])
 def test_explicit_page_condition_stops_send_before_the_send_boundary(
-    failure, reason_code, tmp_path: Path
+    failure, reason_code, content_kind, tmp_path: Path
 ):
     class ClassifiedChat(DouyinChat):
         def page_failure(self):
@@ -1474,13 +1475,98 @@ def test_explicit_page_condition_stops_send_before_the_send_boundary(
         def screenshot(self, _label):
             return tmp_path / "page-condition.png"
 
-    result = ClassifiedChat(
+    chat = ClassifiedChat(
         object(), ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0
-    ).send("目标", "消息")
+    )
+    result = (
+        chat.send("目标", "消息")
+        if content_kind == "text"
+        else chat.send_native_sticker(
+            "目标", NativeStickerDescriptor(logical_id="fire", display_name="火")
+        )
+    )
 
     assert result.reason_code == reason_code
     assert result.send_attempts == 0
     assert result.failure_marker == failure[1]
+
+
+@pytest.mark.parametrize("after_click", [False, True])
+def test_native_sticker_page_condition_at_send_boundary(monkeypatch, tmp_path: Path, after_click):
+    chat = DouyinChat(
+        object(), ChatSelectors.test_defaults(), tmp_path, confirmation_delay_ms=0
+    )
+    state = {"failure": None, "clicks": 0}
+
+    class Locator:
+        def click(self):
+            state["clicks"] += 1
+            state["failure"] = ("risk_control_required", "verification")
+
+    def resolve(_sticker):
+        if not after_click:
+            state["failure"] = ("risk_control_required", "verification")
+        return Locator()
+
+    monkeypatch.setattr(chat, "page_failure", lambda: state["failure"])
+    monkeypatch.setattr(chat, "_resolve_sticker_locator", resolve)
+    monkeypatch.setattr(chat, "_outgoing_sticker_payloads", lambda: {})
+    monkeypatch.setattr(chat, "_confirm_sticker_delivery", lambda *_a, **_k: (None, 1))
+
+    class Staged:
+        def count(self): return 1
+        def nth(self, _index): return self
+        def evaluate(self, _expression): return True
+
+    chat.page = type("Page", (), {"locator": lambda *_a: Staged()})()
+    monkeypatch.setattr(chat, "_first_visible", lambda *_a: Locator())
+    result = chat.send_native_sticker(
+        "目标", NativeStickerDescriptor(logical_id="fire", display_name="火"),
+        expected_conversation_id="conversation", conversation_verified=True,
+    )
+
+    assert state["clicks"] == int(after_click)
+    assert result.send_attempts == int(after_click)
+    assert result.reason_code == (
+        "confirmation_failed_uncertain" if after_click else "risk_control_required"
+    )
+    assert result.failure_marker == "verification"
+    assert not result.successful
+
+
+@pytest.mark.parametrize("failed_read", [1, 2])
+def test_native_sticker_observation_error_fails_closed(monkeypatch, tmp_path: Path, failed_read):
+    state = {"reads": 0, "clicks": 0}
+
+    class Locator:
+        def evaluate_all(self, *_args):
+            state["reads"] += 1
+            if state["reads"] == failed_read:
+                raise RuntimeError("DOM observation unavailable")
+            return [{"identity": "old-sticker", "resourceUrl": "https://example.test/fire.webp"}]
+
+        def click(self):
+            state["clicks"] += 1
+
+    page = type("Page", (), {"locator": lambda *_a: Locator()})()
+    chat = DouyinChat(
+        page, ChatSelectors.test_defaults(), tmp_path,
+        confirmation_delay_ms=0, confirmation_retries=0,
+    )
+    monkeypatch.setattr(chat, "page_failure", lambda: None)
+    monkeypatch.setattr(chat, "_resolve_sticker_locator", lambda _sticker: Locator())
+    monkeypatch.setattr(chat, "_publish_staged_sticker", lambda: False)
+    result = chat.send_native_sticker(
+        "目标", NativeStickerDescriptor(logical_id="fire", display_name="火", resource_key="fire.webp"),
+        expected_conversation_id="conversation", conversation_verified=True,
+    )
+
+    assert not result.successful
+    assert result.confirmation_provenance is DeliveryConfirmationProvenance.NONE
+    assert result.send_attempts == state["clicks"] == failed_read - 1
+    assert result.reason_code == (
+        "native_sticker_unavailable" if failed_read == 1 else "confirmation_failed_uncertain"
+    )
 
 
 def test_open_chat_bounds_page_load_and_closes_resources(monkeypatch, tmp_path: Path):

@@ -1499,8 +1499,10 @@ class DouyinChat:
                     "failed": self.sticker_selectors.failure_marker,
                 },
             )
-        except Exception:
-            return {}
+        except Exception as exc:
+            # An unreadable baseline is not an empty history: otherwise an old
+            # sticker can be mistaken for a newly observed successful send.
+            raise RuntimeError("sticker outgoing observation unavailable") from exc
         return {
             str(item["identity"]): item
             for item in observed
@@ -1565,6 +1567,7 @@ class DouyinChat:
         publish = self._first_visible(self.sticker_selectors.publish_button)
         if staged is None or publish is None:
             return False
+        self._raise_if_page_failure()
         publish.click()
         return True
 
@@ -1599,6 +1602,7 @@ class DouyinChat:
             self._raise_if_page_failure()
             locator = self._resolve_sticker_locator(sticker)
             before = set(self._outgoing_sticker_payloads())
+            self._raise_if_page_failure()
             send_attempted = True
             locator.click()
             status, attempts = self._confirm_sticker_delivery(
@@ -1627,6 +1631,19 @@ class DouyinChat:
                 error="post-send sticker observation unavailable",
                 failure_stage="confirmation_observed",
                 reason_code="confirmation_failed_uncertain",
+            )
+        except ChatPageConditionError as exc:
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMATION_FAILED if send_attempted else DeliveryStatus.BLOCKED,
+                send_attempts=int(send_attempted),
+                error=exc.reason_code,
+                failure_stage=(
+                    "send_boundary_reached" if send_attempted else "conversation_selected"
+                ),
+                reason_code=(
+                    "confirmation_failed_uncertain" if send_attempted else exc.reason_code
+                ),
+                failure_marker=exc.marker_id,
             )
         except (RuntimeError, PlaywrightTimeoutError) as exc:
             return DeliveryResult(
