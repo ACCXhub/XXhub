@@ -21,8 +21,16 @@ from autody.chat import (
 from autody import runner as runner_module
 from autody.failures import failure_detail
 from autody.logging_setup import DailyAppendFileHandler
-from autody.message_packs import AUTO_NATIVE_STICKER_PACK_ID, MessagePackService
+from autody.message_packs import (
+    AUTO_NATIVE_STICKER_PACK_ID,
+    MessagePackError,
+    MessagePackService,
+)
 from autody.native_stickers import NativeStickerCatalogStore, NativeStickerDescriptor
+from autody.native_stickers import (
+    GlobalNativeStickerSelectionStore,
+    NativeStickerReference,
+)
 from autody.runner import (
     RunStatus,
     TodayDeliveryReconciliationPlan,
@@ -2252,6 +2260,43 @@ def test_default_message_pack_uses_the_canonical_stable_id(
     ]
 
 
+def test_explicit_default_pack_skips_global_mixed_pool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    config = make_config(tmp_path)
+    program_root = tmp_path / "program"
+    pack_dir = program_root / "message-packs"
+    pack_dir.mkdir(parents=True)
+    (pack_dir / "daily-greeting.txt").write_text("默认文案\n", encoding="utf-8")
+    (pack_dir / "index.json").write_text(
+        '{"packs":[{"id":"daily-greeting","name":"日常问候","description":"","version":"1","file":"daily-greeting.txt","count":1,"category":"daily"}]}',
+        encoding="utf-8",
+    )
+    account = "account-" + "a" * 24
+    write_verified_retry_scope(tmp_path, [])
+    GlobalNativeStickerSelectionStore(tmp_path).replace(
+        account,
+        [NativeStickerReference(logical_id="heart", display_name="比心")],
+    )
+    config.default_message_pack = "daily-greeting"
+    monkeypatch.setenv("AUTODY_PROGRAM_ROOT", str(program_root))
+
+    selected = runner_module._resolve_target_content(
+        config.targets[0],
+        config,
+        date(2026, 9, 22),
+        {"message": "", "messages_by_target": {}},
+        ["全局文案"],
+        StateStore(config.state_file).load().rotation,
+        runtime_context=resolve_runtime_context(tmp_path, program_root=program_root),
+    )
+
+    assert selected.pack_id == "daily-greeting"
+    assert selected.kind == "text"
+    assert selected.text == "默认文案 —— gpt小助手"
+
+
 def test_one_for_all_message_pack_reuses_today_then_advances_after_completion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -2548,6 +2593,309 @@ def test_auto_native_sticker_pack_uses_existing_flat_typed_selection(tmp_path: P
     assert selected.kind == "native_sticker"
     assert selected.sticker.logical_id in {"heart", "fire"}
     assert len(service.preview(AUTO_NATIVE_STICKER_PACK_ID).entries) == 2
+
+
+def test_global_content_pool_is_one_flat_ordered_typed_candidate_list():
+    pool = runner_module._global_content_pool(
+        ["早安", "今天也要开心", "记得吃饭"],
+        [
+            NativeStickerReference(logical_id="fire", display_name="续火花"),
+            NativeStickerReference(logical_id="heart", display_name="比心"),
+        ],
+    )
+
+    assert len(pool) == 5
+    assert [item.kind for item in pool] == [
+        "text",
+        "text",
+        "text",
+        "native_sticker",
+        "native_sticker",
+    ]
+    assert [item.text for item in pool[:3]] == [
+        "早安",
+        "今天也要开心",
+        "记得吃饭",
+    ]
+    assert [item.sticker.logical_id for item in pool[3:]] == ["fire", "heart"]
+    assert len({item.entry_id for item in pool}) == 5
+
+
+def test_global_sticker_only_selection_persists_exact_entry_across_restart(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.messages_file.write_text("", encoding="utf-8")
+    write_verified_retry_scope(tmp_path, [])
+    account = "account-" + "a" * 24
+    GlobalNativeStickerSelectionStore(tmp_path).replace(
+        account,
+        [
+            NativeStickerReference(
+                logical_id="shared-fire",
+                display_name="续火花",
+                resource_key="fire.webp",
+            )
+        ],
+    )
+    daily = {"message": "", "messages_by_target": {}}
+    rotation = StateStore(config.state_file).load().rotation
+    runtime = resolve_runtime_context(tmp_path, program_root=tmp_path)
+
+    first = runner_module._resolve_target_content(
+        config.targets[0],
+        config,
+        date(2026, 9, 22),
+        daily,
+        [],
+        rotation,
+        runtime_context=runtime,
+    )
+    reloaded_daily = json.loads(json.dumps(daily))
+    GlobalNativeStickerSelectionStore(tmp_path).replace(account, [])
+    second = runner_module._resolve_target_content(
+        config.targets[0],
+        config,
+        date(2026, 9, 22),
+        reloaded_daily,
+        [],
+        rotation,
+        runtime_context=runtime,
+    )
+
+    assert first.kind == "native_sticker"
+    assert first.sticker.logical_id == "shared-fire"
+    assert list(daily["selected_content_by_target"]) == ["global:one-for-all"]
+    assert second.state_payload() == first.state_payload()
+
+
+def test_completely_empty_global_content_pool_fails_clearly(tmp_path: Path):
+    config = make_config(tmp_path)
+    config.messages_file.write_text("", encoding="utf-8")
+    daily = {"message": "", "messages_by_target": {}}
+
+    with pytest.raises(MessagePackError, match="全局文案库"):
+        runner_module._resolve_target_content(
+            config.targets[0],
+            config,
+            date(2026, 9, 22),
+            daily,
+            [],
+            StateStore(config.state_file).load().rotation,
+            runtime_context=resolve_runtime_context(
+                tmp_path,
+                program_root=tmp_path,
+            ),
+        )
+
+
+def test_global_sticker_only_pool_dispatches_only_sticker_and_finishes_once(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.messages_file.write_text("", encoding="utf-8")
+    account = "account-" + "a" * 24
+    write_verified_retry_scope(tmp_path, [])
+    NativeStickerCatalogStore(tmp_path).replace(
+        account,
+        [
+            NativeStickerDescriptor(
+                logical_id="account-fire",
+                display_name="续火花",
+                resource_key="fire.webp",
+            )
+        ],
+    )
+    GlobalNativeStickerSelectionStore(tmp_path).replace(
+        account,
+        [
+            NativeStickerReference(
+                logical_id="shared-fire",
+                display_name="续火花",
+                resource_key="fire.webp",
+            )
+        ],
+    )
+
+    class StickerChat:
+        def __init__(self):
+            self.stickers = []
+
+        def send(self, *_args, **_kwargs):
+            raise AssertionError("global sticker must not use text delivery")
+
+        def send_native_sticker(self, target, sticker, **_kwargs):
+            stored = json.loads(config.state_file.read_text(encoding="utf-8"))
+            selected = stored["daily"]["2026-09-22"][
+                "selected_content_by_target"
+            ]["global:one-for-all"]
+            assert selected["kind"] == "native_sticker"
+            assert selected["sticker"]["logical_id"] == "shared-fire"
+            self.stickers.append((target, sticker.logical_id))
+            return DeliveryResult(
+                DeliveryStatus.CONFIRMED,
+                send_attempts=1,
+                confirmation_provenance=(
+                    DeliveryConfirmationProvenance.POST_SEND_OBSERVED
+                ),
+            )
+
+    first_chat = StickerChat()
+    first = run_daily(
+        config,
+        first_chat,
+        date(2026, 9, 22),
+        runtime_context=resolve_runtime_context(tmp_path, program_root=tmp_path),
+    )
+    second_chat = StickerChat()
+    second = run_daily(
+        config,
+        second_chat,
+        date(2026, 9, 22),
+        runtime_context=resolve_runtime_context(tmp_path, program_root=tmp_path),
+    )
+
+    assert first.status is RunStatus.COMPLETED
+    assert first_chat.stickers == [
+        ("小明", "account-fire"),
+        ("小红", "account-fire"),
+    ]
+    assert second.status is RunStatus.ALREADY_DONE
+    assert second_chat.stickers == []
+
+
+def test_global_one_for_all_rotation_consumes_the_exact_typed_entry(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.targets = [Target(name="小明")]
+    config.messages_file.write_text("", encoding="utf-8")
+    account = "account-" + "a" * 24
+    write_verified_retry_scope(tmp_path, [])
+    NativeStickerCatalogStore(tmp_path).replace(
+        account,
+        [
+            NativeStickerDescriptor(
+                logical_id="account-fire",
+                display_name="续火花",
+                resource_key="fire.webp",
+            ),
+            NativeStickerDescriptor(
+                logical_id="account-heart",
+                display_name="比心",
+                resource_key="heart.webp",
+            ),
+        ],
+    )
+    GlobalNativeStickerSelectionStore(tmp_path).replace(
+        account,
+        [
+            NativeStickerReference(
+                logical_id="shared-fire",
+                display_name="续火花",
+                resource_key="fire.webp",
+            ),
+            NativeStickerReference(
+                logical_id="shared-heart",
+                display_name="比心",
+                resource_key="heart.webp",
+            ),
+        ],
+    )
+
+    class StickerChat:
+        def __init__(self):
+            self.stickers = []
+
+        def send(self, *_args, **_kwargs):
+            raise AssertionError("sticker must not use text delivery")
+
+        def send_native_sticker(self, _target, sticker, **_kwargs):
+            self.stickers.append(sticker.logical_id)
+
+    runtime = resolve_runtime_context(tmp_path, program_root=tmp_path)
+    first_chat = StickerChat()
+    second_chat = StickerChat()
+    run_daily(
+        config,
+        first_chat,
+        date(2026, 9, 22),
+        runtime_context=runtime,
+    )
+    run_daily(
+        config,
+        second_chat,
+        date(2026, 9, 23),
+        runtime_context=runtime,
+    )
+
+    assert len(first_chat.stickers) == 1
+    assert len(second_chat.stickers) == 1
+    assert first_chat.stickers[0] != second_chat.stickers[0]
+
+
+def test_global_per_friend_selection_persists_one_typed_entry_per_target(
+    tmp_path: Path,
+):
+    config = make_config(tmp_path)
+    config.message_selection = "per_friend"
+    config.messages_file.write_text("", encoding="utf-8")
+    account = "account-" + "a" * 24
+    write_verified_retry_scope(tmp_path, [])
+    NativeStickerCatalogStore(tmp_path).replace(
+        account,
+        [
+            NativeStickerDescriptor(
+                logical_id="account-fire",
+                display_name="续火花",
+                resource_key="fire.webp",
+            )
+        ],
+    )
+    GlobalNativeStickerSelectionStore(tmp_path).replace(
+        account,
+        [
+            NativeStickerReference(
+                logical_id="shared-fire",
+                display_name="续火花",
+                resource_key="fire.webp",
+            )
+        ],
+    )
+    daily = {"message": "", "messages_by_target": {}}
+    rotation = StateStore(config.state_file).load().rotation
+    runtime = resolve_runtime_context(tmp_path, program_root=tmp_path)
+    selected = [
+        runner_module._resolve_target_content(
+            target,
+            config,
+            date(2026, 9, 22),
+            daily,
+            [],
+            rotation,
+            runtime_context=runtime,
+        )
+        for target in config.targets
+    ]
+    reloaded_daily = json.loads(json.dumps(daily))
+    reloaded = [
+        runner_module._resolve_target_content(
+            target,
+            config,
+            date(2026, 9, 22),
+            reloaded_daily,
+            [],
+            rotation,
+            runtime_context=runtime,
+        )
+        for target in config.targets
+    ]
+
+    assert len(daily["selected_content_by_target"]) == 2
+    assert all(item.kind == "native_sticker" for item in selected)
+    assert [item.state_payload() for item in reloaded] == [
+        item.state_payload() for item in selected
+    ]
 
 
 def test_live_today_audit_blocks_a_restarted_sticker_delivery_before_catalog_resolution(

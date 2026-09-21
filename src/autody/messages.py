@@ -5,13 +5,13 @@ from autody.state import RotationState
 from autody.config import MessageSuffixConfig, MessageSuffixStyle
 
 
-def read_messages(path: Path) -> list[str]:
+def read_messages(path: Path, *, allow_empty: bool = False) -> list[str]:
     messages = [
         line.strip()
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    if not messages:
+    if not messages and not allow_empty:
         raise ValueError("message library is empty")
     return list(dict.fromkeys(messages))
 

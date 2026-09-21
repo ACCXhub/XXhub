@@ -18,7 +18,7 @@ from autody.runner import TodayDeliveryReconciliation, TodayDeliveryReconciliati
 from autody.modules import OFFICIAL_TEST_CENTER_CORE_RANGE, OFFICIAL_TEST_CENTER_VERSION, MODULE_ID, ModuleManager, build_module_archive
 from autody.account_profile import mark_bindings_for_revalidation
 from autody.failures import failure_detail
-from autody.native_stickers import NativeStickerDescriptor
+from autody.native_stickers import NativeStickerCatalogStore, NativeStickerDescriptor
 
 
 def make_project(tmp_path: Path) -> Path:
@@ -982,6 +982,103 @@ def test_config_and_messages_can_be_updated(tmp_path: Path):
     assert response.status_code == 200
     assert response.json()["messages"] == ["甲", "乙"]
     assert (tmp_path / "messages.txt").read_text(encoding="utf-8") == "甲\n乙\n"
+
+
+def test_global_message_library_persists_account_scoped_sticker_selection(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    account = write_verified_account(tmp_path)
+    NativeStickerCatalogStore(tmp_path).replace(
+        account,
+        [
+            NativeStickerDescriptor(
+                logical_id="fire",
+                display_name="续火花",
+                resource_key="fire.webp",
+                preview_url="https://example.test/fire.webp",
+                diagnostic_index=4,
+            ),
+            NativeStickerDescriptor(
+                logical_id="heart",
+                display_name="比心",
+                resource_key="heart.webp",
+            ),
+        ],
+    )
+    client = TestClient(create_app(config_path))
+    before_messages = (tmp_path / "messages.txt").read_bytes()
+
+    initial = client.get("/api/messages")
+    selected = client.put(
+        "/api/messages/native-stickers",
+        json={"logical_ids": ["heart", "fire"]},
+    )
+
+    assert initial.status_code == 200
+    assert initial.json()["text_count"] == 2
+    assert initial.json()["native_sticker_count"] == 0
+    assert initial.json()["total_count"] == 2
+    assert initial.json()["default_message_pack"] == "daily-greeting"
+    assert selected.status_code == 200
+    assert selected.json()["text_count"] == 2
+    assert selected.json()["native_sticker_count"] == 2
+    assert selected.json()["total_count"] == 4
+    assert [
+        item["logical_id"]
+        for item in selected.json()["selected_native_stickers"]
+    ] == ["heart", "fire"]
+    assert (tmp_path / "messages.txt").read_bytes() == before_messages
+    persisted = json.loads(
+        (
+            tmp_path
+            / "data"
+            / "native-stickers"
+            / "global-selection.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert persisted["account_profile_id"] == account
+    assert "preview_url" not in json.dumps(persisted)
+    assert "diagnostic_index" not in json.dumps(persisted)
+
+    emptied_text = client.put("/api/messages", json={"messages": []})
+    deselected = client.put(
+        "/api/messages/native-stickers",
+        json={"logical_ids": []},
+    )
+    assert emptied_text.status_code == 200
+    assert emptied_text.json()["text_count"] == 0
+    assert emptied_text.json()["native_sticker_count"] == 2
+    assert deselected.status_code == 200
+    assert deselected.json()["total_count"] == 0
+
+
+def test_global_native_sticker_selection_rejects_unknown_id_without_overwriting(
+    tmp_path: Path,
+):
+    config_path = make_project(tmp_path)
+    account = write_verified_account(tmp_path)
+    NativeStickerCatalogStore(tmp_path).replace(
+        account,
+        [NativeStickerDescriptor(logical_id="heart", display_name="比心")],
+    )
+    client = TestClient(create_app(config_path))
+    assert client.put(
+        "/api/messages/native-stickers",
+        json={"logical_ids": ["heart"]},
+    ).status_code == 200
+
+    failed = client.put(
+        "/api/messages/native-stickers",
+        json={"logical_ids": ["missing"]},
+    )
+    current = client.get("/api/messages")
+
+    assert failed.status_code == 422
+    assert [
+        item["logical_id"]
+        for item in current.json()["selected_native_stickers"]
+    ] == ["heart"]
 
 
 def test_preflight_routes_validate_target_ids_and_return_masked_persistence(tmp_path: Path):

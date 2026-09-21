@@ -18,7 +18,8 @@ import type {
   TodayPlan,
   FailedTargetCenter,
   TargetEffectiveSettings,
-  RepairSummary
+  RepairSummary,
+  GlobalMessageLibrary
 } from "./types";
 
 type ActionJob = {
@@ -91,11 +92,16 @@ export const api = {
   config: () => request<AppConfig>("/api/config"),
   saveConfig: (config: AppConfig) =>
     request<AppConfig>("/api/config", { method: "PUT", body: JSON.stringify(config) }),
-  messages: () => request<{ messages: string[] }>("/api/messages"),
+  messages: () => request<GlobalMessageLibrary>("/api/messages"),
   saveMessages: (messages: string[]) =>
-    request<{ messages: string[] }>("/api/messages", {
+    request<GlobalMessageLibrary>("/api/messages", {
       method: "PUT",
       body: JSON.stringify({ messages })
+    }),
+  saveGlobalNativeStickers: (logicalIds: string[]) =>
+    request<GlobalMessageLibrary>("/api/messages/native-stickers", {
+      method: "PUT",
+      body: JSON.stringify({ logical_ids: logicalIds })
     }),
   messagePacks: () => request<PackCatalog>("/api/message-packs"),
   createMessagePack: (revision: number) =>

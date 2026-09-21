@@ -297,6 +297,18 @@ export interface NativeStickerCatalog {
   stickers: NativeStickerDescriptor[];
 }
 
+export interface GlobalMessageLibrary {
+  messages: string[];
+  selected_native_stickers: NativeStickerReference[];
+  account_profile_id: string | null;
+  text_count: number;
+  native_sticker_count: number;
+  total_count: number;
+  default_message_pack: string | null;
+  default_message_pack_name: string | null;
+  default_pack_overrides_global: boolean;
+}
+
 export interface NativeStickerBatchMutationResult extends PackMutationResult {
   pack: MessagePack;
   added_count: number;

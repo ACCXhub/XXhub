@@ -7,7 +7,10 @@ import pytest
 from autody.config import AppConfig, Target, load_config, save_config
 from autody.message_packs import ImportMode, MessagePackError, MessagePackService
 from autody.message_pack_catalog import MessagePackConflict
-from autody.native_stickers import NativeStickerReference
+from autody.native_stickers import (
+    GlobalNativeStickerSelectionStore,
+    NativeStickerReference,
+)
 
 
 AUTO_NATIVE_STICKER_PACK_ID = "auto-native-stickers"
@@ -410,6 +413,42 @@ def test_auto_native_sticker_pack_rejects_incompatible_reserved_id_without_write
         )
 
     assert service.store.catalog_path.read_bytes() == before
+
+
+def test_global_sticker_selection_is_independent_from_auto_native_sticker_pack(
+    tmp_path: Path,
+):
+    service = MessagePackService(make_pack_root(tmp_path), tmp_path / "user-data")
+    created = service.add_native_stickers(
+        AUTO_NATIVE_STICKER_PACK_ID,
+        [NativeStickerReference(logical_id="heart", display_name="比心")],
+        service.catalog().revision,
+    )
+    account = "account-" + "a" * 24
+    selection_store = GlobalNativeStickerSelectionStore(tmp_path / "user-data")
+    selection_store.replace(
+        account,
+        [NativeStickerReference(logical_id="fire", display_name="续火花")],
+    )
+
+    selection_store.replace(
+        account,
+        [NativeStickerReference(logical_id="heart", display_name="比心")],
+    )
+    added = service.add_native_stickers(
+        AUTO_NATIVE_STICKER_PACK_ID,
+        [NativeStickerReference(logical_id="fire", display_name="续火花")],
+        created.revision,
+    )
+
+    assert [
+        entry.sticker.logical_id
+        for entry in service.preview(AUTO_NATIVE_STICKER_PACK_ID).entries
+    ] == ["heart", "fire"]
+    assert [
+        item.logical_id for item in selection_store.load(account).stickers
+    ] == ["heart"]
+    assert added.pack.id == AUTO_NATIVE_STICKER_PACK_ID
 
 
 def test_fused_child_native_sticker_keeps_identity_and_origin_after_split(

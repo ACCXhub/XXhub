@@ -46,6 +46,7 @@ from autody.history import (
 from autody.message_packs import MessagePackError, MessagePackService, PackEntry
 from autody.messages import MessageRotation, format_message_with_suffix, read_messages
 from autody.native_stickers import (
+    GlobalNativeStickerSelectionStore,
     NativeStickerCatalogError,
     NativeStickerCatalogStore,
     NativeStickerDescriptor,
@@ -944,6 +945,66 @@ def _legacy_text_content(text: str, scope: str) -> SelectedContentEntry:
     )
 
 
+def _global_content_pool(
+    messages: list[str],
+    stickers: list[NativeStickerReference],
+) -> list[SelectedContentEntry]:
+    text_entries = [
+        SelectedContentEntry(
+            entry_id=(
+                "global:text:"
+                + hashlib.sha256(message.encode("utf-8")).hexdigest()[:24]
+            ),
+            kind="text",
+            text=message,
+        )
+        for message in messages
+    ]
+    sticker_entries = [
+        SelectedContentEntry(
+            entry_id=f"global:native-sticker:{sticker.logical_id}",
+            kind="native_sticker",
+            sticker=sticker,
+        )
+        for sticker in stickers
+    ]
+    return [*text_entries, *sticker_entries]
+
+
+def _global_native_stickers(
+    runtime_context: RuntimeContext,
+) -> list[NativeStickerReference]:
+    profile = load_account_profile(runtime_context.data_root)
+    if profile is None or not profile.account_profile_id.startswith("account-"):
+        return []
+    try:
+        selection = GlobalNativeStickerSelectionStore(
+            runtime_context.data_root
+        ).load(profile.account_profile_id)
+    except NativeStickerCatalogError as exc:
+        raise MessagePackError(str(exc)) from exc
+    return list(selection.stickers) if selection is not None else []
+
+
+def _empty_global_pool_error() -> MessagePackError:
+    return MessagePackError(
+        "全局文案库没有可发送的文字或原生表情，请先添加文案或选择原生表情"
+    )
+
+
+def _global_one_for_all_rotation_key(daily: dict) -> str | None:
+    selected = daily.get("selected_content_by_target", {})
+    if not isinstance(selected, dict):
+        return None
+    payload = selected.get("global:one-for-all")
+    if not isinstance(payload, dict):
+        return None
+    entry_id = payload.get("entry_id")
+    if isinstance(entry_id, str) and entry_id.startswith("global:"):
+        return entry_id
+    return None
+
+
 def _target_base_content(
     target: Target,
     config: AppConfig,
@@ -1035,22 +1096,46 @@ def _resolve_target_content(
         else:
             per_target = daily.setdefault("messages_by_target", {})
             text = per_target.get(key) or per_target.get(target.name)
-            if not text:
+            stickers = _global_native_stickers(runtime_context)
+            if text and not stickers:
+                base = _legacy_text_content(text, key)
+            elif stickers:
+                pool = _global_content_pool(messages, stickers)
+                base = _selection_rng(day, "per-friend", target).choice(pool)
+                if base.kind == "text" and base.text is not None:
+                    per_target[key] = base.text
+            else:
+                if not messages:
+                    raise _empty_global_pool_error()
                 text = _selection_rng(day, "per-friend", target).choice(messages)
                 per_target[key] = text
-            base = _legacy_text_content(text, key)
+                base = _legacy_text_content(text, key)
             selected[key] = base.state_payload()
     else:
-        if not daily["message"]:
-            daily["message"] = MessageRotation(
-                _selection_rng(day, "daily")
-            ).peek(messages, rotation_state)
         key = "global:one-for-all"
         selected = daily.setdefault("selected_content_by_target", {})
-        base = SelectedContentEntry.from_state(selected.get(key)) or _legacy_text_content(
-            daily["message"], key
-        )
-        selected[key] = base.state_payload()
+        cached = SelectedContentEntry.from_state(selected.get(key))
+        if cached is not None:
+            base = cached
+        else:
+            stickers = _global_native_stickers(runtime_context)
+            if stickers:
+                pool = _global_content_pool(messages, stickers)
+                entry_id = MessageRotation(
+                    _selection_rng(day, "daily")
+                ).peek([item.entry_id for item in pool], rotation_state)
+                base = next(item for item in pool if item.entry_id == entry_id)
+                if base.kind == "text" and base.text is not None:
+                    daily["message"] = base.text
+            else:
+                if not daily["message"]:
+                    if not messages:
+                        raise _empty_global_pool_error()
+                    daily["message"] = MessageRotation(
+                        _selection_rng(day, "daily")
+                    ).peek(messages, rotation_state)
+                base = _legacy_text_content(daily["message"], key)
+            selected[key] = base.state_payload()
     if base.kind == "text" and base.text is not None:
         return replace(
             base,
@@ -1126,9 +1211,7 @@ def preview_today_target_message(
             "consumed": False,
         },
     )
-    messages = read_messages(config.messages_file)
-    if not daily.get("message"):
-        daily["message"] = MessageRotation(_selection_rng(day, "daily")).peek(messages, state.rotation)
+    messages = read_messages(config.messages_file, allow_empty=True)
     daily.setdefault("messages_by_target", {})
     daily.setdefault("selected_content_by_target", {})
     content = _resolve_target_content(
@@ -1240,7 +1323,12 @@ def apply_today_delivery_reconciliation(
         daily["consumed"] = False
     elif not daily.get("consumed"):
         daily["consumed"] = True
-        if daily.get("message"):
+        rotation_key = _global_one_for_all_rotation_key(daily)
+        if rotation_key:
+            MessageRotation(_selection_rng(today, "daily")).consume(
+                rotation_key, state.rotation
+            )
+        elif daily.get("message"):
             MessageRotation(_selection_rng(today, "daily")).consume(
                 daily["message"], state.rotation
             )
@@ -1899,7 +1987,7 @@ def run_daily(
     if not audit_only:
         outcome_store.start(run_id, started)
 
-    messages = read_messages(config.messages_file)
+    messages = read_messages(config.messages_file, allow_empty=True)
     daily.setdefault("messages_by_target", {})
 
     sent = 0
@@ -2153,11 +2241,16 @@ def run_daily(
         for target in required_targets
     )
     if complete and not daily.get("consumed"):
-        rotated_messages = [
-            message
-            for message in [daily.get("message")]
-            if message
-        ]
+        global_rotation_key = _global_one_for_all_rotation_key(daily)
+        rotated_messages = (
+            [global_rotation_key]
+            if global_rotation_key
+            else [
+                message
+                for message in [daily.get("message")]
+                if message
+            ]
+        )
         rotated_messages.extend(
             message
             for key, message in daily.get("messages_by_target", {}).items()

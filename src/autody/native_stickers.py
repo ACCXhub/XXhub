@@ -48,6 +48,86 @@ class NativeStickerCatalog(BaseModel):
         return self
 
 
+class GlobalNativeStickerSelection(BaseModel):
+    schema_version: Literal[1] = 1
+    account_profile_id: str = Field(pattern=r"^account-[a-f0-9]{24}$")
+    stickers: list[NativeStickerReference] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_unique_logical_ids(self):
+        logical_ids = [item.logical_id for item in self.stickers]
+        if len(logical_ids) != len(set(logical_ids)):
+            raise ValueError("global native sticker logical IDs must be unique")
+        return self
+
+
+class GlobalNativeStickerSelectionStore:
+    def __init__(self, root: Path):
+        self.root = root.resolve()
+        self.path = (
+            self.root
+            / "data"
+            / "native-stickers"
+            / "global-selection.json"
+        )
+
+    def load(
+        self,
+        account_profile_id: str,
+    ) -> GlobalNativeStickerSelection | None:
+        if not self.path.exists():
+            return None
+        try:
+            selection = GlobalNativeStickerSelection.model_validate_json(
+                self.path.read_bytes()
+            )
+        except (OSError, ValidationError) as exc:
+            raise NativeStickerCatalogError("全局原生表情选择无效") from exc
+        if selection.account_profile_id != account_profile_id:
+            raise NativeStickerCatalogError(
+                "全局原生表情选择不属于当前账号"
+            )
+        return selection
+
+    def replace(
+        self,
+        account_profile_id: str,
+        stickers: list[NativeStickerReference],
+    ) -> GlobalNativeStickerSelection:
+        try:
+            selection = GlobalNativeStickerSelection(
+                account_profile_id=account_profile_id,
+                stickers=[
+                    NativeStickerReference.model_validate(
+                        item.model_dump(mode="python")
+                    )
+                    for item in stickers
+                ],
+            )
+        except (ValidationError, ValueError) as exc:
+            raise NativeStickerCatalogError(
+                "全局原生表情选择包含重复或无效标识"
+            ) from exc
+        payload = (
+            json.dumps(
+                selection.model_dump(mode="json"),
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n"
+        )
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.path.with_name(
+            f"{self.path.name}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            temporary.write_text(payload, encoding="utf-8")
+            os.replace(temporary, self.path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return selection
+
+
 class NativeStickerCatalogStore:
     def __init__(
         self,

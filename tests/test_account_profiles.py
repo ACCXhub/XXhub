@@ -5,6 +5,10 @@ import pytest
 
 from autody.account_profiles import AccountProfileStoreError, MultiAccountStore
 from autody.config import AppConfig, Target, load_config, save_config
+from autody.native_stickers import (
+    GlobalNativeStickerSelectionStore,
+    NativeStickerReference,
+)
 
 
 def _write_verified_profile(root: Path, profile_id: str, name: str) -> None:
@@ -240,6 +244,8 @@ def test_two_profiles_keep_native_sticker_catalogs_isolated(tmp_path: Path):
     catalog = tmp_path / "data" / "native-stickers" / "catalog.json"
     catalog.parent.mkdir(parents=True)
     catalog.write_text('{"account":"a"}', encoding="utf-8")
+    selection = catalog.parent / "global-selection.json"
+    selection.write_text('{"account":"a"}', encoding="utf-8")
     store.persist_active()
     second = store.create_empty_profile()["profile_id"]
 
@@ -247,13 +253,49 @@ def test_two_profiles_keep_native_sticker_catalogs_isolated(tmp_path: Path):
     assert not catalog.exists()
     catalog.parent.mkdir(parents=True)
     catalog.write_text('{"account":"b"}', encoding="utf-8")
+    selection.write_text('{"account":"b"}', encoding="utf-8")
     store.persist_active()
 
     store.activate(first)
     assert json.loads(catalog.read_text(encoding="utf-8"))["account"] == "a"
+    assert json.loads(selection.read_text(encoding="utf-8"))["account"] == "a"
 
     store.activate(second)
     assert json.loads(catalog.read_text(encoding="utf-8"))["account"] == "b"
+    assert json.loads(selection.read_text(encoding="utf-8"))["account"] == "b"
+
+
+def test_two_profiles_keep_global_sticker_selections_isolated(tmp_path: Path):
+    config_path = _make_project(tmp_path)
+    store = MultiAccountStore(tmp_path, config_path)
+    first = store.ensure_migrated()["active_profile_id"]
+    selection_store = GlobalNativeStickerSelectionStore(tmp_path)
+    selection_store.replace(
+        first,
+        [NativeStickerReference(logical_id="a-heart", display_name="比心")],
+    )
+    store.persist_active()
+    second = store.create_empty_profile()["profile_id"]
+
+    store.activate(second)
+    authoritative_second = "account-" + "b" * 24
+    _write_verified_profile(tmp_path, authoritative_second, "账号乙")
+    second = store.associate_active_verified_profile()["profile_id"]
+    selection_store.replace(
+        second,
+        [NativeStickerReference(logical_id="b-fire", display_name="续火花")],
+    )
+    store.persist_active()
+
+    store.activate(first)
+    assert [
+        item.logical_id for item in selection_store.load(first).stickers
+    ] == ["a-heart"]
+    store.activate(second)
+    assert [
+        item.logical_id
+        for item in selection_store.load(second).stickers
+    ] == ["b-fire"]
 
 
 def test_logout_affects_only_active_auth_and_preserves_profile_settings(

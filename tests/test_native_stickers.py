@@ -10,6 +10,7 @@ from autody.native_stickers import (
     NativeStickerDescriptor,
     NativeStickerReference,
 )
+from autody import native_stickers as native_sticker_module
 
 
 def descriptor(
@@ -113,3 +114,46 @@ def test_diagnostic_index_is_never_used_as_sticker_identity(tmp_path: Path):
             account,
             NativeStickerReference(logical_id="other", display_name="不存在"),
         )
+
+
+def test_global_selection_round_trip_is_account_scoped_and_account_neutral(
+    tmp_path: Path,
+):
+    account_a = "account-" + "a" * 24
+    account_b = "account-" + "b" * 24
+    store = native_sticker_module.GlobalNativeStickerSelectionStore(tmp_path)
+
+    saved = store.replace(
+        account_a,
+        [
+            descriptor(
+                "heart",
+                "比心",
+                resource_key="heart.webp",
+                diagnostic_index=7,
+            )
+        ],
+    )
+
+    assert saved.account_profile_id == account_a
+    assert [item.logical_id for item in saved.stickers] == ["heart"]
+    payload = json.loads(store.path.read_text(encoding="utf-8"))
+    assert payload["stickers"] == [
+        {
+            "logical_id": "heart",
+            "display_name": "比心",
+            "resource_key": "heart.webp",
+            "machine_id": None,
+            "accessible_name": None,
+            "category": None,
+        }
+    ]
+    assert "diagnostic_index" not in store.path.read_text(encoding="utf-8")
+    assert "preview_url" not in store.path.read_text(encoding="utf-8")
+
+    with pytest.raises(NativeStickerCatalogError, match="当前账号"):
+        store.load(account_b)
+
+    cleared = store.replace(account_a, [])
+    assert cleared.stickers == []
+    assert store.load(account_a).stickers == []

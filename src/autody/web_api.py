@@ -70,8 +70,10 @@ from autody.log_center import archive_historical_logs, archive_logs, automatic_c
 from autody.message_packs import ImportMode, MessagePackError, MessagePackService
 from autody.message_pack_catalog import MessagePackConflict
 from autody.native_stickers import (
+    GlobalNativeStickerSelectionStore,
     NativeStickerCatalogError,
     NativeStickerCatalogStore,
+    NativeStickerReference,
 )
 from autody.modules import (
     MODULE_ID,
@@ -229,6 +231,10 @@ class NativeStickerReferenceRequest(BaseModel):
 
 class NativeStickerBatchRequest(RevisionRequest):
     stickers: list[NativeStickerReferenceRequest] = Field(min_length=1)
+
+
+class GlobalNativeStickerSelectionRequest(BaseModel):
+    logical_ids: list[str] = Field(default_factory=list)
 
 
 class ReorderPackEntriesRequest(RevisionRequest):
@@ -944,6 +950,88 @@ def create_app(
 
     def native_sticker_store() -> NativeStickerCatalogStore:
         return NativeStickerCatalogStore(runtime_context.data_root, now=current_time)
+
+    def global_message_library_payload(config: AppConfig | None = None) -> dict:
+        current = config or load_config(config_path)
+        messages = read_messages(current.messages_file, allow_empty=True)
+        profile = load_account_profile(runtime_context.data_root)
+        selected: list[NativeStickerReference] = []
+        account_profile_id = None
+        if profile is not None and profile.account_profile_id.startswith("account-"):
+            account_profile_id = profile.account_profile_id
+            try:
+                stored = GlobalNativeStickerSelectionStore(
+                    runtime_context.data_root
+                ).load(account_profile_id)
+            except NativeStickerCatalogError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            if stored is not None:
+                selected = list(stored.stickers)
+        default_pack_name = None
+        if current.default_message_pack:
+            try:
+                default_pack_name = next(
+                    (
+                        pack.name
+                        for pack in message_pack_service().list_packs().packs
+                        if pack.id == current.default_message_pack
+                    ),
+                    None,
+                )
+            except MessagePackError as exc:
+                raise message_pack_http_exception(exc) from exc
+        return {
+            "messages": messages,
+            "selected_native_stickers": [
+                item.model_dump(mode="json") for item in selected
+            ],
+            "account_profile_id": account_profile_id,
+            "text_count": len(messages),
+            "native_sticker_count": len(selected),
+            "total_count": len(messages) + len(selected),
+            "default_message_pack": current.default_message_pack,
+            "default_message_pack_name": default_pack_name,
+            "default_pack_overrides_global": bool(current.default_message_pack),
+        }
+
+    def replace_global_native_sticker_selection(
+        logical_ids: list[str],
+    ) -> dict:
+        profile = load_account_profile(runtime_context.data_root)
+        if profile is None or not profile.account_profile_id.startswith("account-"):
+            raise HTTPException(409, "当前账号尚未完成验证，无法保存全局原生表情选择")
+        account_profile_id = profile.account_profile_id
+        try:
+            catalog = native_sticker_store().load(account_profile_id)
+        except NativeStickerCatalogError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if catalog is None:
+            raise HTTPException(409, "当前账号尚未扫描原生表情，无法保存全局选择")
+        by_logical_id = {item.logical_id: item for item in catalog.stickers}
+        if len(logical_ids) != len(set(logical_ids)):
+            raise HTTPException(422, "全局原生表情选择包含重复逻辑标识")
+        missing = [item for item in logical_ids if item not in by_logical_id]
+        if missing:
+            raise HTTPException(422, "所选原生表情已不在当前账号目录中，请刷新后重试")
+        selected = [
+            NativeStickerReference(
+                logical_id=descriptor.logical_id,
+                display_name=descriptor.display_name,
+                resource_key=descriptor.resource_key,
+                machine_id=descriptor.machine_id,
+                accessible_name=descriptor.accessible_name,
+                category=descriptor.category,
+            )
+            for descriptor in (by_logical_id[item] for item in logical_ids)
+        ]
+        try:
+            GlobalNativeStickerSelectionStore(runtime_context.data_root).replace(
+                account_profile_id,
+                selected,
+            )
+        except NativeStickerCatalogError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return global_message_library_payload(load_config(config_path))
     try:
         bundled_module = ensure_official_module_archive(root)
         bundled_module_error = None
@@ -2495,18 +2583,25 @@ def create_app(
     @app.get("/api/messages")
     def get_messages():
         config = load_config(config_path)
-        return {"messages": read_messages(config.messages_file)}
+        return global_message_library_payload(config)
 
     @app.put("/api/messages")
     def update_messages(payload: MessagesUpdate):
         config = load_config(config_path)
         messages = list(dict.fromkeys(item.strip() for item in payload.messages if item.strip()))
-        if not messages:
-            raise HTTPException(422, "文案库不能为空")
         temporary = config.messages_file.with_suffix(".tmp")
-        temporary.write_text("\n".join(messages) + "\n", encoding="utf-8")
+        temporary.write_text(
+            "\n".join(messages) + ("\n" if messages else ""),
+            encoding="utf-8",
+        )
         os.replace(temporary, config.messages_file)
-        return {"messages": messages}
+        return global_message_library_payload(config)
+
+    @app.put("/api/messages/native-stickers")
+    def update_global_native_stickers(
+        payload: GlobalNativeStickerSelectionRequest,
+    ):
+        return replace_global_native_sticker_selection(payload.logical_ids)
 
     @app.post("/api/messages/import/preview")
     async def preview_message_import(file: UploadFile = File(...)):
@@ -2547,7 +2642,7 @@ def create_app(
         config = load_config(config_path)
         try:
             if source == "local":
-                messages = read_messages(config.messages_file)
+                messages = read_messages(config.messages_file, allow_empty=True)
             else:
                 service = message_pack_service()
                 packs = service.list_packs().packs

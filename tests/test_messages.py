@@ -21,6 +21,15 @@ def test_empty_library_is_rejected(tmp_path: Path):
         read_messages(path)
 
 
+def test_empty_text_projection_can_be_loaded_for_a_sticker_only_global_pool(
+    tmp_path: Path,
+):
+    path = tmp_path / "messages.txt"
+    path.write_text("\n", encoding="utf-8")
+
+    assert read_messages(path, allow_empty=True) == []
+
+
 def test_rotation_uses_every_message_before_repeating():
     rotation = MessageRotation(random.Random(7))
     state = RotationState()
