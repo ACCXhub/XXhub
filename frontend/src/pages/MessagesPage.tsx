@@ -98,8 +98,8 @@ export function MessagesPage({
         <span>{messages.length} 条文案</span>
         <button className="text-button" onClick={() => setMessages(["", ...messages])}><Plus size={16} />新增文案</button>
       </div>
-      <section className="panel global-sticker-panel" role="region" aria-label="全局原生表情">
-        <div className="panel-heading"><h2>原生表情</h2><button className="action-button" disabled={stickerBusy || !library} onClick={() => setStickerManagerOpen(true)}>管理原生表情</button></div>
+      <section className="panel global-sticker-panel" role="region" aria-label="表情包">
+        <div className="panel-heading"><h2>表情包</h2><button className="action-button" disabled={stickerBusy || !library} onClick={() => setStickerManagerOpen(true)}>管理原生表情</button></div>
         {selectedStickerCards.length ? <div className="selected-sticker-grid">{selectedStickerCards.map((selected) => {
           const sticker = stickerCatalog?.stickers.find((item) => item.logical_id === selected.logical_id);
           return <div className="selected-sticker-card" key={selected.logical_id}>{sticker?.preview_url ? <img src={sticker.preview_url} alt="" /> : null}<span>{selected.display_name}</span></div>;

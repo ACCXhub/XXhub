@@ -79,10 +79,11 @@ test("renders only selected stickers inline and manages the full catalog separat
   } as never));
   render(<MessagesPage notify={notify} onNavigate={vi.fn()} />);
 
-  const inline = await screen.findByRole("region", { name: "全局原生表情" });
-  expect(inline).toHaveTextContent("原生表情");
+  const inline = await screen.findByRole("region", { name: "表情包" });
+  expect(inline).toHaveTextContent("表情包");
   expect(inline).toHaveTextContent("比心");
   expect(inline).not.toHaveTextContent("续火花");
+  expect(inline.querySelector(".selected-sticker-card")).not.toHaveClass("selected");
   expect(screen.queryByText("全局随机候选")).not.toBeInTheDocument();
   expect(screen.queryByText(/条文字|参与全局随机发送|正在覆盖全局文案库发送来源/)).not.toBeInTheDocument();
   expect(inline.querySelector('input[type="checkbox"]')).toBeNull();
@@ -115,7 +116,7 @@ test("keeps the persisted selection visible when a global selection update fails
   const notify = vi.fn();
   vi.mocked(api.saveGlobalNativeStickers).mockRejectedValue(new Error("选择保存失败"));
   render(<MessagesPage notify={notify} onNavigate={vi.fn()} />);
-  await screen.findByRole("region", { name: "全局原生表情" });
+  await screen.findByRole("region", { name: "表情包" });
   fireEvent.click(screen.getByRole("button", { name: "管理原生表情" }));
   const fireButton = await screen.findByRole("button", { name: "选择 续火花" });
 
@@ -123,8 +124,8 @@ test("keeps the persisted selection visible when a global selection update fails
 
   await waitFor(() => expect(notify).toHaveBeenCalledWith("选择保存失败"));
   expect(fireButton).toHaveAttribute("aria-pressed", "false");
-  expect(screen.getByRole("region", { name: "全局原生表情" })).toHaveTextContent("比心");
-  expect(screen.getByRole("region", { name: "全局原生表情" })).not.toHaveTextContent("续火花");
+  expect(screen.getByRole("region", { name: "表情包" })).toHaveTextContent("比心");
+  expect(screen.getByRole("region", { name: "表情包" })).not.toHaveTextContent("续火花");
 });
 
 test("shows a concise empty state without rendering the catalog", async () => {
@@ -139,7 +140,7 @@ test("shows a concise empty state without rendering the catalog", async () => {
   } as never);
   render(<MessagesPage notify={vi.fn()} onNavigate={vi.fn()} />);
 
-  const inline = await screen.findByRole("region", { name: "全局原生表情" });
+  const inline = await screen.findByRole("region", { name: "表情包" });
   expect(inline).toHaveTextContent("暂未选择原生表情");
   expect(inline).not.toHaveTextContent("比心");
   expect(inline).not.toHaveTextContent("续火花");
