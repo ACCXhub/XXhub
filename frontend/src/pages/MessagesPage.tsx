@@ -14,6 +14,7 @@ export function MessagesPage({
   const [library, setLibrary] = useState<GlobalMessageLibrary | null>(null);
   const [stickerCatalog, setStickerCatalog] = useState<NativeStickerCatalog | null>(null);
   const [stickerBusy, setStickerBusy] = useState(false);
+  const [stickerManagerOpen, setStickerManagerOpen] = useState(false);
   const [query, setQuery] = useState("");
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -71,6 +72,7 @@ export function MessagesPage({
       notify(error instanceof Error ? error.message : "全局原生表情保存失败");
     } finally { setStickerBusy(false); }
   };
+  const selectedStickerCards = library?.selected_native_stickers ?? [];
   const importMessages = async (file?: File) => {
     if (!file) return;
     try {
@@ -96,16 +98,12 @@ export function MessagesPage({
         <span>{messages.length} 条文案</span>
         <button className="text-button" onClick={() => setMessages(["", ...messages])}><Plus size={16} />新增文案</button>
       </div>
-      <section className="panel global-pool-panel" aria-label="全局候选">
-        <div className="panel-heading"><div><h2>全局随机候选</h2><p>{(library?.text_count ?? messages.length)} 条文字 · {library?.native_sticker_count ?? 0} 个原生表情 · 共 {library?.total_count ?? messages.length} 项</p></div></div>
-        {library?.default_pack_overrides_global ? <p className="notice warning">当前默认文案包「{library.default_message_pack_name || library.default_message_pack}」正在覆盖全局文案库发送来源。</p> : <p className="notice success">当前使用全局文案库作为默认 fallback 来源。</p>}
-      </section>
       <section className="panel global-sticker-panel" role="region" aria-label="全局原生表情">
-        <div className="panel-heading"><div><h2>原生表情</h2><p>参与全局随机发送：{library?.native_sticker_count ?? 0} 个</p></div><button className="action-button" disabled={stickerBusy} onClick={() => void scanStickers()}>刷新原生表情</button></div>
-        {stickerCatalog?.stickers.length ? <div className="sticker-chooser">{stickerCatalog.stickers.map((sticker) => {
-          const selected = Boolean(library?.selected_native_stickers.some((item) => item.logical_id === sticker.logical_id));
-          return <button key={sticker.logical_id} className={selected ? "selected" : ""} aria-label={`选择 ${sticker.display_name}`} aria-pressed={selected} disabled={stickerBusy || !library} onClick={() => void toggleGlobalSticker(sticker)}>{sticker.preview_url ? <img src={sticker.preview_url} alt="" /> : null}<span>{sticker.display_name}</span></button>;
-        })}</div> : <p className="empty-list-copy">当前账号尚未扫描原生表情。</p>}
+        <div className="panel-heading"><h2>原生表情</h2><button className="action-button" disabled={stickerBusy || !library} onClick={() => setStickerManagerOpen(true)}>管理原生表情</button></div>
+        {selectedStickerCards.length ? <div className="selected-sticker-grid">{selectedStickerCards.map((selected) => {
+          const sticker = stickerCatalog?.stickers.find((item) => item.logical_id === selected.logical_id);
+          return <div className="selected-sticker-card" key={selected.logical_id}>{sticker?.preview_url ? <img src={sticker.preview_url} alt="" /> : null}<span>{selected.display_name}</span></div>;
+        })}</div> : <p className="empty-list-copy">暂未选择原生表情</p>}
       </section>
       <div className="message-list">
         {visible.map(({ text, index }) => (
@@ -118,6 +116,16 @@ export function MessagesPage({
           </article>
         ))}
       </div>
+      {stickerManagerOpen ? <div className="cleanup-dialog" role="dialog" aria-modal="true" aria-label="管理原生表情">
+        <div className="panel global-sticker-manager">
+          <div className="panel-heading"><h2>管理原生表情</h2><button className="text-button" onClick={() => setStickerManagerOpen(false)}>关闭</button></div>
+          {stickerCatalog?.stickers.length ? <div className="sticker-chooser">{stickerCatalog.stickers.map((sticker) => {
+            const selected = Boolean(library?.selected_native_stickers.some((item) => item.logical_id === sticker.logical_id));
+            return <button key={sticker.logical_id} className={selected ? "selected" : ""} aria-label={`选择 ${sticker.display_name}`} aria-pressed={selected} disabled={stickerBusy || !library} onClick={() => void toggleGlobalSticker(sticker)}>{sticker.preview_url ? <img src={sticker.preview_url} alt="" /> : null}<span>{sticker.display_name}</span></button>;
+          })}</div> : <p className="empty-list-copy">当前账号尚未扫描原生表情。</p>}
+          <div className="sticker-chooser-footer"><button className="action-button" disabled={stickerBusy} onClick={() => void scanStickers()}>{stickerCatalog?.stickers.length ? "刷新原生表情" : "扫描原生表情"}</button></div>
+        </div>
+      </div> : null}
     </section>
   );
 }

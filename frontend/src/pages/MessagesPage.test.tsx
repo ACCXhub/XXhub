@@ -66,7 +66,7 @@ beforeEach(() => {
   vi.mocked(api.saveMessages).mockResolvedValue(library as never);
 });
 
-test("renders and persists the account global sticker selection without checkbox UI", async () => {
+test("renders only selected stickers inline and manages the full catalog separately", async () => {
   const notify = vi.fn();
   vi.mocked(api.saveGlobalNativeStickers).mockImplementation(async (ids) => ({
     ...library,
@@ -79,27 +79,35 @@ test("renders and persists the account global sticker selection without checkbox
   } as never));
   render(<MessagesPage notify={notify} onNavigate={vi.fn()} />);
 
-  await screen.findByText("全局随机候选");
-  expect(screen.getByText("2 条文字 · 1 个原生表情 · 共 3 项")).toBeInTheDocument();
-  expect(screen.getByText("当前默认文案包「日常问候」正在覆盖全局文案库发送来源。")).toBeInTheDocument();
+  const inline = await screen.findByRole("region", { name: "全局原生表情" });
+  expect(inline).toHaveTextContent("原生表情");
+  expect(inline).toHaveTextContent("比心");
+  expect(inline).not.toHaveTextContent("续火花");
+  expect(screen.queryByText("全局随机候选")).not.toBeInTheDocument();
+  expect(screen.queryByText(/条文字|参与全局随机发送|正在覆盖全局文案库发送来源/)).not.toBeInTheDocument();
+  expect(inline.querySelector('input[type="checkbox"]')).toBeNull();
+  expect(inline.querySelector("svg")).toBeNull();
+
+  fireEvent.click(screen.getByRole("button", { name: "管理原生表情" }));
+  const manager = await screen.findByRole("dialog", { name: "管理原生表情" });
   const selected = screen.getByRole("button", { name: "选择 比心" });
   const unselected = screen.getByRole("button", { name: "选择 续火花" });
   expect(selected).toHaveAttribute("aria-pressed", "true");
   expect(selected).toHaveClass("selected");
   expect(unselected).toHaveAttribute("aria-pressed", "false");
-  expect(screen.getByText("参与全局随机发送：1 个")).toBeInTheDocument();
-  const chooser = screen.getByRole("region", { name: "全局原生表情" });
-  expect(chooser.querySelector('input[type="checkbox"]')).toBeNull();
-  expect(chooser.querySelector("svg")).toBeNull();
+  expect(manager.querySelector('input[type="checkbox"]')).toBeNull();
+  expect(manager.querySelector("svg")).toBeNull();
 
   fireEvent.click(unselected);
   await waitFor(() => expect(api.saveGlobalNativeStickers).toHaveBeenCalledWith(["heart", "fire"]));
-  expect(screen.getByText("参与全局随机发送：2 个")).toBeInTheDocument();
+  expect(inline).toHaveTextContent("续火花");
+  expect(Array.from(inline.querySelectorAll(".selected-sticker-card span")).map((item) => item.textContent)).toEqual(["比心", "续火花"]);
   expect(unselected).toHaveAttribute("aria-pressed", "true");
 
   fireEvent.click(selected);
   await waitFor(() => expect(api.saveGlobalNativeStickers).toHaveBeenLastCalledWith(["fire"]));
-  expect(screen.getByText("参与全局随机发送：1 个")).toBeInTheDocument();
+  expect(inline).not.toHaveTextContent("比心");
+  expect(inline).toHaveTextContent("续火花");
   expect(notify).not.toHaveBeenCalled();
 });
 
@@ -107,26 +115,36 @@ test("keeps the persisted selection visible when a global selection update fails
   const notify = vi.fn();
   vi.mocked(api.saveGlobalNativeStickers).mockRejectedValue(new Error("选择保存失败"));
   render(<MessagesPage notify={notify} onNavigate={vi.fn()} />);
+  await screen.findByRole("region", { name: "全局原生表情" });
+  fireEvent.click(screen.getByRole("button", { name: "管理原生表情" }));
   const fireButton = await screen.findByRole("button", { name: "选择 续火花" });
 
   fireEvent.click(fireButton);
 
   await waitFor(() => expect(notify).toHaveBeenCalledWith("选择保存失败"));
   expect(fireButton).toHaveAttribute("aria-pressed", "false");
-  expect(screen.getByText("参与全局随机发送：1 个")).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "全局原生表情" })).toHaveTextContent("比心");
+  expect(screen.getByRole("region", { name: "全局原生表情" })).not.toHaveTextContent("续火花");
 });
 
-test("reports the global library as active when no default pack overrides it", async () => {
+test("shows a concise empty state without rendering the catalog", async () => {
   vi.mocked(api.messages).mockResolvedValue({
     ...library,
+    selected_native_stickers: [],
+    native_sticker_count: 0,
+    total_count: 2,
     default_message_pack: null,
     default_message_pack_name: null,
     default_pack_overrides_global: false
   } as never);
   render(<MessagesPage notify={vi.fn()} onNavigate={vi.fn()} />);
 
-  await screen.findByText("当前使用全局文案库作为默认 fallback 来源。");
-  expect(screen.queryByText(/正在覆盖全局文案库发送来源/)).not.toBeInTheDocument();
+  const inline = await screen.findByRole("region", { name: "全局原生表情" });
+  expect(inline).toHaveTextContent("暂未选择原生表情");
+  expect(inline).not.toHaveTextContent("比心");
+  expect(inline).not.toHaveTextContent("续火花");
+  fireEvent.click(screen.getByRole("button", { name: "管理原生表情" }));
+  expect(await screen.findByRole("button", { name: "选择 比心" })).toBeInTheDocument();
 });
 
 afterEach(() => {
