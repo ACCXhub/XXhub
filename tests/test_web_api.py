@@ -3236,6 +3236,68 @@ def test_message_pack_api_adds_reorders_and_removes_native_sticker_entries(
     assert removed.status_code == 200
 
 
+def test_message_pack_api_batch_adds_stickers_and_creates_canonical_auto_pack(
+    tmp_path: Path,
+):
+    client = TestClient(create_app(make_project(tmp_path)))
+    catalog = client.get("/api/message-packs").json()
+    created = client.post(
+        "/api/message-packs",
+        json={"name": "混合", "expected_revision": catalog["revision"]},
+    ).json()
+    pack_id = created["pack"]["id"]
+    payload = {
+        "expected_revision": created["revision"],
+        "stickers": [
+            {
+                "logical_id": "heart",
+                "display_name": "比心",
+                "resource_key": "heart.webp",
+            },
+            {
+                "logical_id": "fire",
+                "display_name": "续火花",
+                "resource_key": "fire.webp",
+            },
+            {
+                "logical_id": "heart",
+                "display_name": "重复比心",
+                "resource_key": "duplicate.webp",
+            },
+        ],
+    }
+
+    added = client.post(
+        f"/api/message-packs/{pack_id}/native-stickers/batch",
+        json=payload,
+    )
+    auto = client.post(
+        "/api/message-packs/auto-native-stickers/native-stickers/batch",
+        json={
+            "expected_revision": added.json()["revision"],
+            "stickers": payload["stickers"][:2],
+        },
+    )
+
+    assert added.status_code == 200
+    assert added.json()["added_count"] == 2
+    assert added.json()["duplicate_count"] == 1
+    assert added.json()["revision"] == created["revision"] + 1
+    assert auto.status_code == 200
+    assert auto.json()["pack"]["id"] == "auto-native-stickers"
+    assert auto.json()["pack"]["name"] == "自动表情包"
+    assert auto.json()["added_count"] == 2
+
+    stale = client.post(
+        f"/api/message-packs/{pack_id}/native-stickers/batch",
+        json={
+            "expected_revision": created["revision"],
+            "stickers": [{"logical_id": "wave", "display_name": "挥手"}],
+        },
+    )
+    assert stale.status_code == 409
+
+
 def test_native_sticker_scan_persists_success_and_preserves_previous_on_failure(
     tmp_path: Path,
     monkeypatch,

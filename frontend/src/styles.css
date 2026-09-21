@@ -236,8 +236,11 @@ input:focus, textarea:focus, select:focus { border-color: #5797ef; box-shadow: 0
 .sticker-chooser { max-height: 320px; padding: 15px; overflow: auto; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .sticker-chooser button { min-width: 0; padding: 10px 8px; display: grid; place-items: center; gap: 6px; color: #47566d; border: 1px solid #dce4ee; border-radius: 8px; background: #fff; cursor: pointer; font-size: 11px; }
 .sticker-chooser button:hover:not(:disabled) { border-color: #90b8e8; background: #f5f9ff; }
+.sticker-chooser button.selected { border-color: #1769e8; background: #edf4ff; box-shadow: inset 0 0 0 1px #1769e8; }
 .sticker-chooser button:disabled { opacity: .5; cursor: not-allowed; }
 .sticker-chooser img { width: 38px; height: 38px; object-fit: contain; }
+.sticker-chooser-footer { padding: 10px 15px; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #526176; border-top: 1px solid #edf1f5; font-size: 12px; }
+.danger-copy { color: #a53845; }
 .discovery-panel { margin-top: 14px; overflow: hidden; }
 .candidate-grid { padding: 15px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
 .candidate { position: relative; min-height: 58px; padding: 9px 11px; display: grid; grid-template-columns: 40px 1fr; gap: 3px 8px; align-items: center; border: 1px solid #e2e8ef; border-radius: 8px; cursor: pointer; background: #fff; text-align: left; }

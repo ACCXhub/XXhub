@@ -7,6 +7,11 @@ import pytest
 from autody.config import AppConfig, Target, load_config, save_config
 from autody.message_packs import ImportMode, MessagePackError, MessagePackService
 from autody.message_pack_catalog import MessagePackConflict
+from autody.native_stickers import NativeStickerReference
+
+
+AUTO_NATIVE_STICKER_PACK_ID = "auto-native-stickers"
+AUTO_NATIVE_STICKER_PACK_NAME = "自动表情包"
 
 
 def make_pack_root(tmp_path: Path) -> Path:
@@ -246,6 +251,165 @@ def test_native_sticker_can_be_reordered_and_removed_as_a_direct_pack_entry(
     assert [entry.kind for entry in service.preview(pack.id).entries] == ["text", "text"]
     assert sticker.entry.id not in service.catalog().native_stickers
     assert removed.pack.count == 2
+
+
+def test_batch_native_stickers_are_atomic_ordered_and_increment_revision_once(
+    tmp_path: Path,
+):
+    service = MessagePackService(make_pack_root(tmp_path), tmp_path / "user-data")
+    pack = service.create_pack(service.catalog().revision, "混合").pack
+    text = service.add_message(pack.id, "保留文字", service.catalog().revision)
+    before = service.store.catalog_path.read_bytes()
+
+    with pytest.raises(MessagePackError, match="原生表情"):
+        service.add_native_stickers(
+            pack.id,
+            [
+                NativeStickerReference(
+                    logical_id="heart",
+                    display_name="比心",
+                    resource_key="heart.webp",
+                ),
+                {"logical_id": "   ", "display_name": "无效"},
+            ],
+            text.revision,
+        )
+
+    assert service.store.catalog_path.read_bytes() == before
+    added = service.add_native_stickers(
+        pack.id,
+        [
+            NativeStickerReference(
+                logical_id="heart",
+                display_name="比心",
+                resource_key="heart.webp",
+            ),
+            NativeStickerReference(
+                logical_id="fire",
+                display_name="续火花",
+                resource_key="fire.webp",
+            ),
+            NativeStickerReference(
+                logical_id="heart",
+                display_name="重复比心",
+                resource_key="duplicate.webp",
+            ),
+        ],
+        text.revision,
+    )
+
+    preview = service.preview(pack.id)
+    assert added.revision == text.revision + 1
+    assert added.added_count == 2
+    assert added.duplicate_count == 1
+    assert [entry.kind for entry in preview.entries] == [
+        "text",
+        "native_sticker",
+        "native_sticker",
+    ]
+    assert [entry.sticker.logical_id for entry in preview.entries[1:]] == [
+        "heart",
+        "fire",
+    ]
+    assert preview.entries[0].text == "保留文字"
+
+    with pytest.raises(MessagePackConflict):
+        service.add_native_stickers(
+            pack.id,
+            [NativeStickerReference(logical_id="new", display_name="新表情")],
+            text.revision,
+        )
+    assert [entry.sticker.logical_id for entry in service.preview(pack.id).entries[1:]] == [
+        "heart",
+        "fire",
+    ]
+
+
+def test_auto_native_sticker_pack_uses_reserved_identity_and_reuses_after_rename(
+    tmp_path: Path,
+):
+    service = MessagePackService(make_pack_root(tmp_path), tmp_path / "user-data")
+    duplicate_name = service.create_pack(
+        service.catalog().revision,
+        AUTO_NATIVE_STICKER_PACK_NAME,
+    ).pack
+
+    created = service.add_native_stickers(
+        AUTO_NATIVE_STICKER_PACK_ID,
+        [NativeStickerReference(logical_id="heart", display_name="比心")],
+        service.catalog().revision,
+    )
+    assert created.pack.id == AUTO_NATIVE_STICKER_PACK_ID
+    assert created.pack.name == AUTO_NATIVE_STICKER_PACK_NAME
+    assert created.added_count == 1
+    assert duplicate_name.id != AUTO_NATIVE_STICKER_PACK_ID
+
+    renamed = service.rename_pack(
+        AUTO_NATIVE_STICKER_PACK_ID,
+        "我的自动表情",
+        created.revision,
+    )
+    reused = service.add_native_stickers(
+        AUTO_NATIVE_STICKER_PACK_ID,
+        [
+            NativeStickerReference(logical_id="heart", display_name="比心"),
+            NativeStickerReference(logical_id="fire", display_name="续火花"),
+        ],
+        renamed.revision,
+    )
+
+    assert reused.pack.id == AUTO_NATIVE_STICKER_PACK_ID
+    assert reused.pack.name == "我的自动表情"
+    assert reused.added_count == 1
+    assert reused.duplicate_count == 1
+    assert [
+        entry.sticker.logical_id
+        for entry in service.preview(AUTO_NATIVE_STICKER_PACK_ID).entries
+    ] == ["heart", "fire"]
+    assert [
+        pack.id
+        for pack in service.list_packs().packs
+        if pack.id == AUTO_NATIVE_STICKER_PACK_ID
+    ] == [AUTO_NATIVE_STICKER_PACK_ID]
+
+    deleted = service.delete_pack(
+        AUTO_NATIVE_STICKER_PACK_ID,
+        reused.revision,
+        set(),
+    )
+    recreated = service.add_native_stickers(
+        AUTO_NATIVE_STICKER_PACK_ID,
+        [NativeStickerReference(logical_id="wave", display_name="挥手")],
+        deleted.revision,
+    )
+
+    assert recreated.pack.id == AUTO_NATIVE_STICKER_PACK_ID
+    assert recreated.pack.name == AUTO_NATIVE_STICKER_PACK_NAME
+    assert [entry.sticker.logical_id for entry in service.preview(recreated.pack.id).entries] == [
+        "wave"
+    ]
+
+
+def test_auto_native_sticker_pack_rejects_incompatible_reserved_id_without_write(
+    tmp_path: Path,
+):
+    ids = iter(["seed-one", "seed-two", AUTO_NATIVE_STICKER_PACK_ID])
+    service = MessagePackService(
+        make_pack_root(tmp_path),
+        tmp_path / "user-data",
+        id_factory=lambda: next(ids),
+    )
+    conflicting = service.create_pack(service.catalog().revision, "用户包")
+    before = service.store.catalog_path.read_bytes()
+
+    with pytest.raises(MessagePackError, match="保留 ID"):
+        service.add_native_stickers(
+            AUTO_NATIVE_STICKER_PACK_ID,
+            [NativeStickerReference(logical_id="heart", display_name="比心")],
+            conflicting.revision,
+        )
+
+    assert service.store.catalog_path.read_bytes() == before
 
 
 def test_fused_child_native_sticker_keeps_identity_and_origin_after_split(
@@ -541,9 +705,31 @@ def test_delete_pack_rejects_reference_then_recursively_removes_subtree(tmp_path
         "目标",
         "目标文案",
     )
+    unrelated, unrelated_message = create_pack_with_message(
+        service,
+        "无关",
+        "无关文案",
+    )
     config_path = data_root / "config.yaml"
     make_config(config_path, source.id)
     service.fuse(source.id, destination.id, service.catalog().revision, config_path)
+    messages_path = data_root / "messages.txt"
+    messages_path.write_text("保持不变\n", encoding="utf-8")
+    sticker_catalog_path = data_root / "data" / "native-stickers" / "catalog.json"
+    sticker_catalog_path.parent.mkdir(parents=True)
+    sticker_catalog_path.write_text('{"account":"keep"}\n', encoding="utf-8")
+    account_path = data_root / "data" / "account-profile.json"
+    account_path.write_text('{"profile":"keep"}\n', encoding="utf-8")
+    browser_marker = data_root / "browser" / "marker.txt"
+    browser_marker.parent.mkdir()
+    browser_marker.write_text("keep", encoding="utf-8")
+
+    with pytest.raises(MessagePackError, match="顶层"):
+        service.delete_pack(
+            source.id,
+            service.catalog().revision,
+            set(),
+        )
 
     with pytest.raises(MessagePackConflict, match="目标使用"):
         service.delete_pack(
@@ -563,6 +749,12 @@ def test_delete_pack_rejects_reference_then_recursively_removes_subtree(tmp_path
     assert destination.id not in service.catalog().packages
     assert source_message.id not in service.catalog().messages
     assert destination_message.id not in service.catalog().messages
+    assert unrelated.id in service.catalog().packages
+    assert unrelated_message.id in service.catalog().messages
+    assert messages_path.read_text(encoding="utf-8") == "保持不变\n"
+    assert sticker_catalog_path.read_text(encoding="utf-8") == '{"account":"keep"}\n'
+    assert account_path.read_text(encoding="utf-8") == '{"profile":"keep"}\n'
+    assert browser_marker.read_text(encoding="utf-8") == "keep"
 
 
 def test_pending_fusion_transaction_rolls_forward_after_restart(

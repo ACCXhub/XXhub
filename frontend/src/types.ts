@@ -297,6 +297,12 @@ export interface NativeStickerCatalog {
   stickers: NativeStickerDescriptor[];
 }
 
+export interface NativeStickerBatchMutationResult extends PackMutationResult {
+  pack: MessagePack;
+  added_count: number;
+  duplicate_count: number;
+}
+
 export interface PackEntry {
   id: string;
   kind: "text" | "native_sticker";

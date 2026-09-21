@@ -21,7 +21,7 @@ from autody.chat import (
 from autody import runner as runner_module
 from autody.failures import failure_detail
 from autody.logging_setup import DailyAppendFileHandler
-from autody.message_packs import MessagePackService
+from autody.message_packs import AUTO_NATIVE_STICKER_PACK_ID, MessagePackService
 from autody.native_stickers import NativeStickerCatalogStore, NativeStickerDescriptor
 from autody.runner import (
     RunStatus,
@@ -2506,6 +2506,48 @@ def test_per_friend_mixed_pack_persists_one_complete_typed_entry_per_target(
         "native_sticker",
     }
     assert all(content.entry_id for content in resolved)
+
+
+def test_auto_native_sticker_pack_uses_existing_flat_typed_selection(tmp_path: Path):
+    config = make_config(tmp_path)
+    pack_dir = tmp_path / "message-packs"
+    pack_dir.mkdir()
+    (pack_dir / "index.json").write_text('{"packs":[]}', encoding="utf-8")
+    service = MessagePackService(tmp_path, tmp_path)
+    created = service.add_native_stickers(
+        AUTO_NATIVE_STICKER_PACK_ID,
+        [
+            {
+                "logical_id": "heart",
+                "display_name": "比心",
+                "resource_key": "heart.webp",
+            },
+            {
+                "logical_id": "fire",
+                "display_name": "续火花",
+                "resource_key": "fire.webp",
+            },
+        ],
+        service.catalog().revision,
+    )
+    config.default_message_pack = created.pack.id
+    daily = {"message": "", "messages_by_target": {}}
+    state = StateStore(config.state_file).load()
+
+    selected = runner_module._resolve_target_content(
+        config.targets[0],
+        config,
+        date(2026, 9, 21),
+        daily,
+        ["unused"],
+        state.rotation,
+        runtime_context=resolve_runtime_context(tmp_path, program_root=tmp_path),
+    )
+
+    assert selected.pack_id == AUTO_NATIVE_STICKER_PACK_ID
+    assert selected.kind == "native_sticker"
+    assert selected.sticker.logical_id in {"heart", "fire"}
+    assert len(service.preview(AUTO_NATIVE_STICKER_PACK_ID).entries) == 2
 
 
 def test_live_today_audit_blocks_a_restarted_sticker_delivery_before_catalog_resolution(

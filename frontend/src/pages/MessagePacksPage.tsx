@@ -2,11 +2,12 @@ import { Check, Download, Eye, Library, Pencil, Plus, RefreshCw, Upload } from "
 import type { DragEvent } from "react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { AppConfig, MessagePack, NativeStickerCatalog, NativeStickerDescriptor, PackCatalog, PackImportResult, PackMutationResult, PackPreview } from "../types";
+import type { AppConfig, MessagePack, NativeStickerCatalog, NativeStickerDescriptor, NativeStickerReference, PackCatalog, PackImportResult, PackMutationResult, PackPreview } from "../types";
 
 const categoryLabels: Record<string, string> = {
   daily: "日常", cute: "可爱", funny: "趣味", care: "关心", festival: "节日", custom: "自定义"
 };
+const AUTO_NATIVE_STICKER_PACK_ID = "auto-native-stickers";
 
 type ReorderEdge = "top" | "right" | "bottom" | "left";
 type DropIntent =
@@ -24,6 +25,8 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
   const [dropIntent, setDropIntent] = useState<DropIntent | null>(null);
   const [stickerPack, setStickerPack] = useState<MessagePack | null>(null);
   const [stickerCatalog, setStickerCatalog] = useState<NativeStickerCatalog | null>(null);
+  const [selectedStickerIds, setSelectedStickerIds] = useState<Set<string>>(new Set());
+  const [deletePack, setDeletePack] = useState<MessagePack | null>(null);
   const report = (error: unknown, fallback: string) => notify(error instanceof Error ? error.message : fallback);
   const load = () => void Promise.all([api.messagePacks(), api.config()])
     .then(([nextCatalog, nextConfig]) => { setCatalog(nextCatalog); setConfig(nextConfig); })
@@ -46,6 +49,7 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
     setBusy(pack.id);
     try {
       setStickerCatalog(await api.nativeStickerCatalog());
+      setSelectedStickerIds(new Set());
       setStickerPack(pack);
     } catch (error) { report(error, "原生表情目录加载失败"); }
     finally { setBusy(null); }
@@ -53,20 +57,66 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
 
   const scanStickers = async () => {
     setBusy("sticker-scan");
-    try { setStickerCatalog(await api.scanNativeStickers()); }
+    try {
+      const scanned = await api.scanNativeStickers();
+      setStickerCatalog(scanned);
+      const currentIds = new Set(scanned.stickers.map((sticker) => sticker.logical_id));
+      setSelectedStickerIds((selected) => new Set([...selected].filter((id) => currentIds.has(id))));
+    }
     catch (error) { report(error, "原生表情扫描失败，已保留上次目录"); }
     finally { setBusy(null); }
   };
 
-  const addSticker = async (sticker: NativeStickerDescriptor) => {
+  const toggleSticker = (sticker: NativeStickerDescriptor) => {
+    setSelectedStickerIds((selected) => {
+      const next = new Set(selected);
+      if (next.has(sticker.logical_id)) next.delete(sticker.logical_id);
+      else next.add(sticker.logical_id);
+      return next;
+    });
+  };
+
+  const addSelectedStickers = async (packId: string) => {
     if (!catalog || !stickerPack) return;
+    const selected: NativeStickerReference[] = (stickerCatalog?.stickers || [])
+      .filter((sticker) => selectedStickerIds.has(sticker.logical_id))
+      .map((sticker) => ({
+        logical_id: sticker.logical_id,
+        display_name: sticker.display_name,
+        resource_key: sticker.resource_key,
+        machine_id: sticker.machine_id,
+        accessible_name: sticker.accessible_name,
+        category: sticker.category
+      }));
+    if (!selected.length) return;
     setBusy("sticker-add");
     try {
-      acceptMutation(await api.addNativeSticker(stickerPack.id, sticker, catalog.revision));
+      const mutation = await api.addNativeStickers(packId, selected, catalog.revision);
+      acceptMutation(mutation);
       setStickerPack(null);
-      notify(`已将原生表情「${sticker.display_name}」加入文案包`);
+      setSelectedStickerIds(new Set());
+      notify(`已新增 ${mutation.added_count} 个原生表情${mutation.duplicate_count ? `，已存在 ${mutation.duplicate_count} 个` : ""}`);
     } catch (error) { report(error, "添加原生表情失败"); load(); }
     finally { setBusy(null); }
+  };
+
+  const deleteSelectedPack = async () => {
+    if (!catalog || !deletePack || config?.default_message_pack === deletePack.id) return;
+    const pack = deletePack;
+    setBusy(pack.id);
+    try {
+      acceptMutation(await api.deleteMessagePack(pack.id, catalog.revision));
+      if (stickerPack?.id === pack.id) {
+        setStickerPack(null);
+        setSelectedStickerIds(new Set());
+      }
+      setDeletePack(null);
+      notify(`已删除文案包「${pack.name}」`);
+    } catch (error) {
+      report(error, "删除文案包失败，请刷新后重试");
+      setDeletePack(null);
+      load();
+    } finally { setBusy(null); }
   };
 
   const removeEntry = async (entryId: string) => {
@@ -288,6 +338,7 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
               ) : null}
               <button disabled={busy !== null} onClick={() => void importPack(pack.id)}><Download size={15} />导入全局库</button>
               <button disabled={busy !== null} onClick={() => void prepareOverwritePack(pack)}><RefreshCw size={15} />覆盖全局文案</button>
+              <button className="danger-outline" aria-label={`删除文案包 ${pack.name}`} disabled={busy !== null} onClick={() => setDeletePack(pack)}>删除</button>
             </div>
           </article>
           {draggingId && draggingId !== pack.id ? (
@@ -327,9 +378,20 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
       })}</ol> : <p className="empty-list-copy">此文案包当前为空。</p>}</section> : null}
       {stickerPack ? <div className="cleanup-dialog" role="dialog" aria-modal="true" aria-label="添加原生表情">
         <div className="panel">
-          <div className="panel-heading"><h2>添加原生表情到「{stickerPack.name}」</h2><button className="text-button" onClick={() => setStickerPack(null)}>关闭</button></div>
-          {stickerCatalog?.stickers.length ? <div className="sticker-chooser">{stickerCatalog.stickers.map((sticker) => <button key={sticker.logical_id} aria-label={`添加 ${sticker.display_name}`} disabled={busy !== null} onClick={() => void addSticker(sticker)}>{sticker.preview_url ? <img src={sticker.preview_url} alt="" /> : null}<span>{sticker.display_name}</span></button>)}</div> : <p>当前账号尚未扫描原生表情。</p>}
-          <div className="dialog-actions"><button className="action-button" disabled={busy !== null} onClick={() => void scanStickers()}>{stickerCatalog?.stickers.length ? "刷新原生表情" : "扫描原生表情"}</button></div>
+          <div className="panel-heading"><h2>添加原生表情到「{stickerPack.name}」</h2><button className="text-button" onClick={() => { setStickerPack(null); setSelectedStickerIds(new Set()); }}>关闭</button></div>
+          {stickerCatalog?.stickers.length ? <div className="sticker-chooser">{stickerCatalog.stickers.map((sticker) => {
+            const selected = selectedStickerIds.has(sticker.logical_id);
+            return <button key={sticker.logical_id} className={selected ? "selected" : ""} aria-label={`选择 ${sticker.display_name}`} aria-pressed={selected} disabled={busy !== null} onClick={() => toggleSticker(sticker)}>{sticker.preview_url ? <img src={sticker.preview_url} alt="" /> : null}<span>{sticker.display_name}</span></button>;
+          })}</div> : <p>当前账号尚未扫描原生表情。</p>}
+          <div className="sticker-chooser-footer"><span>已选择 {selectedStickerIds.size} 个</span><button className="action-button" disabled={busy !== null} onClick={() => void scanStickers()}>{stickerCatalog?.stickers.length ? "刷新原生表情" : "扫描原生表情"}</button></div>
+          <div className="dialog-actions"><button className="action-button" disabled={busy !== null || selectedStickerIds.size === 0} onClick={() => void addSelectedStickers(stickerPack.id)}>添加到当前文案包（{selectedStickerIds.size}）</button><button className="action-button" disabled={busy !== null || selectedStickerIds.size === 0} onClick={() => void addSelectedStickers(AUTO_NATIVE_STICKER_PACK_ID)}>添加到自动表情包（{selectedStickerIds.size}）</button></div>
+        </div>
+      </div> : null}
+      {deletePack ? <div className="cleanup-dialog" role="dialog" aria-modal="true" aria-label="删除文案包">
+        <div className="panel">
+          <h2>{config?.default_message_pack === deletePack.id ? `无法删除「${deletePack.name}」` : "删除文案包"}</h2>
+          {config?.default_message_pack === deletePack.id ? <p>仍在使用：当前默认文案包。<br />请先修改此引用。</p> : <><p>确定删除「{deletePack.name}」？<br />删除后，该文案包中的内容将从文案包目录移除。</p>{deletePack.fused_source_count ? <p className="danger-copy">此文案包包含 {deletePack.fused_source_count} 个已融合来源。删除当前文案包时，这些来源也会一并从文案包目录删除。{deletePack.direct_fused_sources.length ? <><br />直接来源：{deletePack.direct_fused_sources.map((source) => source.name).join("、")}</> : null}</p> : null}</>}
+          <div className="dialog-actions"><button className="action-button" onClick={() => setDeletePack(null)}>取消删除</button>{config?.default_message_pack !== deletePack.id ? <button className="action-button danger-confirm" disabled={busy !== null} onClick={() => void deleteSelectedPack()}>确认删除</button> : null}</div>
         </div>
       </div> : null}
       {overwritePack ? <div className="cleanup-dialog" role="dialog" aria-modal="true" aria-label="确认覆盖全局文案">

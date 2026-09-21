@@ -8,6 +8,8 @@ from pathlib import Path
 import shutil
 from typing import Callable, TypeVar
 
+from pydantic import ValidationError
+
 from autody.config import load_config, serialize_config
 from autody.message_pack_catalog import (
     CatalogDocument,
@@ -22,6 +24,12 @@ from autody.message_pack_catalog import (
     TextItem,
 )
 from autody.locking import SingleInstanceLock, TaskAlreadyRunning
+from autody.native_stickers import NativeStickerReference
+
+
+AUTO_NATIVE_STICKER_PACK_ID = "auto-native-stickers"
+AUTO_NATIVE_STICKER_PACK_NAME = "自动表情包"
+AUTO_NATIVE_STICKER_PACK_VERSION = "system-auto-native-stickers-v1"
 
 
 class ImportMode(str, Enum):
@@ -81,6 +89,15 @@ class MessageMutationResult:
     pack: MessagePack
     entry: PackEntry
     catalog: PackCatalog
+
+
+@dataclass(frozen=True)
+class NativeStickerBatchMutationResult:
+    revision: int
+    pack: MessagePack
+    catalog: PackCatalog
+    added_count: int
+    duplicate_count: int
 
 
 @dataclass(frozen=True)
@@ -451,42 +468,145 @@ class MessagePackService:
         category: str | None = None,
     ) -> MessageMutationResult:
         logical = logical_id.strip()
-        name = display_name.strip()
-        if not logical or not name:
-            raise MessagePackError("原生表情必须包含稳定逻辑标识和名称")
-
-        def change(catalog: CatalogDocument) -> str:
-            if pack_id not in catalog.top_level_pack_ids:
-                raise MessagePackError("只能向顶层文案包新增原生表情")
-            sticker_id = self._next_id(catalog)
-            timestamp = self.now()
-            catalog.native_stickers[sticker_id] = NativeStickerRecord(
-                id=sticker_id,
-                logical_id=logical,
-                display_name=name,
-                resource_key=resource_key,
-                machine_id=machine_id,
-                accessible_name=accessible_name,
-                category=category,
-                created_at=timestamp,
-                updated_at=timestamp,
-            )
-            catalog.packages[pack_id].items.append(
-                NativeStickerItem(sticker_id=sticker_id)
-            )
-            return sticker_id
-
-        sticker_id, catalog = self._mutate(expected_revision, change)
+        result = self.add_native_stickers(
+            pack_id,
+            [
+                {
+                    "logical_id": logical,
+                    "display_name": display_name,
+                    "resource_key": resource_key,
+                    "machine_id": machine_id,
+                    "accessible_name": accessible_name,
+                    "category": category,
+                }
+            ],
+            expected_revision,
+        )
         entry = next(
             item
-            for item in self._entries(catalog, pack_id, root_pack_id=pack_id)
-            if item.id == sticker_id
+            for item in self.preview(pack_id).entries
+            if item.kind == "native_sticker"
+            and item.sticker is not None
+            and item.sticker.logical_id == logical
         )
         return MessageMutationResult(
+            revision=result.revision,
+            pack=result.pack,
+            entry=entry,
+            catalog=result.catalog,
+        )
+
+    @staticmethod
+    def _validated_native_sticker_reference(
+        value: NativeStickerReference | dict[str, object],
+    ) -> NativeStickerReference:
+        try:
+            reference = NativeStickerReference.model_validate(value)
+        except ValidationError as exc:
+            raise MessagePackError("原生表情包含无效字段") from exc
+        logical_id = reference.logical_id.strip()
+        display_name = reference.display_name.strip()
+        if not logical_id or not display_name:
+            raise MessagePackError("原生表情必须包含稳定逻辑标识和名称")
+
+        def normalized(value: str | None) -> str | None:
+            stripped = value.strip() if value else ""
+            return stripped or None
+
+        return reference.model_copy(
+            update={
+                "logical_id": logical_id,
+                "display_name": display_name,
+                "resource_key": normalized(reference.resource_key),
+                "machine_id": normalized(reference.machine_id),
+                "accessible_name": normalized(reference.accessible_name),
+                "category": normalized(reference.category),
+            }
+        )
+
+    def _ensure_auto_native_sticker_pack(self, catalog: CatalogDocument) -> None:
+        existing = catalog.packages.get(AUTO_NATIVE_STICKER_PACK_ID)
+        if existing is not None:
+            if (
+                existing.version != AUTO_NATIVE_STICKER_PACK_VERSION
+                or AUTO_NATIVE_STICKER_PACK_ID not in catalog.top_level_pack_ids
+                or any(isinstance(item, TextItem) for item in existing.items)
+            ):
+                raise MessagePackError(
+                    "自动表情包保留 ID 已被不兼容数据占用，未修改文案包目录"
+                )
+            return
+        if (
+            AUTO_NATIVE_STICKER_PACK_ID in catalog.messages
+            or AUTO_NATIVE_STICKER_PACK_ID in catalog.native_stickers
+        ):
+            raise MessagePackError(
+                "自动表情包保留 ID 已被不兼容数据占用，未修改文案包目录"
+            )
+        catalog.packages[AUTO_NATIVE_STICKER_PACK_ID] = PackageRecord(
+            id=AUTO_NATIVE_STICKER_PACK_ID,
+            name=AUTO_NATIVE_STICKER_PACK_NAME,
+            description="从当前账号原生表情目录添加的便捷表情包",
+            created_at=self.now(),
+            version=AUTO_NATIVE_STICKER_PACK_VERSION,
+            category="custom",
+        )
+        catalog.top_level_pack_ids.append(AUTO_NATIVE_STICKER_PACK_ID)
+
+    def add_native_stickers(
+        self,
+        pack_id: str,
+        stickers: list[NativeStickerReference | dict[str, object]],
+        expected_revision: int,
+    ) -> NativeStickerBatchMutationResult:
+        if not stickers:
+            raise MessagePackError("请至少选择一个原生表情")
+        references = [
+            self._validated_native_sticker_reference(sticker)
+            for sticker in stickers
+        ]
+
+        def change(catalog: CatalogDocument) -> tuple[int, int]:
+            if pack_id == AUTO_NATIVE_STICKER_PACK_ID:
+                self._ensure_auto_native_sticker_pack(catalog)
+            elif pack_id not in catalog.top_level_pack_ids:
+                raise MessagePackError("只能向顶层文案包新增原生表情")
+            package = catalog.packages[pack_id]
+            existing_logical_ids = {
+                catalog.native_stickers[item.sticker_id].logical_id
+                for item in package.items
+                if isinstance(item, NativeStickerItem)
+            }
+            seen = set(existing_logical_ids)
+            added_count = 0
+            duplicate_count = 0
+            for reference in references:
+                if reference.logical_id in seen:
+                    duplicate_count += 1
+                    continue
+                sticker_id = self._next_id(catalog)
+                timestamp = self.now()
+                catalog.native_stickers[sticker_id] = NativeStickerRecord(
+                    id=sticker_id,
+                    **reference.model_dump(mode="python"),
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+                package.items.append(NativeStickerItem(sticker_id=sticker_id))
+                seen.add(reference.logical_id)
+                added_count += 1
+            return added_count, duplicate_count
+
+        (added_count, duplicate_count), catalog = self._mutate(
+            expected_revision,
+            change,
+        )
+        return NativeStickerBatchMutationResult(
             revision=catalog.revision,
             pack=self._pack_payload(catalog, pack_id),
-            entry=entry,
             catalog=self._catalog_payload(catalog),
+            added_count=added_count,
+            duplicate_count=duplicate_count,
         )
 
     def _owning_package_id(

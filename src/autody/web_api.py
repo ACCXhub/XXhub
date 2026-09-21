@@ -218,6 +218,19 @@ class NativeStickerEntryRequest(RevisionRequest):
     category: str | None = Field(default=None, max_length=160)
 
 
+class NativeStickerReferenceRequest(BaseModel):
+    logical_id: str = Field(min_length=1, max_length=160)
+    display_name: str = Field(min_length=1, max_length=160)
+    resource_key: str | None = Field(default=None, max_length=500)
+    machine_id: str | None = Field(default=None, max_length=500)
+    accessible_name: str | None = Field(default=None, max_length=500)
+    category: str | None = Field(default=None, max_length=160)
+
+
+class NativeStickerBatchRequest(RevisionRequest):
+    stickers: list[NativeStickerReferenceRequest] = Field(min_length=1)
+
+
 class ReorderPackEntriesRequest(RevisionRequest):
     entry_ids: list[str]
 
@@ -2692,6 +2705,20 @@ def create_app(
                 accessible_name=payload.accessible_name,
                 category=payload.category,
                 expected_revision=payload.expected_revision,
+            )
+        except MessagePackError as exc:
+            raise message_pack_http_exception(exc) from exc
+
+    @app.post("/api/message-packs/{pack_id}/native-stickers/batch")
+    def add_message_pack_native_stickers(
+        pack_id: str,
+        payload: NativeStickerBatchRequest,
+    ):
+        try:
+            return message_pack_service().add_native_stickers(
+                pack_id,
+                [sticker.model_dump(mode="python") for sticker in payload.stickers],
+                payload.expected_revision,
             )
         except MessagePackError as exc:
             raise message_pack_http_exception(exc) from exc

@@ -14,8 +14,10 @@ vi.mock("../api", () => ({
     nativeStickerCatalog: vi.fn(),
     scanNativeStickers: vi.fn(),
     addNativeSticker: vi.fn(),
+    addNativeStickers: vi.fn(),
     reorderMessagePackEntries: vi.fn(),
     deleteMessagePackEntry: vi.fn(),
+    deleteMessagePack: vi.fn(),
     fuseMessagePack: vi.fn(),
     splitMessagePack: vi.fn(),
     importMessagePack: vi.fn(),
@@ -53,33 +55,110 @@ beforeEach(() => {
   });
 });
 
-test("scans the current-account sticker catalog and adds a typed sticker to a pack", async () => {
+test("multi-selects stickers with blue card state and submits one batch mutation", async () => {
   vi.mocked(api.scanNativeStickers).mockResolvedValue({
     account_profile_id: "account-aaaaaaaaaaaaaaaaaaaaaaaa",
     revision: 1,
     scanned_at: "2026-09-20T10:00:00",
-    stickers: [{
-      logical_id: "native-sticker-fire", display_name: "续火花",
-      resource_key: "fire.webp", machine_id: null, accessible_name: "续火花",
-      category: null, preview_url: "https://example.test/fire.webp", diagnostic_index: 0,
-      last_seen_at: "2026-09-20T10:00:00"
-    }]
+    stickers: [
+      {
+        logical_id: "native-sticker-heart", display_name: "比心",
+        resource_key: "heart.webp", machine_id: null, accessible_name: "比心",
+        category: null, preview_url: "https://example.test/heart.webp", diagnostic_index: 0,
+        last_seen_at: "2026-09-20T10:00:00"
+      },
+      {
+        logical_id: "native-sticker-fire", display_name: "续火花",
+        resource_key: "fire.webp", machine_id: null, accessible_name: "续火花",
+        category: null, preview_url: "https://example.test/fire.webp", diagnostic_index: 1,
+        last_seen_at: "2026-09-20T10:00:00"
+      }
+    ]
   });
-  vi.mocked(api.addNativeSticker).mockResolvedValue({
-    revision: 8, pack: { ...daily, count: 3 },
-    catalog: { revision: 8, packs: [{ ...daily, count: 3 }, other] }
+  vi.mocked(api.addNativeStickers).mockResolvedValue({
+    revision: 8, pack: { ...daily, count: 4 },
+    catalog: { revision: 8, packs: [{ ...daily, count: 4 }, other] },
+    added_count: 2, duplicate_count: 0
   });
   render(<MessagePacksPage notify={vi.fn()} />);
   await screen.findAllByText("日常问候");
 
   fireEvent.click(screen.getAllByRole("button", { name: "添加原生表情" })[0]);
-  expect(await screen.findByText("当前账号尚未扫描原生表情。" )).toBeInTheDocument();
+  const dialog = await screen.findByRole("dialog", { name: "添加原生表情" });
+  expect(screen.getByRole("button", { name: "添加到当前文案包（0）" })).toBeDisabled();
+  expect(dialog.querySelector('input[type="checkbox"]')).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "扫描原生表情" }));
-  fireEvent.click(await screen.findByRole("button", { name: "添加 续火花" }));
+  const heart = await screen.findByRole("button", { name: "选择 比心" });
+  const fire = screen.getByRole("button", { name: "选择 续火花" });
+  expect(heart).toHaveAttribute("aria-pressed", "false");
+  expect(fire).toHaveAttribute("aria-pressed", "false");
 
-  await waitFor(() => expect(api.addNativeSticker).toHaveBeenCalledWith(
+  heart.focus();
+  fireEvent.click(heart);
+  fireEvent.click(fire);
+  expect(heart).toHaveAttribute("aria-pressed", "true");
+  expect(fire).toHaveAttribute("aria-pressed", "true");
+  expect(heart).toHaveClass("selected");
+  expect(fire).toHaveClass("selected");
+  expect(screen.getByText("已选择 2 个")).toBeInTheDocument();
+  expect(dialog.querySelector(".sticker-chooser svg")).toBeNull();
+
+  fireEvent.click(heart);
+  expect(heart).toHaveAttribute("aria-pressed", "false");
+  expect(fire).toHaveAttribute("aria-pressed", "true");
+  expect(screen.getByText("已选择 1 个")).toBeInTheDocument();
+  fireEvent.click(heart);
+  fireEvent.click(screen.getByRole("button", { name: "添加到当前文案包（2）" }));
+
+  await waitFor(() => expect(api.addNativeStickers).toHaveBeenCalledWith(
     "daily",
-    expect.objectContaining({ logical_id: "native-sticker-fire", resource_key: "fire.webp" }),
+    [
+      expect.objectContaining({ logical_id: "native-sticker-heart" }),
+      expect.objectContaining({ logical_id: "native-sticker-fire" })
+    ],
+    7
+  ));
+  expect(api.addNativeStickers).toHaveBeenCalledTimes(1);
+});
+
+test("keeps selection by logical id when refreshed catalog order changes", async () => {
+  const heart = { logical_id: "heart", display_name: "比心", resource_key: "heart.webp", machine_id: null, accessible_name: "比心", category: null, preview_url: null, diagnostic_index: 0, last_seen_at: null };
+  const fire = { logical_id: "fire", display_name: "续火花", resource_key: "fire.webp", machine_id: null, accessible_name: "续火花", category: null, preview_url: null, diagnostic_index: 1, last_seen_at: null };
+  vi.mocked(api.nativeStickerCatalog).mockResolvedValue({ account_profile_id: "account-aaaaaaaaaaaaaaaaaaaaaaaa", revision: 1, scanned_at: "2026-09-20T10:00:00", stickers: [heart, fire] });
+  vi.mocked(api.scanNativeStickers).mockResolvedValue({ account_profile_id: "account-aaaaaaaaaaaaaaaaaaaaaaaa", revision: 2, scanned_at: "2026-09-20T10:01:00", stickers: [fire, heart] });
+  render(<MessagePacksPage notify={vi.fn()} />);
+  await screen.findAllByText("日常问候");
+
+  fireEvent.click(screen.getAllByRole("button", { name: "添加原生表情" })[0]);
+  fireEvent.click(await screen.findByRole("button", { name: "选择 比心" }));
+  fireEvent.click(screen.getByRole("button", { name: "刷新原生表情" }));
+
+  await waitFor(() => expect(screen.getByRole("button", { name: "选择 比心" })).toHaveAttribute("aria-pressed", "true"));
+  expect(screen.getByRole("button", { name: "选择 续火花" })).toHaveAttribute("aria-pressed", "false");
+  expect(screen.getByText("已选择 1 个")).toBeInTheDocument();
+});
+
+test("adds selected stickers to the canonical automatic sticker pack", async () => {
+  const heart = { logical_id: "heart", display_name: "比心", resource_key: "heart.webp", machine_id: null, accessible_name: "比心", category: null, preview_url: null, diagnostic_index: 0, last_seen_at: null };
+  vi.mocked(api.nativeStickerCatalog).mockResolvedValue({ account_profile_id: "account-aaaaaaaaaaaaaaaaaaaaaaaa", revision: 1, scanned_at: "2026-09-20T10:00:00", stickers: [heart] });
+  vi.mocked(api.addNativeStickers).mockResolvedValue({ revision: 8, pack: { ...other, id: "auto-native-stickers", name: "自动表情包" }, catalog: { revision: 8, packs: [daily, other] }, added_count: 1, duplicate_count: 0 });
+  render(<MessagePacksPage notify={vi.fn()} />);
+  await screen.findAllByText("日常问候");
+
+  fireEvent.click(screen.getAllByRole("button", { name: "添加原生表情" })[0]);
+  fireEvent.click(await screen.findByRole("button", { name: "选择 比心" }));
+  fireEvent.click(screen.getByRole("button", { name: "添加到自动表情包（1）" }));
+
+  await waitFor(() => expect(api.addNativeStickers).toHaveBeenCalledWith(
+    "auto-native-stickers",
+    [{
+      logical_id: "heart",
+      display_name: "比心",
+      resource_key: "heart.webp",
+      machine_id: null,
+      accessible_name: "比心",
+      category: null
+    }],
     7
   ));
 });
@@ -160,6 +239,65 @@ test("shows the canonical default pack and can change it by stable id", async ()
   await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith(
     expect.objectContaining({ default_message_pack: "other" })
   ));
+});
+
+test("requires confirmation and warns before recursively deleting a fused pack", async () => {
+  vi.mocked(api.config).mockResolvedValue({ default_message_pack: null } as never);
+  vi.mocked(api.deleteMessagePack).mockResolvedValue({
+    revision: 8,
+    pack: null,
+    catalog: { revision: 8, packs: [other] }
+  });
+  render(<MessagePacksPage notify={vi.fn()} />);
+  await screen.findAllByText("日常问候");
+
+  fireEvent.click(screen.getAllByRole("button", { name: "删除文案包 日常问候" })[0]);
+  const dialog = await screen.findByRole("dialog", { name: "删除文案包" });
+  expect(dialog).toHaveTextContent("确定删除「日常问候」");
+  expect(dialog).toHaveTextContent("包含 1 个已融合来源");
+  expect(dialog).toHaveTextContent("来源包");
+  expect(api.deleteMessagePack).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole("button", { name: "取消删除" }));
+  expect(screen.queryByRole("dialog", { name: "删除文案包" })).not.toBeInTheDocument();
+  expect(api.deleteMessagePack).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getAllByRole("button", { name: "预览" })[0]);
+  await screen.findByText(/今天顺利/);
+  fireEvent.click(screen.getAllByRole("button", { name: "删除文案包 日常问候" })[0]);
+  fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
+
+  await waitFor(() => expect(api.deleteMessagePack).toHaveBeenCalledWith("daily", 7));
+  expect(screen.queryByText(/今天顺利/)).not.toBeInTheDocument();
+  expect(screen.queryByText("日常问候")).not.toBeInTheDocument();
+});
+
+test("blocks deleting the current default pack without silently clearing it", async () => {
+  render(<MessagePacksPage notify={vi.fn()} />);
+  await screen.findAllByText("日常问候");
+
+  fireEvent.click(screen.getByRole("button", { name: "删除文案包 日常问候" }));
+
+  const dialog = await screen.findByRole("dialog", { name: "删除文案包" });
+  expect(dialog).toHaveTextContent("无法删除「日常问候」");
+  expect(dialog).toHaveTextContent("当前默认文案包");
+  expect(screen.queryByRole("button", { name: "确认删除" })).not.toBeInTheDocument();
+  expect(api.deleteMessagePack).not.toHaveBeenCalled();
+  expect(api.saveConfig).not.toHaveBeenCalled();
+});
+
+test("reloads catalog after a revision conflict while deleting", async () => {
+  const notify = vi.fn();
+  vi.mocked(api.config).mockResolvedValue({ default_message_pack: null } as never);
+  vi.mocked(api.deleteMessagePack).mockRejectedValue(new Error("文案包已被其他页面修改，请刷新后重试"));
+  render(<MessagePacksPage notify={notify} />);
+  await screen.findAllByText("日常问候");
+
+  fireEvent.click(screen.getByRole("button", { name: "删除文案包 其他" }));
+  fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
+
+  await waitFor(() => expect(api.messagePacks).toHaveBeenCalledTimes(2));
+  expect(notify).toHaveBeenCalledWith("文案包已被其他页面修改，请刷新后重试");
 });
 
 afterEach(() => {

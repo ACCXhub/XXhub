@@ -140,6 +140,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ ...sticker, expected_revision: revision })
     }),
+  addNativeStickers: (packId: string, stickers: import("./types").NativeStickerReference[], revision: number) =>
+    request<import("./types").NativeStickerBatchMutationResult>(`/api/message-packs/${encodeURIComponent(packId)}/native-stickers/batch`, {
+      method: "POST",
+      body: JSON.stringify({ stickers, expected_revision: revision })
+    }),
   reorderMessagePackEntries: (packId: string, entryIds: string[], revision: number) =>
     request<PackMutationResult>(`/api/message-packs/${encodeURIComponent(packId)}/entries/order`, {
       method: "PUT",
@@ -147,6 +152,11 @@ export const api = {
     }),
   deleteMessagePackEntry: (packId: string, entryId: string, revision: number) =>
     request<PackMutationResult>(`/api/message-packs/${encodeURIComponent(packId)}/entries/${encodeURIComponent(entryId)}`, {
+      method: "DELETE",
+      body: JSON.stringify({ expected_revision: revision })
+    }),
+  deleteMessagePack: (packId: string, revision: number) =>
+    request<PackMutationResult>(`/api/message-packs/${encodeURIComponent(packId)}`, {
       method: "DELETE",
       body: JSON.stringify({ expected_revision: revision })
     }),
