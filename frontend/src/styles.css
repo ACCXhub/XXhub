@@ -179,6 +179,10 @@ input:focus, textarea:focus, select:focus { border-color: #5797ef; box-shadow: 0
 .search-box svg { position: absolute; left: 11px; top: 11px; color: #8d98a9; }
 .search-box input { padding-left: 36px; }
 .message-list { display: grid; gap: 8px; }
+.message-source-control { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 12px; color: #526176; font-size: 12px; }
+.message-source-control label { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.message-source-control select { width: min(280px, 65vw); }
+.message-source-control small { color: #77849a; }
 .global-sticker-panel { margin-bottom: 14px; }
 .global-sticker-panel .panel-heading { padding: 14px 15px; }
 .selected-sticker-grid { padding: 15px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }

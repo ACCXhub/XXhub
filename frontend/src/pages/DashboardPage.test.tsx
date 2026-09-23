@@ -224,5 +224,5 @@ test("safe supplement starts one aggregate backend job for all retryable targets
   expect(screen.getByText("安全目标：无法在当前会话列表中找到目标。")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "安全补发" }));
   expect(onAction).toHaveBeenCalledTimes(1);
-  expect(onAction).toHaveBeenCalledWith("safe-supplement");
+  expect(onAction).toHaveBeenCalledWith("safe-supplement", ["target-safe", "target-b", "target-c"]);
 });

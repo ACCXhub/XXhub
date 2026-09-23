@@ -87,6 +87,59 @@ def _make_project(tmp_path: Path) -> Path:
     return config_path
 
 
+@pytest.mark.parametrize("broken_settings", [
+    "{", "[]", '{"format_version":1,"daily_send_time":"bad"}',
+    '{"format_version":999,"targets":[]}',
+])
+def test_switch_validates_settings_before_clearing_active_data(tmp_path, broken_settings):
+    config_path = _make_project(tmp_path)
+    store = MultiAccountStore(tmp_path, config_path)
+    original = store.ensure_migrated()["active_profile_id"]
+    other = store.create_empty_profile()["profile_id"]
+    state_before = (tmp_path / "data/state.json").read_bytes()
+    config_before = config_path.read_bytes()
+    (store.profile_root(other) / "account-settings.json").write_text(broken_settings, encoding="utf-8")
+    with pytest.raises(AccountProfileStoreError):
+        store.activate(other)
+    assert (tmp_path / "data/state.json").read_bytes() == state_before
+    assert config_path.read_bytes() == config_before
+    assert store.ensure_migrated()["active_profile_id"] == original
+
+
+def test_older_account_settings_do_not_inherit_current_account_schedule(tmp_path):
+    config_path = _make_project(tmp_path)
+    store = MultiAccountStore(tmp_path, config_path)
+    store.ensure_migrated()
+    other = store.create_empty_profile()["profile_id"]
+    settings_path = store.profile_root(other) / "account-settings.json"
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    settings.pop("daily_send_time")
+    settings_path.write_text(json.dumps(settings), encoding="utf-8")
+    store.activate(other)
+    assert load_config(config_path).daily_send_time == AppConfig().daily_send_time
+
+
+def test_switch_restore_failure_recovers_original_account(tmp_path, monkeypatch):
+    config_path = _make_project(tmp_path)
+    store = MultiAccountStore(tmp_path, config_path)
+    original = store.ensure_migrated()["active_profile_id"]
+    other = store.create_empty_profile()["profile_id"]
+    state_before = (tmp_path / "data/state.json").read_bytes()
+    restore = store._restore_runtime
+
+    def fail_target(profile_id):
+        if profile_id == other:
+            raise OSError("copy failed")
+        restore(profile_id)
+
+    monkeypatch.setattr(store, "_restore_runtime", fail_target)
+    with pytest.raises(AccountProfileStoreError):
+        store.activate(other)
+    assert (tmp_path / "data/state.json").read_bytes() == state_before
+    assert store.ensure_migrated()["active_profile_id"] == original
+    assert load_config(config_path).targets[0].stable_id == "target-a"
+
+
 def test_versioned_migration_preserves_current_data_with_rollback_manifest(
     tmp_path: Path,
 ):

@@ -259,6 +259,10 @@ def test_status_projects_post_send_uncertain_as_unknown_with_current_detail(tmp_
     assert friend["failure"]["reason_code"] == "confirmation_failed_uncertain"
     assert friend["error"] == "消息发送状态无法确认，为防止重复发送已停止"
     assert failed_targets["items"][0]["reason_code"] == "confirmation_failed_uncertain"
+    issue = next(item for item in status["issues"] if item["id"] == "send_failure_uncertain")
+    assert issue["action_label"] == "补发"
+    assert issue["action"] == "retry_target"
+    assert issue["target_ids"] == [target_id]
 
 
 def test_overview_friends_follow_the_enabled_target_set_after_batch_mutation(
@@ -580,6 +584,7 @@ def test_repair_summary_reports_overall_delivery_evidence(tmp_path: Path, monkey
             "target-two": "confirmed_sent",
         },
         "confirmed_sent": 2,
+        "updated_sent": 0,
         "confirmed_missing": 0,
         "unknown": 0,
         "pre_supplement_success_count": 2,
@@ -982,6 +987,28 @@ def test_config_and_messages_can_be_updated(tmp_path: Path):
     assert response.status_code == 200
     assert response.json()["messages"] == ["甲", "乙"]
     assert (tmp_path / "messages.txt").read_text(encoding="utf-8") == "甲\n乙\n"
+
+
+def test_message_source_update_changes_only_default_source(tmp_path: Path):
+    config_path = make_project(tmp_path)
+    client = TestClient(create_app(config_path, runtime_context=resolve_runtime_context(tmp_path, program_root=tmp_path)))
+    before = load_config(config_path).model_dump()
+    state_before = (tmp_path / "data/state.json").read_bytes()
+    text_before = (tmp_path / "messages.txt").read_bytes()
+    response = client.put("/api/messages/source", json={"default_message_pack": None})
+    assert response.status_code == 200
+    assert response.json()["default_message_pack"] is None
+    after = load_config(config_path).model_dump()
+    assert after == {**before, "default_message_pack": None}
+    assert (tmp_path / "data/state.json").read_bytes() == state_before
+    assert (tmp_path / "messages.txt").read_bytes() == text_before
+    response = client.put("/api/messages/source", json={"default_message_pack": "daily"})
+    assert response.status_code == 200
+    assert load_config(config_path).default_message_pack == "daily"
+    before_bytes = config_path.read_bytes()
+    assert client.put("/api/messages/source", json={"default_message_pack": "missing"}).status_code == 422
+    assert client.put("/api/messages/source", json={}).status_code == 422
+    assert config_path.read_bytes() == before_bytes
 
 
 def test_global_message_library_persists_account_scoped_sticker_selection(
@@ -2504,6 +2531,7 @@ def test_overview_retry_endpoint_starts_only_the_current_safe_target(
 
 def test_safe_supplement_action_starts_one_job_for_all_current_safe_targets(
     tmp_path: Path,
+    monkeypatch,
 ):
     config_path = make_project(tmp_path)
     config = load_config(config_path)
@@ -2587,6 +2615,54 @@ def test_safe_supplement_action_starts_one_job_for_all_current_safe_targets(
 
     assert response.status_code == 202
     assert started == [("safe-supplement", {"target_ids": ["target-a", "target-b"]})]
+
+    from autody.chat import TodayOutgoingStatus
+
+    opened = []
+
+    @contextmanager
+    def audit_browser(*_args, **_kwargs):
+        yield object()
+
+    class AuditChat:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def open_conversation_identity(self, target_id, *_args, **_kwargs):
+            opened.append(target_id)
+            self.target_id = target_id
+            return SimpleNamespace(identity_match=True)
+
+        def audit_today_outgoing(self, *_args):
+            return SimpleNamespace(status=(
+                TodayOutgoingStatus.CONFIRMED_SENT if self.target_id == "target-a"
+                else TodayOutgoingStatus.CONFIRMED_MISSING
+            ))
+
+        def send(self, *_args, **_kwargs):
+            raise AssertionError("the verification step must not send")
+
+    monkeypatch.setattr("autody.web_api.open_chat", audit_browser)
+    monkeypatch.setattr("autody.web_api.DouyinChat", AuditChat)
+    started.clear()
+    response = client.post("/api/actions/safe-supplement", json={"target_ids": ["target-a"]})
+    assert response.status_code == 202
+    assert response.json()["status"] == "success"
+    assert "未重发" in response.json()["message"]
+    assert opened == ["target-a"]
+    assert started == []
+
+    response = client.post("/api/actions/safe-supplement", json={"target_ids": ["target-c"]})
+    assert response.status_code == 409
+    assert started == []
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))["daily"]["2026-06-24"]
+    assert persisted["target_failures"]["target-c"]["send_attempts"] == 1
+    assert persisted["delivery_reconciliation"] == {"target-a": "confirmed_sent"}
+
+    response = client.post("/api/actions/safe-supplement", json={"target_ids": ["target-b"]})
+    assert response.status_code == 202
+    assert started == [("safe-supplement", {"target_ids": ["target-b"]})]
+    assert client.post("/api/actions/safe-supplement", json={"target_ids": []}).status_code == 422
 
 
 def test_failed_target_rechecks_binding_before_offering_retry(

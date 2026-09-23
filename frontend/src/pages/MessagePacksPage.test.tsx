@@ -21,7 +21,7 @@ vi.mock("../api", () => ({
     fuseMessagePack: vi.fn(),
     splitMessagePack: vi.fn(),
     importMessagePack: vi.fn(),
-    config: vi.fn(), saveConfig: vi.fn()
+    config: vi.fn(), saveConfig: vi.fn(), saveMessageSource: vi.fn()
   }
 }));
 
@@ -31,6 +31,7 @@ const other = { id: "other", name: "其他", description: "", version: "user", c
 const catalog = { revision: 7, packs: [daily, other] };
 
 beforeEach(() => {
+  vi.mocked(api.saveMessageSource).mockImplementation(async (id) => ({ default_message_pack: id } as never));
   vi.mocked(api.config).mockResolvedValue({ default_message_pack: "daily" } as never);
   vi.mocked(api.saveConfig).mockImplementation(async (value) => value);
   vi.mocked(api.messagePacks).mockResolvedValue(catalog);
@@ -53,6 +54,16 @@ beforeEach(() => {
     added_count: 2, duplicate_count: 0, total_count: 62,
     backup_path: "data/backups/messages.txt", mode: "merge", excluded_non_text_count: 0
   });
+});
+
+test("can return from a default pack to the global library without rewriting config", async () => {
+  render(<MessagePacksPage notify={vi.fn()} />);
+  const source = await screen.findByRole("combobox", { name: "默认发送来源" });
+  await waitFor(() => expect(source).toHaveValue("daily"));
+  fireEvent.change(source, { target: { value: "" } });
+  await waitFor(() => expect(source).toHaveValue(""));
+  expect(api.saveMessageSource).toHaveBeenCalledWith(null);
+  expect(api.saveConfig).not.toHaveBeenCalled();
 });
 
 test("multi-selects stickers with blue card state and submits one batch mutation", async () => {
@@ -83,11 +94,11 @@ test("multi-selects stickers with blue card state and submits one batch mutation
   render(<MessagePacksPage notify={vi.fn()} />);
   await screen.findAllByText("日常问候");
 
-  fireEvent.click(screen.getAllByRole("button", { name: "添加原生表情" })[0]);
-  const dialog = await screen.findByRole("dialog", { name: "添加原生表情" });
+  fireEvent.click(screen.getAllByRole("button", { name: "添加表情包" })[0]);
+  const dialog = await screen.findByRole("dialog", { name: "添加表情包" });
   expect(screen.getByRole("button", { name: "添加到当前文案包（0）" })).toBeDisabled();
   expect(dialog.querySelector('input[type="checkbox"]')).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "扫描原生表情" }));
+  fireEvent.click(screen.getByRole("button", { name: "扫描表情包" }));
   const heart = await screen.findByRole("button", { name: "选择 比心" });
   const fire = screen.getByRole("button", { name: "选择 续火花" });
   expect(heart).toHaveAttribute("aria-pressed", "false");
@@ -129,9 +140,9 @@ test("keeps selection by logical id when refreshed catalog order changes", async
   render(<MessagePacksPage notify={vi.fn()} />);
   await screen.findAllByText("日常问候");
 
-  fireEvent.click(screen.getAllByRole("button", { name: "添加原生表情" })[0]);
+  fireEvent.click(screen.getAllByRole("button", { name: "添加表情包" })[0]);
   fireEvent.click(await screen.findByRole("button", { name: "选择 比心" }));
-  fireEvent.click(screen.getByRole("button", { name: "刷新原生表情" }));
+  fireEvent.click(screen.getByRole("button", { name: "刷新表情包" }));
 
   await waitFor(() => expect(screen.getByRole("button", { name: "选择 比心" })).toHaveAttribute("aria-pressed", "true"));
   expect(screen.getByRole("button", { name: "选择 续火花" })).toHaveAttribute("aria-pressed", "false");
@@ -145,7 +156,7 @@ test("adds selected stickers to the canonical automatic sticker pack", async () 
   render(<MessagePacksPage notify={vi.fn()} />);
   await screen.findAllByText("日常问候");
 
-  fireEvent.click(screen.getAllByRole("button", { name: "添加原生表情" })[0]);
+  fireEvent.click(screen.getAllByRole("button", { name: "添加表情包" })[0]);
   fireEvent.click(await screen.findByRole("button", { name: "选择 比心" }));
   fireEvent.click(screen.getByRole("button", { name: "添加到自动表情包（1）" }));
 
@@ -178,7 +189,7 @@ test("renders a fused native sticker with provenance in the existing preview", a
 
   fireEvent.click(screen.getAllByRole("button", { name: "预览" })[0]);
 
-  expect(await screen.findByText("原生表情 · 比心")).toBeInTheDocument();
+  expect(await screen.findByText("表情包 · 比心")).toBeInTheDocument();
   expect(screen.getByText(/来源：来源包/)).toBeInTheDocument();
 });
 
@@ -224,7 +235,7 @@ test("blocks messages.txt replacement when a pack contains only stickers", async
 
   const dialog = await screen.findByRole("dialog", { name: "确认覆盖全局文案" });
   expect(dialog).toHaveTextContent("没有文字内容，不能覆盖全局文案");
-  expect(dialog).toHaveTextContent("1 条原生表情不会写入 messages.txt");
+  expect(dialog).toHaveTextContent("1 条表情包不会写入 messages.txt");
   expect(screen.getByRole("button", { name: "确认覆盖" })).toBeDisabled();
   expect(api.importMessagePack).not.toHaveBeenCalled();
 });
@@ -236,9 +247,8 @@ test("shows the canonical default pack and can change it by stable id", async ()
   expect(screen.getByText("当前默认")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "设为默认" }));
 
-  await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith(
-    expect.objectContaining({ default_message_pack: "other" })
-  ));
+  await waitFor(() => expect(screen.getByRole("combobox", { name: "默认发送来源" })).toHaveValue("other"));
+  expect(api.saveMessageSource).toHaveBeenCalledWith("other");
 });
 
 test("requires confirmation and warns before recursively deleting a fused pack", async () => {

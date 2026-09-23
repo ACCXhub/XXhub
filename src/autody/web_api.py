@@ -1,4 +1,5 @@
 from collections import defaultdict
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from email.utils import formatdate
 from io import BytesIO, StringIO
@@ -169,6 +170,14 @@ class ConfigUpdate(BaseModel):
 
 class MessagesUpdate(BaseModel):
     messages: list[str]
+
+
+class MessageSourceUpdate(BaseModel):
+    default_message_pack: str | None
+
+
+class ActionTargetsRequest(BaseModel):
+    target_ids: list[str] | None = Field(default=None, min_length=1)
 
 
 class DryRunStartRequest(BaseModel):
@@ -671,13 +680,21 @@ def _history_failure_views(
         record_view: dict[str, dict] = {}
         for target_id, detail in failures.items():
             confirmed_at = confirmed_at_by_day[record.date].get(target_id)
-            resolved = confirmed_at is not None
+            daily = daily_by_date.get(record.date, {})
+            audited_sent = (
+                daily.get("delivery_reconciliation", {}).get(target_id) == "confirmed_sent"
+                and daily.get("delivery_reconciliation_evidence", {}).get(target_id)
+                in {"live_chat_audit", "human_verified_today"}
+            )
+            resolved = confirmed_at is not None or audited_sent
             record_view[target_id] = {
                 **detail.model_dump(mode="json"),
                 "resolved": resolved,
                 "resolved_at": confirmed_at,
                 "resolution_zh": (
-                    "已通过后续成功补发解决"
+                    "已核对聊天记录，今日已发送"
+                    if audited_sent and not confirmed_at
+                    else "已通过后续成功补发解决"
                     if confirmed_at and confirmed_at > record.end_time
                     else "当日已有确认成功"
                     if resolved
@@ -999,20 +1016,20 @@ def create_app(
     ) -> dict:
         profile = load_account_profile(runtime_context.data_root)
         if profile is None or not profile.account_profile_id.startswith("account-"):
-            raise HTTPException(409, "当前账号尚未完成验证，无法保存全局原生表情选择")
+            raise HTTPException(409, "当前账号尚未完成验证，无法保存全局表情包选择")
         account_profile_id = profile.account_profile_id
         try:
             catalog = native_sticker_store().load(account_profile_id)
         except NativeStickerCatalogError as exc:
             raise HTTPException(422, str(exc)) from exc
         if catalog is None:
-            raise HTTPException(409, "当前账号尚未扫描原生表情，无法保存全局选择")
+            raise HTTPException(409, "当前账号尚未扫描表情包，无法保存全局选择")
         by_logical_id = {item.logical_id: item for item in catalog.stickers}
         if len(logical_ids) != len(set(logical_ids)):
-            raise HTTPException(422, "全局原生表情选择包含重复逻辑标识")
+            raise HTTPException(422, "全局表情包选择包含重复逻辑标识")
         missing = [item for item in logical_ids if item not in by_logical_id]
         if missing:
-            raise HTTPException(422, "所选原生表情已不在当前账号目录中，请刷新后重试")
+            raise HTTPException(422, "所选表情包已不在当前账号目录中，请刷新后重试")
         selected = [
             NativeStickerReference(
                 logical_id=descriptor.logical_id,
@@ -1259,8 +1276,10 @@ def create_app(
     def reconcile_repair_today_delivery(
         config: AppConfig,
         today: date,
+        *,
+        target_ids: set[str] | None = None,
     ) -> tuple[TodayDeliveryReconciliation | None, str | None]:
-        """Run one serialized chat audit and supplemental send, if warranted.
+        """Run one serialized read-only chat audit, never a supplemental send.
 
         This deliberately consumes the already persisted targeted discovery
         snapshot.  It never invokes friend discovery itself.
@@ -1269,6 +1288,14 @@ def create_app(
         if not required:
             return TodayDeliveryReconciliation({}, 0, False), None
         plan = plan_today_delivery_reconciliation(config, today)
+        if target_ids is not None:
+            plan = replace(
+                plan,
+                outcomes={key: value for key, value in plan.outcomes.items() if key in target_ids},
+                evidence_sources={key: value for key, value in plan.evidence_sources.items() if key in target_ids},
+                live_audit_target_ids=tuple(key for key in plan.live_audit_target_ids if key in target_ids),
+                confirmed_missing_target_ids=tuple(key for key in plan.confirmed_missing_target_ids if key in target_ids),
+            )
 
         def unresolved_live_audit(
             source: str,
@@ -1277,21 +1304,18 @@ def create_app(
                 **plan.outcomes,
                 **{
                     target_id: "unknown"
-                    for target_id in plan.live_audit_target_ids
+                    for target_id in (*plan.live_audit_target_ids, *plan.confirmed_missing_target_ids)
                 },
             }
             evidence_sources = {
                 **plan.evidence_sources,
                 **{
                     target_id: source
-                    for target_id in plan.live_audit_target_ids
+                    for target_id in (*plan.live_audit_target_ids, *plan.confirmed_missing_target_ids)
                 },
             }
-            statuses = apply_today_delivery_reconciliation(
-                config,
-                outcomes,
-                today,
-                evidence_sources=evidence_sources,
+            statuses = effective_daily_target_statuses(
+                config, StateStore(config.state_file).load(), today,
             )
             return TodayDeliveryReconciliation(
                 outcomes,
@@ -1312,6 +1336,8 @@ def create_app(
                     None,
                     today,
                     plan=plan,
+                    supplement=False,
+                    confirmed_sent_only=True,
                     runtime_context=runtime_context,
                 ),
                 None,
@@ -1365,6 +1391,8 @@ def create_app(
                         chat,
                         today,
                         plan=plan,
+                        supplement=False,
+                        confirmed_sent_only=True,
                         runtime_context=runtime_context,
                     ), None
         except (TaskAlreadyRunning, AuthenticationError, FatalChatError, RuntimeError) as exc:
@@ -1448,7 +1476,7 @@ def create_app(
 
     @app.post("/api/repair")
     def diagnose_and_repair():
-        before = status()
+        before = status(today=current_time().date().isoformat())
         config = load_config(config_path)
         repaired: list[dict[str, str]] = []
         manual: list[dict[str, str]] = []
@@ -1553,18 +1581,30 @@ def create_app(
             ),
             "evidence": dict(evidence_counts),
         }
+        previous_statuses = {friend["target_id"]: friend["status"] for friend in before["friends"]}
+        updated_sent = sum(
+            outcome == "confirmed_sent" and target_id in previous_statuses
+            and previous_statuses[target_id] != "success"
+            for target_id, outcome in today_delivery["outcomes"].items()
+        )
+        today_delivery["updated_sent"] = updated_sent
+        if updated_sent:
+            repaired.append({
+                "id": "today_delivery",
+                "label": f"已更新 {updated_sent} 位好友为今日已发送，未重发消息",
+            })
         if reconciliation_error:
             manual.append({
                 "id": "today_delivery",
                 "label": "今日聊天记录待核实，未自动补发",
             })
         elif today_delivery["confirmed_missing"]:
-            repaired.append({
+            manual.append({
                 "id": "today_delivery",
-                "label": f"已按聊天记录补发 {today_delivery['supplemented']} 位好友",
+                "label": f"{today_delivery['confirmed_missing']} 位未找到今日发送记录，{today_delivery['unknown']} 位待核实；未重发消息，可在需要处理中点击补发",
             })
         elif today_delivery["unknown"]:
-            checks.append({"id": "today_delivery", "label": "今日投递记录待核实，未自动补发"})
+            manual.append({"id": "today_delivery", "label": f"{today_delivery['unknown']} 位好友的今日投递记录待核实，未重发消息"})
         else:
             checks.append({"id": "today_delivery", "label": "今日投递记录已核对"})
 
@@ -1825,11 +1865,11 @@ def create_app(
             failure = friend["failure"]
             if failure.get("uncertain_send"):
                 kind, issue_status, action, action_label = (
-                    "uncertain", "error", "logs", "查看详情",
+                    "uncertain", "error", "retry_target", "补发",
                 )
             elif failure.get("safe_retry_available"):
                 kind, issue_status, action, action_label = (
-                    "retryable", "warning", "retry_target", "安全补发",
+                    "retryable", "warning", "retry_target", "补发",
                 )
             elif failure.get("suggested_action") == "reassociate":
                 kind, issue_status, action, action_label = (
@@ -1841,7 +1881,7 @@ def create_app(
                 )
             else:
                 kind, issue_status, action, action_label = (
-                    "details", "warning", "logs", "查看详情",
+                    "details", "warning", "retry_target", "补发",
                 )
             group = grouped_failures.setdefault(
                 kind,
@@ -1963,20 +2003,44 @@ def create_app(
         except ActionAlreadyRunning as exc:
             raise HTTPException(409, str(exc)) from exc
 
-    def retry_failed_targets(today: str | None = None):
+    def retry_failed_targets(today: str | None = None, requested_ids: list[str] | None = None):
         config = load_config(config_path)
         try:
             failure_day = date.fromisoformat(today) if today else current_time().date()
         except ValueError as exc:
             raise HTTPException(422, "日期格式应为 YYYY-MM-DD") from exc
         failures = _failed_targets(config, StateStore(config.state_file).load(), failure_day)
+        requested = set(requested_ids) if requested_ids is not None else None
+        if requested is not None:
+            known_ids = {target_identity(target) for target in enabled_daily_targets(config)}
+            if not requested or requested - known_ids:
+                raise HTTPException(422, "补发目标不存在或未启用，请刷新页面。")
+            reconciliation, error = reconcile_repair_today_delivery(
+                config, failure_day, target_ids=requested,
+            )
+            if error:
+                raise HTTPException(409, "聊天记录暂时无法核对，未补发消息，请稍后再试。")
+            statuses = effective_daily_target_statuses(
+                config, StateStore(config.state_file).load(), failure_day,
+            )
+            if all(statuses.get(target_id) == "success" for target_id in requested):
+                return {
+                    "id": "reconciled", "action": "safe-supplement", "status": "success",
+                    "exit_code": 0, "message": "所选好友今日均已发送，已更新状态，未重发消息。",
+                }
+            failures = _failed_targets(config, StateStore(config.state_file).load(), failure_day)
+            missing = {
+                target_id for target_id, outcome in (reconciliation.outcomes if reconciliation else {}).items()
+                if outcome == "confirmed_missing"
+            }
         target_ids = [
             item["target_id"]
             for item in failures["items"]
             if item["safe_retry_available"]
+            and (requested is None or item["target_id"] in requested & missing)
         ]
         if not target_ids:
-            raise HTTPException(409, "当前没有满足安全补发条件的目标。")
+            raise HTTPException(409, "核对完成，尚未满足安全补发条件，未重发消息。" if requested is not None else "当前没有满足安全补发条件的目标。")
         try:
             return run_action("safe-supplement", target_ids=target_ids)
         except ActionAlreadyRunning as exc:
@@ -2597,6 +2661,21 @@ def create_app(
         os.replace(temporary, config.messages_file)
         return global_message_library_payload(config)
 
+    @app.put("/api/messages/source")
+    def update_message_source(payload: MessageSourceUpdate):
+        config = load_config(config_path)
+        if payload.default_message_pack is not None:
+            try:
+                pack_ids = {pack.id for pack in message_pack_service().list_packs().packs}
+            except MessagePackError as exc:
+                raise message_pack_http_exception(exc) from exc
+            if payload.default_message_pack not in pack_ids:
+                raise HTTPException(422, "默认文案包不存在")
+        config.default_message_pack = payload.default_message_pack
+        # Source changes never clear today's selections or uncertain-send records.
+        save_config(config_path, config)
+        return global_message_library_payload(config)
+
     @app.put("/api/messages/native-stickers")
     def update_global_native_stickers(
         payload: GlobalNativeStickerSelectionRequest,
@@ -2913,7 +2992,7 @@ def create_app(
         config = load_config(config_path)
         profile = load_account_profile(runtime_context.data_root)
         if profile is None:
-            raise HTTPException(409, "当前账号尚未完成验证，无法扫描原生表情")
+            raise HTTPException(409, "当前账号尚未完成验证，无法扫描表情包")
         discovered = load_discovered_friends(
             config.state_file.parent / "discovered_friends.json"
         )
@@ -2956,7 +3035,7 @@ def create_app(
                         timeout_ms=config.friend_search_timeout_ms,
                     )
                     if not identity.identity_match:
-                        raise RuntimeError("会话身份验证失败，未扫描原生表情")
+                        raise RuntimeError("会话身份验证失败，未扫描表情包")
                     discovered_stickers = chat.scan_native_stickers()
             return native_sticker_store().replace(
                 profile.account_profile_id,
@@ -3680,7 +3759,7 @@ def create_app(
         return {"cancelled": True}
 
     @app.post("/api/actions/{action}", status_code=202)
-    def action(action: str):
+    def action(action: str, payload: ActionTargetsRequest | None = None):
         if action not in {
             "run",
             "safe-supplement",
@@ -3695,7 +3774,7 @@ def create_app(
             raise HTTPException(404, "未知操作")
         try:
             if action == "safe-supplement":
-                return retry_failed_targets()
+                return retry_failed_targets(requested_ids=payload.target_ids if payload else None)
             return run_action(action)
         except ActionAlreadyRunning as exc:
             raise HTTPException(409, str(exc)) from exc

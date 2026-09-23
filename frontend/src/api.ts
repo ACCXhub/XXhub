@@ -27,6 +27,7 @@ type ActionJob = {
   action: string;
   status: "running" | "success" | "failed";
   exit_code?: number | null;
+  message?: string;
   failure?: import("./types").FailureDetail | null;
 };
 
@@ -93,6 +94,8 @@ export const api = {
   saveConfig: (config: AppConfig) =>
     request<AppConfig>("/api/config", { method: "PUT", body: JSON.stringify(config) }),
   messages: () => request<GlobalMessageLibrary>("/api/messages"),
+  saveMessageSource: (packId: string | null) =>
+    request<GlobalMessageLibrary>("/api/messages/source", { method: "PUT", body: JSON.stringify({ default_message_pack: packId }) }),
   saveMessages: (messages: string[]) =>
     request<GlobalMessageLibrary>("/api/messages", {
       method: "PUT",
@@ -192,9 +195,10 @@ export const api = {
   schedulerPreview: (settings: ScheduleSettings) => request<SchedulePreview>("/api/scheduler/preview", { method: "POST", body: JSON.stringify(settings) }),
   schedulerApply: (settings: ScheduleSettings) => request<{ config: AppConfig }>("/api/scheduler/apply", { method: "POST", body: JSON.stringify(settings) }),
   schedulerOperation: (operation: "install" | "update" | "repair" | "remove") => request<{ message: string }>(`/api/scheduler/${operation}`, { method: "POST" }),
-  action: (name: string) =>
+  action: (name: string, targetIds?: string[]) =>
     request<ActionJob>(`/api/actions/${name}`, {
-      method: "POST"
+      method: "POST",
+      ...(targetIds ? { body: JSON.stringify({ target_ids: targetIds }) } : {})
     }),
   waitForAction: async (id: string) => {
     for (let attempt = 0; attempt < 1200; attempt += 1) {

@@ -792,6 +792,7 @@ def _run_audit_only(
     selected_targets: list[Target],
     binding_resolutions: dict,
     conversation_ids: dict[str, str],
+    confirmed_sent_only: bool = False,
 ) -> RunResult:
     """Run the canonical verified-conversation lane without any send state."""
     store = StateStore(config.state_file)
@@ -802,12 +803,29 @@ def _run_audit_only(
     navigation_target_ids: list[str] = []
     locator_misses: list[tuple[Target, TodayTargetExecution]] = []
     recovery_target_ids: list[str] = []
+    persisted_audit = False
 
     def apply_audit(target: Target, execution: TodayTargetExecution) -> None:
+        nonlocal persisted_audit
         target_id = target_identity(target)
         audit = execution.audit
+        previous = _stored_target_failures(daily).get(target_id)
+        if previous and (previous.uncertain_send or previous.send_attempts > 0) and (
+            audit is None or audit.status is not TodayOutgoingStatus.CONFIRMED_SENT
+        ):
+            # Not observing a message cannot disprove an earlier send attempt.
+            audit_outcomes[target_id] = TodayOutgoingStatus.UNKNOWN.value
+            if not confirmed_sent_only:
+                persisted_audit = True
+                daily["delivery_reconciliation"][target_id] = TodayOutgoingStatus.UNKNOWN.value
+                daily["delivery_reconciliation_evidence"][target_id] = "live_chat_audit"
+            failures[target_id] = previous
+            return
         if audit is not None:
             audit_outcomes[target_id] = audit.status.value
+            if confirmed_sent_only and audit.status is not TodayOutgoingStatus.CONFIRMED_SENT:
+                return
+            persisted_audit = True
             daily["delivery_reconciliation"][target_id] = audit.status.value
             daily["delivery_reconciliation_evidence"][target_id] = "live_chat_audit"
             if audit.status is TodayOutgoingStatus.CONFIRMED_SENT:
@@ -836,6 +854,7 @@ def _run_audit_only(
             failure_stage="identity_verified",
             reason_code="identity_verification_failed",
         )
+        audit_outcomes[target_id] = TodayOutgoingStatus.UNKNOWN.value
         failures[target_id] = _attach_delivery_failure_evidence(
             config,
             chat,
@@ -848,6 +867,7 @@ def _run_audit_only(
         resolution = binding_resolutions.get(target.stable_id or "")
         expected_conversation_id = conversation_ids.get(target.stable_id or "")
         if resolution is None or not resolution.valid or not expected_conversation_id:
+            audit_outcomes[target_id] = TodayOutgoingStatus.UNKNOWN.value
             failures[target_id] = _binding_failure_detail(
                 target,
                 resolution,
@@ -890,7 +910,7 @@ def _run_audit_only(
                 execution = initial
             apply_audit(target, execution)
 
-    if audit_outcomes:
+    if persisted_audit:
         store.save(state)
     return RunResult(
         RunStatus.FINAL_FAILED if failures else RunStatus.COMPLETED,
@@ -988,7 +1008,7 @@ def _global_native_stickers(
 
 def _empty_global_pool_error() -> MessagePackError:
     return MessagePackError(
-        "全局文案库没有可发送的文字或原生表情，请先添加文案或选择原生表情"
+        "全局文案库没有可发送的文字或表情包，请先添加文案或选择表情包"
     )
 
 
@@ -1166,7 +1186,7 @@ def _resolve_target_message(
         runtime_context=runtime_context,
     )
     if content.kind != "text" or content.text is None:
-        return f"[原生表情] {content.sticker.display_name if content.sticker else ''}".strip()
+        return f"[表情包] {content.sticker.display_name if content.sticker else ''}".strip()
     return content.text
 
 
@@ -1178,7 +1198,7 @@ def _resolve_active_sticker_content(
         return content
     profile = load_account_profile(runtime_context.data_root)
     if profile is None or not profile.account_profile_id.startswith("account-"):
-        raise MessagePackError("当前账号尚未建立原生表情目录")
+        raise MessagePackError("当前账号尚未建立表情包目录")
     try:
         descriptor = NativeStickerCatalogStore(
             runtime_context.data_root
@@ -1228,7 +1248,7 @@ def preview_today_target_message(
         text=(
             content.text
             if content.kind == "text" and content.text is not None
-            else f"[原生表情] {content.sticker.display_name if content.sticker else ''}".strip()
+            else f"[表情包] {content.sticker.display_name if content.sticker else ''}".strip()
         ),
         kind=content.kind,
         entry_id=content.entry_id,
@@ -1295,6 +1315,11 @@ def apply_today_delivery_reconciliation(
         evidence_source = evidence_sources.get(target_id, "live_chat_audit")
         if evidence_source not in _TODAY_RECONCILIATION_EVIDENCE_SOURCES:
             continue
+        previous = _stored_target_failures(daily).get(target_id)
+        if previous and (previous.uncertain_send or previous.send_attempts > 0) and (
+            outcome != TodayOutgoingStatus.CONFIRMED_SENT.value
+        ):
+            outcome = TodayOutgoingStatus.UNKNOWN.value
         facts[target_id] = outcome
         recorded_evidence[target_id] = evidence_source
         if outcome == TodayOutgoingStatus.CONFIRMED_SENT.value:
@@ -1455,6 +1480,7 @@ def reconcile_today_delivery(
     *,
     plan: TodayDeliveryReconciliationPlan | None = None,
     supplement: bool = True,
+    confirmed_sent_only: bool = False,
     runtime_context: RuntimeContext | None = None,
     now: datetime | None = None,
 ) -> TodayDeliveryReconciliation:
@@ -1463,12 +1489,15 @@ def reconcile_today_delivery(
     plan = plan or plan_today_delivery_reconciliation(config, today)
     outcomes = dict(plan.outcomes)
     evidence_sources = dict(plan.evidence_sources)
-    statuses = apply_today_delivery_reconciliation(
-        config,
-        outcomes,
-        today,
-        evidence_sources=evidence_sources,
-    )
+    if confirmed_sent_only:
+        supplement = False
+        statuses = effective_daily_target_statuses(
+            config, StateStore(config.state_file).load(), today
+        )
+    else:
+        statuses = apply_today_delivery_reconciliation(
+            config, outcomes, today, evidence_sources=evidence_sources,
+        )
     pre_supplement_success_count = sum(
         status == "success" for status in statuses.values()
     )
@@ -1487,6 +1516,7 @@ def reconcile_today_delivery(
             trigger_source="manual",
             target_ids=target_ids,
             audit_only=not supplement,
+            confirmed_sent_only=confirmed_sent_only,
             runtime_context=runtime_context,
             now=now,
         )
@@ -1499,7 +1529,7 @@ def reconcile_today_delivery(
                 for target_id in execution_result.today_audit_outcomes
             }
         )
-        if not supplement:
+        if not supplement and not confirmed_sent_only:
             outcome_store = TaskOutcomeStore(_outcome_path(config))
             observed_at = now or datetime.now()
             for target_id, outcome in execution_result.today_audit_outcomes.items():
@@ -1516,7 +1546,7 @@ def reconcile_today_delivery(
                 {
                     target_id: outcome
                     for target_id, outcome in reconciliation.items()
-                    if target_id in target_ids
+                    if target_id in target_ids and not confirmed_sent_only
                 }
             )
         if isinstance(evidence, dict):
@@ -1524,7 +1554,7 @@ def reconcile_today_delivery(
                 {
                     target_id: source
                     for target_id, source in evidence.items()
-                    if target_id in target_ids
+                    if target_id in target_ids and not confirmed_sent_only
                 }
             )
     return TodayDeliveryReconciliation(
@@ -1581,6 +1611,7 @@ def run_daily(
     now: datetime | None = None,
     target_ids: set[str] | None = None,
     audit_only: bool = False,
+    confirmed_sent_only: bool = False,
     runtime_context: RuntimeContext | None = None,
 ) -> RunResult:
     if trigger_source not in RUN_TRIGGER_SOURCES:
@@ -1618,7 +1649,7 @@ def run_daily(
         _daily_run_id(today),
     )
     required_targets = enabled_daily_targets(config)
-    targets = enabled_execution_targets(config)
+    targets = required_targets if audit_only or confirmed_sent_only else enabled_execution_targets(config)
     if config.friend_order == "randomized":
         random.SystemRandom().shuffle(targets)
     requested_target_ids = set(target_ids) if target_ids is not None else None
@@ -1640,7 +1671,7 @@ def run_daily(
         for target_id, resolution in binding_resolutions.items()
         if resolution.valid and resolution.conversation_id
     }
-    if audit_only:
+    if audit_only or confirmed_sent_only:
         return _run_audit_only(
             config,
             chat,
@@ -1653,7 +1684,28 @@ def run_daily(
             selected_targets=selected_targets,
             binding_resolutions=binding_resolutions,
             conversation_ids=conversation_ids,
+            confirmed_sent_only=confirmed_sent_only,
         )
+    selected_ids = {target_identity(target) for target in selected_targets}
+    uncertain = {
+        target_id: detail
+        for target_id, detail in _stored_target_failures(daily).items()
+        if target_id in selected_ids and (detail.uncertain_send or detail.send_attempts > 0)
+    }
+    if uncertain:
+        # Manual run, retry and supplement must all respect unresolved attempts.
+        # Only a separate read-only audit proving SENT can reconcile them.
+        result = RunResult(
+            RunStatus.UNCERTAIN, len(required_targets), 0,
+            len(required_targets) - len(uncertain), len(uncertain),
+            "confirmation_failed_uncertain", run_id=run_id,
+            target_failures=uncertain,
+        )
+        _record_history(
+            config, started, trigger_source, result,
+            daily.get("message", ""), list(uncertain),
+        )
+        return result
     rotation = MessageRotation(_selection_rng(today, "daily"))
     effective_before_run = effective_daily_target_statuses(
         config,

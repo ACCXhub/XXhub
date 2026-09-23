@@ -205,7 +205,7 @@ test("explains an uncertain manual run without claiming that it sent a message",
   render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "立即运行" }));
 
-  expect(await screen.findByText("发送状态暂无法自动确认：系统已停止以避免重复发送。请使用“一键诊断与修复”重新核查聊天记录；系统仅在确认今日未发送后自动补发。"))
+  expect(await screen.findByText("发送状态暂无法自动确认：系统已停止以避免重复发送。请使用“一键诊断与修复”核对并更新已发送状态；诊断不会重发消息。"))
     .toBeInTheDocument();
   expect(screen.queryByText("操作未完成")).not.toBeInTheDocument();
 });
@@ -227,6 +227,26 @@ test("shows the structured one-click repair summary and refreshes current state"
   expect(alert).toHaveBeenCalledWith(
     "已修复 1 项；仍需手动处理 1 项\n✓ Scheduler 已恢复\n✓ 浏览器运行时正常\n! 无法安全确认目标身份，请重新关联"
   );
+});
+
+test("a supplement that only reconciles sent messages does not poll or start another send", async () => {
+  const current = await apiMocks.status();
+  apiMocks.status.mockClear();
+  apiMocks.status.mockResolvedValueOnce({
+    ...current,
+    issues: [{ id: "send_failure_uncertain", status: "error", explanation: "发送结果待核实",
+      action: "retry_target", action_label: "补发", target_ids: ["target-uncertain"] }]
+  });
+  apiMocks.action.mockResolvedValueOnce({
+    id: "reconciled", action: "safe-supplement", status: "success", exit_code: 0,
+    message: "所选好友今日均已发送，已更新状态，未重发消息。"
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "补发" }));
+  expect(await screen.findByText("所选好友今日均已发送，已更新状态，未重发消息。")).toBeInTheDocument();
+  expect(apiMocks.action).toHaveBeenCalledWith("safe-supplement", ["target-uncertain"]);
+  expect(apiMocks.action).toHaveBeenCalledTimes(1);
+  expect(apiMocks.waitForAction).not.toHaveBeenCalled();
 });
 
 test("does not expose a preflight action from the normal dashboard", async () => {
@@ -311,6 +331,21 @@ test("refreshes the overview resource count immediately after a friend mutation"
 });
 
 test("switches a saved account and refreshes every shared view immediately", async () => {
+  apiMocks.accountProfiles.mockResolvedValueOnce({
+    active_profile_id: "account-a",
+    profiles: [
+      { profile_id: "account-a", display_name: "本人", active: true, logged_in: true, profile_status: "verified" },
+      { profile_id: "account-b", display_name: "账号乙", active: false, logged_in: true, profile_status: "verified" }
+    ]
+  }).mockResolvedValue({
+    active_profile_id: "account-b",
+    profiles: [
+      { profile_id: "account-b", display_name: "账号乙", active: true, logged_in: true, profile_status: "verified" }
+    ]
+  });
+  apiMocks.config.mockResolvedValue({ targets: [], friend_order: "configured" });
+  apiMocks.friends.mockResolvedValue({ friends: [] });
+  apiMocks.discoveredFriends.mockResolvedValue({ candidates: [], refresh_running: false, last_result: {} });
   apiMocks.switchAccountProfile.mockResolvedValue({
     active_profile_id: "account-b",
     profiles: [
@@ -331,6 +366,8 @@ test("switches a saved account and refreshes every shared view immediately", asy
     });
 
   render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "好友管理" }));
+  await waitFor(() => expect(apiMocks.friends).toHaveBeenCalledTimes(1));
   fireEvent.click(await screen.findByRole("button", { name: "打开账号切换器" }));
   fireEvent.click(await screen.findByRole("button", { name: "切换到 账号乙" }));
 
@@ -341,4 +378,58 @@ test("switches a saved account and refreshes every shared view immediately", asy
   expect(apiMocks.status).toHaveBeenCalledTimes(2);
   expect(apiMocks.accountProfiles).toHaveBeenCalledTimes(2);
   expect(apiMocks.modules).toHaveBeenCalledTimes(2);
+  await waitFor(() => expect(apiMocks.friends).toHaveBeenCalledTimes(2));
+});
+
+test("a delayed refresh cannot replace newer account data", async () => {
+  let finishOld!: (value: unknown) => void;
+  apiMocks.accountProfile.mockImplementationOnce(() => new Promise((resolve) => {
+    finishOld = resolve;
+  })).mockResolvedValue({ display_name: "新账号", is_self: true, profile_status: "verified", logged_in: true });
+  render(<App />);
+  fireEvent(document, new Event("visibilitychange"));
+  expect(await screen.findByText("新账号")).toBeInTheDocument();
+  await act(async () => {
+    finishOld({ display_name: "旧账号", is_self: true, profile_status: "verified", logged_in: true });
+  });
+  expect(screen.getByText("新账号")).toBeInTheDocument();
+  expect(screen.queryByText("旧账号")).not.toBeInTheDocument();
+});
+
+test("blocks old page controls and duplicate account changes while switching", async () => {
+  apiMocks.accountProfiles.mockResolvedValue({ active_profile_id: "account-a", profiles: [
+    { profile_id: "account-b", display_name: "待切换账号", active: false, logged_in: true, profile_status: "verified" }
+  ] });
+  let finishSwitch!: (value: unknown) => void;
+  apiMocks.switchAccountProfile.mockImplementationOnce(() => new Promise((resolve) => {
+    finishSwitch = resolve;
+  }));
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "好友管理" }));
+  await waitFor(() => expect(apiMocks.friends).toHaveBeenCalledTimes(1));
+  fireEvent.click(screen.getByRole("button", { name: "打开账号切换器" }));
+  fireEvent.click(screen.getByRole("button", { name: "切换到 待切换账号" }));
+  expect(screen.getByRole("button", { name: "打开账号切换器" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "刷新当前账号资料" })).toBeDisabled();
+  expect(document.querySelector(".workspace button")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "打开账号切换器" }));
+  expect(apiMocks.switchAccountProfile).toHaveBeenCalledTimes(1);
+  await act(async () => { finishSwitch({}); });
+  await waitFor(() => expect(screen.getByRole("button", { name: "打开账号切换器" })).toBeEnabled());
+});
+
+test.each(["failed", "transport"])("reports a %s login without falsely completing account creation", async (mode) => {
+  apiMocks.addAccountProfile.mockResolvedValueOnce({ job: { id: "login-new" } });
+  if (mode === "failed") {
+    apiMocks.waitForAction.mockResolvedValueOnce({ status: "failed", failure: { user_summary_zh: "登录失败，请重新扫码" } });
+  } else {
+    apiMocks.waitForAction.mockRejectedValueOnce(new Error("登录状态查询失败"));
+  }
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "打开账号切换器" }));
+  fireEvent.click(screen.getByRole("button", { name: "添加账号" }));
+  expect(await screen.findByText(mode === "failed" ? "登录失败，请重新扫码" : "登录状态查询失败")).toBeInTheDocument();
+  expect(screen.queryByText("新账号登录流程已完成")).not.toBeInTheDocument();
+  expect(apiMocks.status).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole("button", { name: "打开账号切换器" })).toBeEnabled();
 });

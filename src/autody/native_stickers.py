@@ -82,10 +82,10 @@ class GlobalNativeStickerSelectionStore:
                 self.path.read_bytes()
             )
         except (OSError, ValidationError) as exc:
-            raise NativeStickerCatalogError("全局原生表情选择无效") from exc
+            raise NativeStickerCatalogError("全局表情包选择无效") from exc
         if selection.account_profile_id != account_profile_id:
             raise NativeStickerCatalogError(
-                "全局原生表情选择不属于当前账号"
+                "全局表情包选择不属于当前账号"
             )
         return selection
 
@@ -106,7 +106,7 @@ class GlobalNativeStickerSelectionStore:
             )
         except (ValidationError, ValueError) as exc:
             raise NativeStickerCatalogError(
-                "全局原生表情选择包含重复或无效标识"
+                "全局表情包选择包含重复或无效标识"
             ) from exc
         payload = (
             json.dumps(
@@ -147,10 +147,10 @@ class NativeStickerCatalogStore:
                 self.path.read_bytes()
             )
         except (OSError, ValidationError) as exc:
-            raise NativeStickerCatalogError("原生表情目录无效") from exc
+            raise NativeStickerCatalogError("表情包目录无效") from exc
         if catalog.account_profile_id != account_profile_id:
             raise NativeStickerCatalogError(
-                "原生表情目录不属于当前账号，请刷新原生表情"
+                "表情包目录不属于当前账号，请刷新表情包"
             )
         return catalog
 
@@ -173,7 +173,7 @@ class NativeStickerCatalogStore:
                 ],
             )
         except (ValidationError, ValueError) as exc:
-            raise NativeStickerCatalogError("原生表情目录包含重复或无效标识") from exc
+            raise NativeStickerCatalogError("表情包目录包含重复或无效标识") from exc
         payload = (
             json.dumps(catalog.model_dump(mode="json"), ensure_ascii=False, indent=2)
             + "\n"
@@ -194,7 +194,7 @@ class NativeStickerCatalogStore:
     ) -> NativeStickerDescriptor:
         catalog = self.load(account_profile_id)
         if catalog is None:
-            raise NativeStickerCatalogError("当前账号尚未扫描原生表情")
+            raise NativeStickerCatalogError("当前账号尚未扫描表情包")
 
         def unique(matches: list[NativeStickerDescriptor]):
             return matches[0] if len(matches) == 1 else None
@@ -208,7 +208,7 @@ class NativeStickerCatalogStore:
                     if item.resource_key == reference.resource_key
                 ]
             )
-        if reference.machine_id:
+        elif reference.machine_id:
             lookups.append(
                 [
                     item
@@ -216,28 +216,29 @@ class NativeStickerCatalogStore:
                     if item.machine_id == reference.machine_id
                 ]
             )
-        exact_accessible = reference.accessible_name or reference.display_name
-        lookups.append(
-            [
-                item
-                for item in catalog.stickers
-                if item.accessible_name == exact_accessible
-            ]
-        )
-        if reference.category:
+        else:
+            exact_accessible = reference.accessible_name or reference.display_name
             lookups.append(
                 [
                     item
                     for item in catalog.stickers
-                    if item.category == reference.category
-                    and item.display_name == reference.display_name
+                    if item.accessible_name == exact_accessible
                 ]
             )
+            if reference.category:
+                lookups.append(
+                    [
+                        item
+                        for item in catalog.stickers
+                        if item.category == reference.category
+                        and item.display_name == reference.display_name
+                    ]
+                )
         for matches in lookups:
             if resolved := unique(matches):
                 return resolved
             if len(matches) > 1:
                 break
         raise NativeStickerCatalogError(
-            f"已保存的原生表情「{reference.display_name}」当前无法在抖音页面中可靠定位，请刷新原生表情。"
+            f"已保存的表情包「{reference.display_name}」当前无法在抖音页面中可靠定位，请刷新表情包。"
         )

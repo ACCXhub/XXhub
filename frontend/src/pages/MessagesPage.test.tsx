@@ -7,6 +7,8 @@ vi.mock("../api", () => ({
   api: {
     messages: vi.fn(),
     saveMessages: vi.fn(),
+    messagePacks: vi.fn(),
+    saveMessageSource: vi.fn(),
     nativeStickerCatalog: vi.fn(),
     scanNativeStickers: vi.fn(),
     saveGlobalNativeStickers: vi.fn()
@@ -56,6 +58,7 @@ const library = {
 };
 
 beforeEach(() => {
+  vi.mocked(api.messagePacks).mockResolvedValue({ revision: 1, packs: [{ id: "daily-greeting", name: "日常问候" }] } as never);
   vi.mocked(api.messages).mockResolvedValue(library as never);
   vi.mocked(api.nativeStickerCatalog).mockResolvedValue({
     account_profile_id: "account-aaaaaaaaaaaaaaaaaaaaaaaa",
@@ -64,6 +67,28 @@ beforeEach(() => {
     stickers: [heart, fire]
   });
   vi.mocked(api.saveMessages).mockResolvedValue(library as never);
+});
+
+test("shows the actual default source and explicitly switches to the global library", async () => {
+  vi.mocked(api.saveMessageSource).mockResolvedValue({ ...library, default_message_pack: null, default_pack_overrides_global: false });
+  render(<MessagesPage notify={vi.fn()} onNavigate={vi.fn()} />);
+  const source = await screen.findByRole("combobox", { name: "默认发送来源" });
+  await waitFor(() => expect(source).toHaveValue("daily-greeting"));
+  fireEvent.change(source, { target: { value: "" } });
+  await waitFor(() => expect(source).toHaveValue(""));
+  expect(api.saveMessageSource).toHaveBeenCalledWith(null);
+  expect(api.saveGlobalNativeStickers).not.toHaveBeenCalled();
+});
+
+test("failed source change leaves the active source visible", async () => {
+  const notify = vi.fn();
+  vi.mocked(api.saveMessageSource).mockRejectedValue(new Error("来源未保存"));
+  render(<MessagesPage notify={notify} onNavigate={vi.fn()} />);
+  const source = await screen.findByRole("combobox", { name: "默认发送来源" });
+  await waitFor(() => expect(source).toHaveValue("daily-greeting"));
+  fireEvent.change(source, { target: { value: "" } });
+  await waitFor(() => expect(notify).toHaveBeenCalledWith("来源未保存"));
+  expect(source).toHaveValue("daily-greeting");
 });
 
 test("renders only selected stickers inline and manages the full catalog separately", async () => {
@@ -89,8 +114,8 @@ test("renders only selected stickers inline and manages the full catalog separat
   expect(inline.querySelector('input[type="checkbox"]')).toBeNull();
   expect(inline.querySelector("svg")).toBeNull();
 
-  fireEvent.click(screen.getByRole("button", { name: "管理原生表情" }));
-  const manager = await screen.findByRole("dialog", { name: "管理原生表情" });
+  fireEvent.click(screen.getByRole("button", { name: "管理表情包" }));
+  const manager = await screen.findByRole("dialog", { name: "管理表情包" });
   const selected = screen.getByRole("button", { name: "选择 比心" });
   const unselected = screen.getByRole("button", { name: "选择 续火花" });
   expect(selected).toHaveAttribute("aria-pressed", "true");
@@ -117,7 +142,7 @@ test("keeps the persisted selection visible when a global selection update fails
   vi.mocked(api.saveGlobalNativeStickers).mockRejectedValue(new Error("选择保存失败"));
   render(<MessagesPage notify={notify} onNavigate={vi.fn()} />);
   await screen.findByRole("region", { name: "表情包" });
-  fireEvent.click(screen.getByRole("button", { name: "管理原生表情" }));
+  fireEvent.click(screen.getByRole("button", { name: "管理表情包" }));
   const fireButton = await screen.findByRole("button", { name: "选择 续火花" });
 
   fireEvent.click(fireButton);
@@ -141,10 +166,10 @@ test("shows a concise empty state without rendering the catalog", async () => {
   render(<MessagesPage notify={vi.fn()} onNavigate={vi.fn()} />);
 
   const inline = await screen.findByRole("region", { name: "表情包" });
-  expect(inline).toHaveTextContent("暂未选择原生表情");
+  expect(inline).toHaveTextContent("暂未选择表情包");
   expect(inline).not.toHaveTextContent("比心");
   expect(inline).not.toHaveTextContent("续火花");
-  fireEvent.click(screen.getByRole("button", { name: "管理原生表情" }));
+  fireEvent.click(screen.getByRole("button", { name: "管理表情包" }));
   expect(await screen.findByRole("button", { name: "选择 比心" })).toBeInTheDocument();
 });
 

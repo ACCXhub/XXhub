@@ -147,6 +147,7 @@ export interface RepairSummary {
   today_delivery?: {
     outcomes: Record<string, "confirmed_sent" | "confirmed_missing" | "unknown">;
     confirmed_sent: number;
+    updated_sent?: number;
     confirmed_missing: number;
     unknown: number;
     pre_supplement_success_count: number;

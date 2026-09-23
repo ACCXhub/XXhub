@@ -39,13 +39,13 @@ export function DashboardPage({
 }: {
   status: DashboardStatus;
   busy: string | null;
-  onAction: (action: string) => void;
+  onAction: (action: string, targetIds?: string[]) => void;
   onNavigate: (view: ViewName) => void;
 }) {
   const handleIssue = (issue: DashboardIssue) => {
     const action = issue.action;
     if (action === "retry_target") {
-      onAction("safe-supplement");
+      onAction("safe-supplement", issue.target_ids);
       return;
     }
     if (["friends", "messages", "packs", "scheduler", "logs", "backup", "settings"].includes(action)) {

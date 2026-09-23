@@ -3,7 +3,8 @@
     [string]$DataRoot,
     [switch]$DefineOnly,
     [switch]$StopExisting,
-    [switch]$OpenDashboardOnly
+    [switch]$OpenDashboardOnly,
+    [ValidateSet("restart", "repair")][string]$TrayAction
 )
 
 # A small first-party Windows Forms host. Scheduled send/health tasks keep their
@@ -35,6 +36,10 @@ $WatchdogRecoveryLimit = 3
 $script:ServicePort = $PreferredPort
 $script:Url = "http://127.0.0.1:$PreferredPort"
 $script:Repairing = $false
+$script:ActionProcess = $null
+$script:HealthProbe = $null
+$script:HealthProbeGeneration = 0
+$script:TrayScriptPath = $PSCommandPath
 $script:StartupPageOpened = $false
 $script:WatchdogSuppressed = $false
 $script:WatchdogNeedsAttention = $false
@@ -43,7 +48,7 @@ $script:WatchdogRecoveryAttempts = @()
 $script:ManagedPid = $null
 $script:ManagedProcessIdentity = $null
 $script:ExpectedPythonProcessPath = $null
-$script:ServiceControlToken = [Guid]::NewGuid().ToString("N")
+$script:ServiceControlToken = if ($env:AUTODY_SERVICE_CONTROL_TOKEN) { $env:AUTODY_SERVICE_CONTROL_TOKEN } else { [Guid]::NewGuid().ToString("N") }
 $env:AUTODY_HOME = $DataRoot
 $env:AUTODY_PROGRAM_ROOT = $ProjectRoot
 $env:AUTODY_BROWSERS_PATH = $BrowserRoot
@@ -111,7 +116,7 @@ public sealed class AutoDyMenuRenderer : ToolStripProfessionalRenderer {
     }
     protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e) {
         if (!e.Item.Selected) { return; }
-        Rectangle bounds = new Rectangle(5, 2, Math.Max(1, e.Item.Width - 10), Math.Max(1, e.Item.Height - 4));
+        Rectangle bounds = new Rectangle(2, 2, Math.Max(1, e.Item.Width - 4), Math.Max(1, e.Item.Height - 4));
         using (GraphicsPath path = Rounded(bounds, 5))
         using (SolidBrush brush = new SolidBrush(dark ? Color.FromArgb(62, 62, 62) : Color.FromArgb(232, 232, 232))) {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
@@ -300,17 +305,31 @@ function Set-AutoDyMenuTheme {
     Initialize-TrayRenderer
     $dark = Test-SystemDarkTheme
     $Menu.Renderer = New-Object AutoDyMenuRenderer -ArgumentList ([bool]$dark)
-    $Menu.Font = New-Object System.Drawing.Font -ArgumentList @("Segoe UI", 10.0)
+    if ($Menu.Font.Name -ne "Segoe UI" -or $Menu.Font.Size -ne 10.0) {
+        $Menu.Font = New-Object System.Drawing.Font -ArgumentList @("Segoe UI", 10.0)
+    }
     $Menu.Padding = New-Object System.Windows.Forms.Padding -ArgumentList @(6, 6, 6, 6)
     $Menu.ShowImageMargin = $false
     $Menu.ShowCheckMargin = $false
     $Menu.BackColor = if ($dark) { [Drawing.Color]::FromArgb(43, 43, 43) } else { [Drawing.Color]::FromArgb(249, 249, 249) }
     $Menu.ForeColor = if ($dark) { [Drawing.Color]::FromArgb(245, 245, 245) } else { [Drawing.Color]::FromArgb(32, 32, 32) }
+    # Keep item bounds equal to the content width, including the hover surface.
+    $scale = [Math]::Max(1.0, $Menu.Font.Height / 18.0)
+    $itemWidth = [int][Math]::Round(244 * $scale)
+    $menuHeight = $Menu.Padding.Vertical
     foreach ($item in $Menu.Items) {
+        $item.AutoSize = $false
+        $item.Margin = New-Object System.Windows.Forms.Padding -ArgumentList @(0)
+        $itemHeight = if ($item -is [System.Windows.Forms.ToolStripSeparator]) { 9 } elseif ($item.Tag -eq "status") { 28 } else { 36 }
+        $item.Size = New-Object System.Drawing.Size -ArgumentList @($itemWidth, [int][Math]::Round($itemHeight * $scale))
         if ($item -isnot [System.Windows.Forms.ToolStripSeparator]) {
-            $item.Padding = New-Object System.Windows.Forms.Padding -ArgumentList @(4, 3, 8, 3)
+            $item.Padding = New-Object System.Windows.Forms.Padding -ArgumentList @(10, 0, 10, 0)
+            $item.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
         }
+        $menuHeight += $item.Height
     }
+    $Menu.AutoSize = $false
+    $Menu.Size = New-Object System.Drawing.Size -ArgumentList @(($itemWidth + $Menu.Padding.Horizontal), $menuHeight)
 }
 
 function Get-Listener([int]$Port = $script:ServicePort) {
@@ -433,8 +452,23 @@ function Test-ManagedProcessStillCurrent {
 }
 
 function Get-ExpectedVersions {
-    $values = @(& $Python -c "from importlib.metadata import version; from autody.modules import OFFICIAL_TEST_CENTER_VERSION; print(version('autody')); print(OFFICIAL_TEST_CENTER_VERSION)")
-    if ($LASTEXITCODE -ne 0 -or $values.Count -ne 2) { throw "Cannot read current AutoDy package versions." }
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $Python
+    $startInfo.Arguments = '-c "from importlib.metadata import version; from autody.modules import OFFICIAL_TEST_CENTER_VERSION; print(version(''autody'')); print(OFFICIAL_TEST_CENTER_VERSION)"'
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $process = [Diagnostics.Process]::Start($startInfo)
+    try {
+        $outputTask = $process.StandardOutput.ReadToEndAsync()
+        if (-not $process.WaitForExit(5000)) {
+            $process.Kill()
+            throw "AutoDy package version check timed out."
+        }
+        $output = $outputTask.GetAwaiter().GetResult()
+        $values = @($output.Trim() -split '\r?\n')
+        if ($process.ExitCode -ne 0 -or $values.Count -ne 2) { throw "Cannot read current AutoDy package versions." }
+    } finally { $process.Dispose() }
     return [pscustomobject]@{ Core = $values[0].Trim(); Module = $values[1].Trim() }
 }
 
@@ -711,19 +745,22 @@ function Invoke-WatchdogRecovery([string]$Reason) {
 }
 
 function Invoke-WatchdogTick {
+    param($Probe = $null)
     if ($script:WatchdogSuppressed -or $script:Repairing -or $script:WatchdogNeedsAttention -or (Test-ManualStopToday)) { return }
     try {
-        $expected = Get-ExpectedVersions
-        $snapshot = Get-ServiceSnapshot
+        $expected = if ($null -ne $Probe) { $Probe.Expected } else { Get-ExpectedVersions }
+        $snapshot = if ($null -ne $Probe) { $Probe.Snapshot } else { Get-ServiceSnapshot }
         if ($null -ne $snapshot -and (Test-HealthyAutoDy $snapshot $expected)) {
             Set-ManagedServiceSnapshot $snapshot
             $script:WatchdogFailureSince = $null
             return
         }
+        $managedCurrent = if ($null -ne $Probe) { $Probe.ManagedCurrent } else { Test-ManagedProcessStillCurrent }
         if ($null -ne $snapshot -and (Test-OwnedAutoDyIdentity $snapshot)) {
             Set-ManagedServiceSnapshot $snapshot
+            $managedCurrent = $true
         }
-        if (-not (Test-ManagedProcessStillCurrent)) {
+        if (-not $managedCurrent) {
             Clear-ManagedServiceSnapshot
             Invoke-WatchdogRecovery "managed process exited"
             return
@@ -838,6 +875,16 @@ function Open-VerifiedDashboard {
 }
 
 $script:LastDashboardActivation = [DateTime]::MinValue
+function Start-HiddenTrayProcess([string]$Arguments) {
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = "powershell.exe"
+    $startInfo.Arguments = $Arguments
+    $startInfo.WorkingDirectory = $ProjectRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    return [Diagnostics.Process]::Start($startInfo)
+}
+
 function Invoke-DashboardOpenAsync {
     $now = Get-Date
     if (($now - $script:LastDashboardActivation).TotalMilliseconds -lt 700) { return }
@@ -847,24 +894,87 @@ function Invoke-DashboardOpenAsync {
         "-Sta",
         "-WindowStyle", "Hidden",
         "-ExecutionPolicy", "Bypass",
-        "-File", ('"{0}"' -f $PSCommandPath),
+        "-File", ('"{0}"' -f $script:TrayScriptPath),
         "-ProjectRoot", ('"{0}"' -f $ProjectRoot),
         "-DataRoot", ('"{0}"' -f $DataRoot),
         "-OpenDashboardOnly"
     )
-    Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WorkingDirectory $ProjectRoot -WindowStyle Hidden | Out-Null
+    $process = Start-HiddenTrayProcess ($arguments -join " ")
+    $process.Dispose()
 }
 
 function Get-TrayState {
+    param($Probe = $null)
     if ($script:Repairing) { return "正在修复" }
     if ($script:WatchdogNeedsAttention) { return "需要处理" }
-    $expected = Get-ExpectedVersions
-    $snapshot = Get-ServiceSnapshot
+    $expected = if ($null -ne $Probe) { $Probe.Expected } else { Get-ExpectedVersions }
+    $snapshot = if ($null -ne $Probe) { $Probe.Snapshot } else { Get-ServiceSnapshot }
     if ($null -eq $snapshot -or -not (Test-OwnedAutoDy $snapshot $expected.Core)) { return "已停止" }
     if (Test-Path -LiteralPath (Join-Path $DataRoot "data\notifications\need-attention.txt")) { return "需要处理" }
     $outcomes = Join-Path $DataRoot "data\history\task-outcomes.json"
     if ((Test-Path -LiteralPath $outcomes) -and ((Get-Content -Raw -LiteralPath $outcomes -ErrorAction SilentlyContinue) -match '"outcome"\s*:\s*"retry_pending"')) { return "正在执行" }
     return "运行正常"
+}
+
+function Start-TrayAction([string]$Action) {
+    if ($null -ne $script:ActionProcess -and -not $script:ActionProcess.HasExited) { return }
+    $arguments = '-NoProfile -Sta -ExecutionPolicy Bypass -File "{0}" -ProjectRoot "{1}" -DataRoot "{2}" -TrayAction {3}' -f $script:TrayScriptPath, $ProjectRoot, $DataRoot, $Action
+    $script:ActionProcess = Start-HiddenTrayProcess $arguments
+    $script:HealthProbeGeneration += 1
+    $script:WatchdogSuppressed = $true
+    $script:Repairing = $true
+    $restart.Enabled = $false
+    $repair.Enabled = $false
+    $exitStop.Enabled = $false
+    $status.Text = if ($Action -eq "repair") { "AutoDy · 正在诊断与修复" } else { "AutoDy · 正在重启" }
+}
+
+function Update-TrayHealth {
+    if ($null -eq $script:HealthProbe) {
+        # Only read-only probes run off the UI thread. Recovery and service
+        # ownership decisions remain in the existing controller functions.
+        $worker = [PowerShell]::Create()
+        $definitions = foreach ($name in @(
+            "Get-ExpectedVersions", "Get-ServiceSnapshot", "Get-Listener",
+            "Get-ProcessIdentitySnapshot", "Get-ProcessOwner", "Test-ManagedProcessStillCurrent"
+        )) {
+            "function $name { $((Get-Item -LiteralPath ('Function:\' + $name)).Definition) }"
+        }
+        $body = @'
+param($definitions, $pythonPath, $port, $managedId, $managedIdentity)
+$ErrorActionPreference = "Stop"
+$Python = $pythonPath
+$script:ServicePort = $port
+$script:ManagedPid = $managedId
+$script:ManagedProcessIdentity = $managedIdentity
+Invoke-Expression $definitions
+[pscustomobject]@{
+    Expected = Get-ExpectedVersions
+    Snapshot = Get-ServiceSnapshot
+    ManagedCurrent = Test-ManagedProcessStillCurrent
+}
+'@
+        [void]$worker.AddScript($body).AddArgument(($definitions -join "`n")).AddArgument($Python).AddArgument($script:ServicePort).AddArgument($script:ManagedPid).AddArgument($script:ManagedProcessIdentity)
+        try {
+            $script:HealthProbe = [pscustomobject]@{
+                Worker = $worker
+                Pending = $worker.BeginInvoke()
+                Generation = $script:HealthProbeGeneration
+            }
+        } catch { $worker.Dispose(); throw }
+        return
+    }
+    if (-not $script:HealthProbe.Pending.IsCompleted) { return }
+    $probe = $script:HealthProbe
+    $script:HealthProbe = $null
+    try {
+        $results = @($probe.Worker.EndInvoke($probe.Pending))
+        if ($probe.Worker.HadErrors -or $results.Count -ne 1) { throw "Tray health probe failed." }
+        # A restart/repair invalidates any observation taken before that action.
+        if ($probe.Generation -ne $script:HealthProbeGeneration) { return }
+        Invoke-WatchdogTick -Probe $results[0]
+        & $refresh -Probe $results[0]
+    } finally { $probe.Worker.Dispose() }
 }
 
 if ($StopExisting) {
@@ -873,6 +983,37 @@ if ($StopExisting) {
     return
 }
 if ($DefineOnly) { return }
+if ($TrayAction) {
+    Add-Type -AssemblyName System.Windows.Forms
+    try {
+        if ($TrayAction -eq "restart") {
+            foreach ($port in Get-ServicePortCandidates) {
+                $snapshot = Get-ServiceSnapshot $port
+                if ($null -ne $snapshot -and (Test-OwnedAutoDyIdentity $snapshot)) {
+                    Set-ServicePort $port
+                    Set-ManagedServiceSnapshot $snapshot
+                    Stop-ManagedService | Out-Null
+                    break
+                }
+            }
+        }
+        Start-Or-ReuseService | Out-Null
+        if ($TrayAction -eq "repair") {
+            $result = Invoke-RestMethod -Uri "$script:Url/api/repair" -Method Post -TimeoutSec 600 -ErrorAction Stop
+            $lines = @($result.summary)
+            $lines += @($result.repaired | ForEach-Object { "✓ $($_.label)" })
+            $lines += @($result.checks | ForEach-Object { "✓ $($_.label)" })
+            $lines += @($result.manual | ForEach-Object { "! $($_.label)" })
+            [Windows.Forms.MessageBox]::Show(($lines -join [Environment]::NewLine), "AutoDy 诊断与修复") | Out-Null
+            if (@($result.manual).Count -gt 0) { exit 2 }
+        }
+    } catch {
+        Write-TrayLog "Tray action failed: $($_.Exception.Message)"
+        [Windows.Forms.MessageBox]::Show("操作未完成，请查看运行日志。", "AutoDy") | Out-Null
+        exit 1
+    }
+    exit 0
+}
 if ($OpenDashboardOnly) {
     try {
         Open-VerifiedDashboard
@@ -904,13 +1045,14 @@ if (-not $createdNew) {
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+[Windows.Forms.Application]::EnableVisualStyles()
 $context = New-Object System.Windows.Forms.ApplicationContext
 $menu = New-Object System.Windows.Forms.ContextMenuStrip
 $menu.AutoSize = $true
-$menu.MinimumSize = New-Object System.Drawing.Size -ArgumentList @(224, 0)
-Set-AutoDyMenuTheme -Menu $menu
-$menu.add_Opened({ Set-AutoDyMenuTheme -Menu $menu; [AutoDyMenuWindow]::ApplyRoundedCorners($menu) })
+$menu.add_Opening({ Set-AutoDyMenuTheme -Menu $menu })
+$menu.add_Opened({ [AutoDyMenuWindow]::ApplyRoundedCorners($menu) })
 $status = $menu.Items.Add("AutoDy · 启动中")
+$status.Tag = "status"
 $status.Enabled = $false
 [void]$menu.Items.Add("-")
 $open = $menu.Items.Add("打开管理台")
@@ -921,6 +1063,7 @@ $restart = $menu.Items.Add("重新启动后台服务")
 [void]$menu.Items.Add("-")
 $exitTray = $menu.Items.Add("隐藏托盘图标")
 $exitStop = $menu.Items.Add("完全退出 AutoDy")
+Set-AutoDyMenuTheme -Menu $menu
 $notify = New-Object System.Windows.Forms.NotifyIcon
 $iconPath = Join-Path $ProjectRoot "assets\icons\autody.ico"
 $notify.Icon = if (Test-Path -LiteralPath $iconPath) { New-Object System.Drawing.Icon -ArgumentList @($iconPath, 32, 32) } else { [Drawing.SystemIcons]::Application }
@@ -929,7 +1072,8 @@ $notify.Visible = $true
 $notify.Text = "AutoDy - 启动中"
 
 $refresh = {
-    $state = Get-TrayState
+    param($Probe = $null)
+    $state = Get-TrayState -Probe $Probe
     $notify.Text = "AutoDy - $state"
     $status.Text = "AutoDy · $state"
 }
@@ -942,37 +1086,13 @@ $notify.add_MouseClick({
 })
 $logs.add_Click({ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null; Start-Process explorer.exe -ArgumentList $LogDir })
 $restart.add_Click({
-    $script:WatchdogSuppressed = $true
-    try {
-        Stop-ManagedService | Out-Null
-        Start-Or-ReuseService | Out-Null
-        $script:WatchdogFailureSince = $null
-    } catch {
+    try { Start-TrayAction "restart" } catch {
         [Windows.Forms.MessageBox]::Show($_.Exception.Message, "AutoDy") | Out-Null
-    } finally {
-        $script:WatchdogSuppressed = $false
-        & $refresh
     }
 })
 $repair.add_Click({
-    $script:Repairing = $true
-    $script:WatchdogSuppressed = $true
-    & $refresh
-    try {
-        Start-Or-ReuseService | Out-Null
-        $result = Invoke-RestMethod -Uri "$script:Url/api/repair" -Method Post -TimeoutSec 600 -ErrorAction Stop
-        $lines = @($result.summary)
-        $lines += @($result.repaired | ForEach-Object { "✓ $($_.label)" })
-        $lines += @($result.checks | ForEach-Object { "✓ $($_.label)" })
-        $lines += @($result.manual | ForEach-Object { "! $($_.label)" })
-        if (@($result.manual).Count -eq 0) { Reset-WatchdogRecoveryState }
-        [Windows.Forms.MessageBox]::Show(($lines -join [Environment]::NewLine), "AutoDy 诊断与修复") | Out-Null
-    } catch {
-        [Windows.Forms.MessageBox]::Show("诊断与修复未完成，请查看运行日志。", "AutoDy") | Out-Null
-    } finally {
-        $script:WatchdogSuppressed = $false
-        $script:Repairing = $false
-        & $refresh
+    try { Start-TrayAction "repair" } catch {
+        [Windows.Forms.MessageBox]::Show($_.Exception.Message, "AutoDy") | Out-Null
     }
 })
 $exitTray.add_Click({ $notify.Visible = $false; $context.ExitThread() })
@@ -986,7 +1106,29 @@ $exitStop.add_Click({
 })
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 5000
-$timer.add_Tick({ Invoke-WatchdogTick; & $refresh })
+$timer.add_Tick({
+    if ($menu.Visible) { return }
+    if ($null -ne $script:ActionProcess) {
+        if (-not $script:ActionProcess.HasExited) { return }
+        if ($script:ActionProcess.ExitCode -eq 0) {
+            Reset-WatchdogRecoveryState
+        } else {
+            $script:WatchdogNeedsAttention = $true
+        }
+        $script:ActionProcess.Dispose()
+        $script:ActionProcess = $null
+        $script:Repairing = $false
+        $script:WatchdogSuppressed = $false
+        $restart.Enabled = $true
+        $repair.Enabled = $true
+        $exitStop.Enabled = $true
+    }
+    try { Update-TrayHealth } catch {
+        $notify.Text = "AutoDy - 状态暂不可用"
+        $status.Text = "AutoDy · 状态暂不可用"
+        Write-TrayLog "Tray refresh failed: $($_.Exception.Message)"
+    }
+})
 try {
     Open-VerifiedDashboard
     & $refresh
@@ -997,6 +1139,7 @@ try {
     [Windows.Forms.MessageBox]::Show($_.Exception.Message, "AutoDy 启动失败") | Out-Null
 } finally {
     $timer.Stop()
+    if ($null -ne $script:HealthProbe) { $script:HealthProbe.Worker.Dispose() }
     $notify.Visible = $false
     $notify.Dispose()
     $Mutex.ReleaseMutex() | Out-Null

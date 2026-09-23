@@ -134,6 +134,8 @@ class ConfirmationSelectors:
     history_container: str
     outgoing_message_row: str = ""
     outgoing_sticker_payload: str = ""
+    message_time: str = ""
+    newest_first: bool = False
 
     @classmethod
     def test_defaults(cls):
@@ -385,11 +387,14 @@ DOUYIN_CONFIRMATION_SELECTORS = ConfirmationSelectors(
     history_container=".componentsRightPanelwrapper .messageMessageListlist",
     outgoing_message_row=(
         ".componentsRightPanelwrapper .messageMessageBoxmessageBox:has(.messageMessageBoxisFromMe), "
+        ".componentsRightPanelwrapper .messageMessageBoxmessageBox.messageMessageBoxisFromMe, "
         ".componentsRightPanelwrapper [data-message-id]:has(.MessageItemTextisFromMe)"
     ),
     outgoing_sticker_payload=(
         '[data-e2e="msg-item-content"] img, .MessageItemTextisFromMe img'
     ),
+    message_time=".MessageBoxTimetimeLayout",
+    newest_first=True,
 )
 
 
@@ -499,6 +504,17 @@ def _timestamp_matches_day(value: object, today: date) -> bool:
     except (OSError, OverflowError, ValueError):
         pass
     return False
+
+
+def _message_time_matches_day(value: object, today: date) -> bool:
+    """Read Douyin's row-owned label; a bare clock denotes today's date."""
+    label = str(value or "").strip()
+    if re.fullmatch(r"(?:今天\s*)?(?:[01]?\d|2[0-3]):[0-5]\d", label):
+        return today == date.today()
+    return (
+        _contains_current_day_marker([label], today)
+        and not _contains_prior_day_marker([label], today)
+    )
 
 
 class DouyinChat:
@@ -643,7 +659,10 @@ class DouyinChat:
                     reason="date_evidence_unavailable",
                 )
             history = history.first
-            history.evaluate("element => { element.scrollTop = element.scrollHeight; }")
+            history.evaluate(
+                "(element, newestFirst) => { element.scrollTop = newestFirst ? 0 : element.scrollHeight; }",
+                self.confirmation_selectors.newest_first,
+            )
             previous_top: int | None = None
             inspected = 0
             snapshots = 0
@@ -672,7 +691,10 @@ class DouyinChat:
                                 stickerNode.getAttribute('src') || stickerNode.getAttribute('alt') ||
                                 stickerNode.getAttribute('aria-label') || stickerNode.getAttribute('title') || ''
                               ) : '',
-                              timestamp
+                              timestamp,
+                              messageTime: selectors.messageTime ? row.querySelector(selectors.messageTime)?.textContent : null,
+                              pending: Boolean(selectors.pending && (row.matches(selectors.pending) || row.querySelector(selectors.pending))),
+                              failed: Boolean(selectors.failed && (row.matches(selectors.failed) || row.querySelector(selectors.failed)))
                             };
                           });
                         const markers = Array.from(element.querySelectorAll(
@@ -686,13 +708,19 @@ class DouyinChat:
                           outgoing,
                           markers,
                           scrollTop: Math.max(0, Math.round(element.scrollTop)),
-                          atTop: element.scrollTop <= 1
+                          atTop: selectors.newestFirst
+                            ? element.scrollTop + element.clientHeight >= element.scrollHeight - 1
+                            : element.scrollTop <= 1
                         };
                     }""",
                     {
                         "outgoing": generic_outgoing_selector,
                         "text": self.confirmation_selectors.outgoing_message_text,
                         "sticker": self.confirmation_selectors.outgoing_sticker_payload,
+                        "messageTime": self.confirmation_selectors.message_time,
+                        "newestFirst": self.confirmation_selectors.newest_first,
+                        "pending": self.sticker_selectors.pending_marker,
+                        "failed": self.sticker_selectors.failure_marker,
                     },
                 )
                 if not isinstance(snapshot, dict):
@@ -720,7 +748,11 @@ class DouyinChat:
                 outgoing_seen = bool(texts)
                 timestamp_today = any(
                     isinstance(item, dict)
-                    and any(_timestamp_matches_day(value, today) for value in item.get("timestamp", []))
+                    and not item.get("pending") and not item.get("failed")
+                    and (
+                        any(_timestamp_matches_day(value, today) for value in item.get("timestamp", []))
+                        or _message_time_matches_day(item.get("messageTime"), today)
+                    )
                     for item in texts
                 )
                 timestamp_prior = any(
@@ -736,6 +768,12 @@ class DouyinChat:
                         rows_inspected=inspected,
                         snapshots=snapshots,
                         scrolls=scrolls,
+                    )
+                if any(isinstance(item, dict) and (item.get("pending") or item.get("failed")) for item in texts):
+                    return TodayOutgoingAudit(
+                        TodayOutgoingStatus.UNKNOWN,
+                        reason="outgoing_not_confirmed",
+                        rows_inspected=inspected, snapshots=snapshots, scrolls=scrolls,
                     )
                 if timestamp_prior and prior_boundary:
                     return TodayOutgoingAudit(
@@ -795,7 +833,13 @@ class DouyinChat:
                     )
                 previous_top = scroll_top
                 history.evaluate(
-                    "element => { element.scrollTop = Math.max(0, element.scrollTop - Math.max(200, element.clientHeight * 0.8)); }"
+                    """(element, newestFirst) => {
+                        const step = Math.max(200, element.clientHeight * 0.8);
+                        element.scrollTop = newestFirst
+                            ? Math.min(element.scrollHeight, element.scrollTop + step)
+                            : Math.max(0, element.scrollTop - step);
+                    }""",
+                    self.confirmation_selectors.newest_first,
                 )
                 scrolls += 1
                 # Wait only when the scroll action actually requests lazy
@@ -1311,11 +1355,12 @@ class DouyinChat:
     def _sticker_rows(self, panel) -> list[dict[str, object]]:
         rows = panel.locator(self.sticker_selectors.item).evaluate_all(
             """elements => elements
-                .filter(element => {
+                .map((element, index) => ({element, index}))
+                .filter(({element}) => {
                     const style = getComputedStyle(element);
                     return style.display !== 'none' && style.visibility !== 'hidden';
                 })
-                .map((element, index) => {
+                .map(({element, index}) => {
                     const image = element.matches('img') ? element : element.querySelector('img');
                     const value = name => element.getAttribute(name) || image?.getAttribute(name) || null;
                     const displayName = value('aria-label') || value('alt') || value('title')
@@ -1437,7 +1482,12 @@ class DouyinChat:
 
     def _resolve_sticker_locator(self, sticker: NativeStickerDescriptor):
         panel = self._open_sticker_panel()
-        levels = ("resource", "machine", "accessible", "category-name")
+        # A saved resource/machine identity must not degrade to a same-name item.
+        levels = (
+            ("resource",) if sticker.resource_key else
+            ("machine",) if sticker.machine_id else
+            ("accessible", "category-name")
+        )
         for attempt in range(2):
             rows = self._sticker_rows(panel)
             items = panel.locator(self.sticker_selectors.item)
@@ -1470,8 +1520,20 @@ class DouyinChat:
             return {}
         try:
             observed = self.page.locator(selector).evaluate_all(
-                """(elements, selectors) => elements.map(node => {
+                """(elements, selectors) => {
+                  const histories = document.querySelectorAll(selectors.history);
+                  if (histories.length !== 1) throw new Error('sticker history unavailable');
+                  const history = histories[0];
+                  // Observation tokens survive image loading, but are not server
+                  // message IDs. Python only accepts them with an append proof.
+                  const observations = window.__autodyStickerRows ||= {nodes: new WeakMap(), next: 0};
+                  const seen = new Set();
+                  return elements.map(node => {
                     const row = node.closest('[data-message-id], [data-messageid], [data-msg-id], [data-msgid]') || node;
+                    if (!history.contains(row) || seen.has(row)) return null;
+                    seen.add(row);
+                    if (!observations.nodes.has(row)) observations.nodes.set(row, `dom:${++observations.next}`);
+                    const observationIdentity = observations.nodes.get(row);
                     const value = (element, names) => {
                         for (const name of names) {
                             const found = element?.getAttribute(name);
@@ -1479,21 +1541,23 @@ class DouyinChat:
                         }
                         return null;
                     };
-                    const identity = value(row, ['data-message-id', 'data-messageid', 'data-msg-id', 'data-msgid'])
-                        || value(row, ['data-timestamp', 'data-time', 'datetime']);
+                    const identity = value(row, ['data-message-id', 'data-messageid', 'data-msg-id', 'data-msgid']);
                     const sticker = selectors.sticker
                         ? (row.matches(selectors.sticker) ? row : row.querySelector(selectors.sticker))
                         : null;
                     return {
-                        identity,
-                        resourceUrl: value(sticker, ['src', 'data-src', 'data-url']),
+                        identity: identity ? `message:${identity}` : observationIdentity,
+                        observationIdentity,
+                        resourceUrl: sticker?.currentSrc || value(sticker, ['src', 'data-src', 'data-url']),
                         accessibleName: value(sticker, ['aria-label', 'alt', 'title']),
                         machineId: value(sticker, ['data-sticker-id', 'data-emoji-id', 'data-resource-id', 'data-id']),
-                        pending: Boolean(selectors.pending && row.querySelector(selectors.pending)),
-                        failed: Boolean(selectors.failed && row.querySelector(selectors.failed))
+                        pending: Boolean(selectors.pending && (row.matches(selectors.pending) || row.querySelector(selectors.pending))),
+                        failed: Boolean(selectors.failed && (row.matches(selectors.failed) || row.querySelector(selectors.failed)))
                     };
-                }).filter(item => item.identity && (item.resourceUrl || item.accessibleName || item.machineId))""",
+                  }).filter(Boolean);
+                }""",
                 {
+                    "history": self.confirmation_selectors.history_container,
                     "sticker": self.confirmation_selectors.outgoing_sticker_payload,
                     "pending": self.sticker_selectors.pending_marker,
                     "failed": self.sticker_selectors.failure_marker,
@@ -1503,6 +1567,10 @@ class DouyinChat:
             # An unreadable baseline is not an empty history: otherwise an old
             # sticker can be mistaken for a newly observed successful send.
             raise RuntimeError("sticker outgoing observation unavailable") from exc
+        if self.confirmation_selectors.newest_first:
+            # Normalize prepended newest rows to chronological order before
+            # checking for a new bubble after the retained outgoing tail.
+            observed.reverse()
         return {
             str(item["identity"]): item
             for item in observed
@@ -1530,15 +1598,30 @@ class DouyinChat:
         self,
         sticker: NativeStickerDescriptor,
         *,
-        pre_send_identities: set[str],
+        pre_send_payloads: dict[str, dict[str, object]],
     ) -> tuple[DeliveryStatus | None, int]:
+        before_nodes = {
+            item.get("observationIdentity") for item in pre_send_payloads.values()
+        } - {None}
+        tail = next(reversed(pre_send_payloads.values()), {}).get("observationIdentity")
         for attempt in range(1, self.confirmation_retries + 2):
             if self.confirmation_delay_ms:
                 self.page.wait_for_timeout(self.confirmation_delay_ms)
             payloads = self._outgoing_sticker_payloads()
+            nodes = [item.get("observationIdentity") for item in payloads.values()]
             for identity, payload in payloads.items():
+                # A DOM remount or loading an old image must not become a new
+                # delivery. With no server ID, require growth after the retained
+                # outgoing tail, and match only the newest outgoing bubble.
+                appended = (
+                    len(payloads) > len(pre_send_payloads)
+                    and identity == next(reversed(payloads))
+                    and (not pre_send_payloads or (tail is not None and tail in nodes[:-1]))
+                )
                 if (
-                    identity not in pre_send_identities
+                    identity not in pre_send_payloads
+                    and payload.get("observationIdentity") not in before_nodes
+                    and (not identity.startswith("dom:") or appended)
                     and self._outgoing_sticker_matches(payload, sticker)
                     and not payload.get("pending")
                     and not payload.get("failed")
@@ -1601,18 +1684,18 @@ class DouyinChat:
                 self.open_verified_conversation(target)
             self._raise_if_page_failure()
             locator = self._resolve_sticker_locator(sticker)
-            before = set(self._outgoing_sticker_payloads())
+            before = self._outgoing_sticker_payloads()
             self._raise_if_page_failure()
             send_attempted = True
             locator.click()
             status, attempts = self._confirm_sticker_delivery(
                 sticker,
-                pre_send_identities=before,
+                pre_send_payloads=before,
             )
             if status is None and self._publish_staged_sticker():
                 status, publish_attempts = self._confirm_sticker_delivery(
                     sticker,
-                    pre_send_identities=before,
+                    pre_send_payloads=before,
                 )
                 attempts += publish_attempts
             if status is not None:

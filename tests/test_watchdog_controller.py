@@ -54,7 +54,9 @@ def test_manual_stop_is_user_registry_state_and_restart_is_not_manual_stop():
     full_exit = block(text, "$exitStop.add_Click", "$timer =")
     assert "Set-ManualStopToday" not in restart
     assert "Set-ManualStopToday" in full_exit
-    assert "$script:WatchdogSuppressed = $true" in restart
+    assert 'Start-TrayAction "restart"' in restart
+    action = block(text, "function Start-TrayAction", "function Update-TrayHealth")
+    assert "$script:WatchdogSuppressed = $true" in action
     assert "$script:WatchdogSuppressed = $true" in full_exit
 
 

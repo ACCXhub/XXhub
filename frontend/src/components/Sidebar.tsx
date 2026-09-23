@@ -44,6 +44,7 @@ export function Sidebar({
   onChange,
   account,
   accounts = { active_profile_id: null, profiles: [] },
+  accountActionsDisabled = false,
   onRefreshAccount,
   onSwitchAccount = () => undefined,
   onAddAccount = () => undefined,
@@ -56,6 +57,7 @@ export function Sidebar({
   onChange: (view: ViewName) => void;
   account: AccountProfile | null;
   accounts?: LocalAccountProfiles;
+  accountActionsDisabled?: boolean;
   onRefreshAccount: () => void;
   onSwitchAccount?: (profileId: string) => void;
   onAddAccount?: () => void;
@@ -99,6 +101,7 @@ export function Sidebar({
         className="account-identity"
         aria-label="打开账号切换器"
         aria-expanded={accountOpen}
+        disabled={accountActionsDisabled}
         onClick={() => setAccountOpen((current) => !current)}
       >
         {verified && account.avatar_url ? <img className="account-avatar" src={account.avatar_url} alt="当前账号头像" /> : <span className="brand-mark"><Flame size={24} fill="currentColor" /></span>}
@@ -110,7 +113,7 @@ export function Sidebar({
         <ChevronDown className="account-chevron" size={15} />
       </button>
       <div className="account-tools">
-        <button className="account-refresh" onClick={onRefreshAccount} disabled={Boolean(account?.refresh_running)}><RefreshCw size={13} />刷新当前账号资料</button>
+        <button className="account-refresh" onClick={onRefreshAccount} disabled={accountActionsDisabled || Boolean(account?.refresh_running)}><RefreshCw size={13} />刷新当前账号资料</button>
       </div>
       {accountOpen ? <div ref={accountPopoverRef} className="account-popover" role="dialog" aria-label="账号切换器">
         <div className="account-popover-heading"><strong>当前账号</strong><small>{account?.logged_in ? "已登录" : "未登录"}</small></div>
@@ -120,7 +123,7 @@ export function Sidebar({
               key={profile.profile_id}
               aria-label={profile.active ? `当前账号 ${profile.display_name || "未命名账号"}` : `切换到 ${profile.display_name || "未命名账号"}`}
               className={profile.active ? "account-profile-option active" : "account-profile-option"}
-              disabled={profile.active}
+              disabled={profile.active || accountActionsDisabled}
               onClick={() => { setAccountOpen(false); onSwitchAccount(profile.profile_id); }}
             >
               <span><strong className="account-profile-name">{profile.display_name || "未命名账号"}</strong><small className="account-profile-meta">{profile.logged_in ? "已登录" : "未登录"}</small></span>
@@ -130,9 +133,9 @@ export function Sidebar({
           {!accounts.profiles.length ? <small className="account-empty">暂无已保存账号</small> : null}
         </div>
         <div className="account-popover-actions">
-          <button onClick={() => { setAccountOpen(false); onAddAccount(); }}><Plus size={14} />添加账号</button>
-          <button onClick={() => { setAccountOpen(false); onRefreshAccount(); }}><RefreshCw size={14} />刷新账号资料</button>
-          <button className="danger-link" onClick={() => setLogoutConfirmOpen(true)}><LogOut size={14} />退出当前账号</button>
+          <button disabled={accountActionsDisabled} onClick={() => { setAccountOpen(false); onAddAccount(); }}><Plus size={14} />添加账号</button>
+          <button disabled={accountActionsDisabled} onClick={() => { setAccountOpen(false); onRefreshAccount(); }}><RefreshCw size={14} />刷新账号资料</button>
+          <button disabled={accountActionsDisabled} className="danger-link" onClick={() => setLogoutConfirmOpen(true)}><LogOut size={14} />退出当前账号</button>
         </div>
       </div> : null}
       {logoutConfirmOpen ? <div className="cleanup-dialog" role="dialog" aria-modal="true" aria-label="确认退出当前账号">
@@ -141,7 +144,7 @@ export function Sidebar({
           <p>只会清除当前 AutoDy 本地账号的认证状态；目标、文案分配、计划、历史和其他已保存账号都会保留。</p>
           <div className="dialog-actions">
             <button className="action-button" onClick={() => setLogoutConfirmOpen(false)}>取消</button>
-            <button className="action-button danger-confirm" onClick={() => { setLogoutConfirmOpen(false); setAccountOpen(false); onLogoutAccount(); }}>确认退出</button>
+            <button disabled={accountActionsDisabled} className="action-button danger-confirm" onClick={() => { setLogoutConfirmOpen(false); setAccountOpen(false); onLogoutAccount(); }}>确认退出</button>
           </div>
         </div>
       </div> : null}

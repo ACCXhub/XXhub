@@ -180,7 +180,7 @@ def test_native_sticker_requires_a_durable_logical_reference(tmp_path: Path):
     service = MessagePackService(make_pack_root(tmp_path), tmp_path / "user-data")
     created = service.create_pack(service.catalog().revision, "表情")
 
-    with pytest.raises(MessagePackError, match="原生表情"):
+    with pytest.raises(MessagePackError, match="表情包"):
         service.add_native_sticker(
             created.pack.id,
             logical_id="",
@@ -264,7 +264,7 @@ def test_batch_native_stickers_are_atomic_ordered_and_increment_revision_once(
     text = service.add_message(pack.id, "保留文字", service.catalog().revision)
     before = service.store.catalog_path.read_bytes()
 
-    with pytest.raises(MessagePackError, match="原生表情"):
+    with pytest.raises(MessagePackError, match="表情包"):
         service.add_native_stickers(
             pack.id,
             [

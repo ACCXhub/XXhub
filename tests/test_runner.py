@@ -679,6 +679,67 @@ def test_reconciliation_only_live_audits_targets_without_strong_confirmation(
     assert result.supplement_result is None
 
 
+def test_confirmed_sent_only_audit_updates_sent_without_changing_other_targets(tmp_path: Path):
+    config = make_config(tmp_path)
+    config.targets = [
+        Target(name=name, stable_id=f"target-{name}", candidate_id=f"candidate-{name}")
+        for name in ("sent", "missing", "unknown")
+    ] + [Target(name="unbound", stable_id="target-unbound")]
+    write_verified_retry_scope(tmp_path, [target.candidate_id for target in config.targets[:3]])
+    bind_authoritatively(config)
+    day = date(2026, 8, 30)
+    store = StateStore(config.state_file)
+    state = store.load()
+    state.rotation = {"order": ["早安"], "consumed": []}
+    state.daily[day.isoformat()] = {
+        "message": "早安", "succeeded": [], "consumed": False,
+        "failures": {target.name: "original failure" for target in config.targets},
+        "target_failures": {
+            target.stable_id: failure_detail(
+                "confirmation_failed_uncertain" if target.name == "sent" else "send_failed_before_action",
+                stage="confirmation_observed", send_attempts=int(target.name == "sent"),
+                target_stable_id=target.stable_id,
+            ).model_dump(mode="json")
+            for target in config.targets
+        },
+    }
+    store.save(state)
+    original = store.load()
+
+    class AuditChat:
+        def open_conversation_identity(self, target_id, *_args, **_kwargs):
+            self.target_id = target_id
+            return SimpleNamespace(identity_match=True)
+
+        def audit_today_outgoing(self, *_args):
+            return SimpleNamespace(status={
+                "target-sent": TodayOutgoingStatus.CONFIRMED_SENT,
+                "target-missing": TodayOutgoingStatus.CONFIRMED_MISSING,
+                "target-unknown": TodayOutgoingStatus.UNKNOWN,
+            }[self.target_id])
+
+        def send(self, *_args, **_kwargs):
+            raise AssertionError("repair must never send")
+
+    result = reconcile_today_delivery(config, AuditChat(), day, confirmed_sent_only=True)
+    current = store.load()
+    daily = current.daily[day.isoformat()]
+    assert result.outcomes == {
+        "target-sent": "confirmed_sent", "target-missing": "confirmed_missing",
+        "target-unknown": "unknown", "target-unbound": "unknown",
+    }
+    assert daily["delivery_reconciliation"] == {"target-sent": "confirmed_sent"}
+    assert daily["succeeded"] == ["sent"]
+    assert "target-sent" not in daily["target_failures"]
+    for name in ("missing", "unknown", "unbound"):
+        assert daily["target_failures"][f"target-{name}"] == original.daily[day.isoformat()]["target_failures"][f"target-{name}"]
+        assert daily["failures"][name] == "original failure"
+    assert current.rotation == original.rotation
+    assert daily["consumed"] is False
+    assert result.supplement_result is None
+    assert not (config.state_file.parent / "history" / "task-outcomes.json").exists()
+
+
 def test_reconciliation_supplement_uses_normal_confirmed_send_path(tmp_path: Path):
     config = make_config(tmp_path)
     config.min_delay_seconds = 0

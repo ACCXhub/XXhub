@@ -278,8 +278,12 @@ def test_tray_restart_and_exit_labels_map_to_their_real_actions():
     hide = text[text.index("$exitTray.add_Click"):text.index("$exitStop.add_Click")]
     stop = text[text.index("$exitStop.add_Click"):text.index("$timer =")]
 
-    assert "Stop-ManagedService" in restart
-    assert "Start-Or-ReuseService" in restart
+    assert 'Start-TrayAction "restart"' in restart
+    worker = text[text.index("if ($TrayAction) {"):text.index("if ($OpenDashboardOnly)")]
+    assert "Stop-ManagedService" in worker
+    assert "Start-Or-ReuseService" in worker
+    assert "$startInfo.CreateNoWindow = $true" in text
+    assert "if ($menu.Visible) { return }" in text
     assert "Stop-ManagedService" not in hide
     assert "Stop-ManagedService" in stop
 
@@ -490,7 +494,12 @@ def test_tray_menu_theme_helpers_execute_in_powershell():
       throw "tray item padding is too small"
     }
     $script:LaunchCount = 0
-    function Start-Process { $script:LaunchCount += 1 }
+    function Start-HiddenTrayProcess {
+      param($Arguments)
+      if ($Arguments -notlike '*-OpenDashboardOnly*') { throw "wrong dashboard worker arguments" }
+      $script:LaunchCount += 1
+      return New-Object System.IO.MemoryStream
+    }
     Invoke-DashboardOpenAsync
     Invoke-DashboardOpenAsync
     if ($script:LaunchCount -ne 1) {
@@ -526,3 +535,104 @@ def test_tray_icon_contains_nonblank_high_occupancy_frames():
         assert width / size[0] >= 0.68
         assert height / size[1] >= 0.68
         assert alpha.getextrema()[1] == 255
+
+
+def test_tray_worker_completion_preserves_manual_attention():
+    command = r'''
+    $ErrorActionPreference = "Stop"
+    $text = Get-Content -LiteralPath $env:AUTODY_TEST_TRAY_SCRIPT -Raw
+    $match = [regex]::Match($text, '\$timer\.add_Tick\(\{([\s\S]*?)\r?\n\}\)')
+    if (-not $match.Success) { throw "tray timer handler missing" }
+    $handler = [scriptblock]::Create($match.Groups[1].Value)
+    $menu = [pscustomobject]@{ Visible = $false }
+    $refresh = {}
+    function Invoke-WatchdogTick {}
+    function Update-TrayHealth {}
+    function Reset-WatchdogRecoveryState { $script:WatchdogNeedsAttention = $false }
+    foreach ($code in @(0, 1, 2)) {
+        $script:ActionProcess = [pscustomobject]@{ HasExited = $true; ExitCode = $code }
+        $script:ActionProcess | Add-Member ScriptMethod Dispose {}
+        $script:WatchdogNeedsAttention = $false
+        $script:WatchdogSuppressed = $true
+        $restart = [pscustomobject]@{ Enabled = $false }
+        $repair = [pscustomobject]@{ Enabled = $false }
+        $exitStop = [pscustomobject]@{ Enabled = $false }
+        & $handler
+        if ($script:WatchdogNeedsAttention -ne ($code -ne 0)) { throw "incorrect attention state" }
+        if ($script:WatchdogSuppressed -or $null -ne $script:ActionProcess) { throw "worker was not released" }
+        if (-not ($restart.Enabled -and $repair.Enabled -and $exitStop.Enabled)) { throw "menu stayed disabled" }
+    }
+    '''
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", command],
+        env={**os.environ, "AUTODY_TEST_TRAY_SCRIPT": str(Path("scripts/autody-tray.ps1").resolve())},
+        capture_output=True, text=True, encoding="utf-8", check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_health_probe_is_async_single_flight_and_discards_pre_restart_results():
+    command = r'''
+    $ErrorActionPreference = "Stop"
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($env:AUTODY_TEST_TRAY_SCRIPT, [ref]$tokens, [ref]$errors)
+    if ($errors.Count) { throw ($errors.Message -join "; ") }
+    $fn = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq "Update-TrayHealth" }, $true)
+    Invoke-Expression $fn.Extent.Text
+    function Get-ExpectedVersions { Start-Sleep -Milliseconds 500; [pscustomobject]@{Core="test"} }
+    function Get-ServiceSnapshot { [pscustomobject]@{Pid=123} }
+    function Get-Listener {}
+    function Get-ProcessIdentitySnapshot {}
+    function Get-ProcessOwner {}
+    function Test-ManagedProcessStillCurrent { $true }
+    $script:Applied = 0
+    function Invoke-WatchdogTick {
+        param($Probe)
+        if ($Probe.Expected.Core -ne "test" -or $Probe.Snapshot.Pid -ne 123 -or -not $Probe.ManagedCurrent) { throw "invalid probe" }
+        $script:Applied += 1
+    }
+    $refresh = { param($Probe) }
+    $Python = "unused"; $script:ServicePort = 8765
+    $script:ManagedPid = $null; $script:ManagedProcessIdentity = $null
+    $script:HealthProbe = $null; $script:HealthProbeGeneration = 0
+    try {
+        Update-TrayHealth
+        if ($script:HealthProbe.Pending.IsCompleted) { throw "slow probe blocked its caller" }
+        $worker = $script:HealthProbe.Worker
+        Update-TrayHealth
+        if (-not [object]::ReferenceEquals($worker, $script:HealthProbe.Worker)) { throw "duplicate probe" }
+        if (-not $script:HealthProbe.Pending.AsyncWaitHandle.WaitOne(5000)) { throw "probe timed out" }
+        Update-TrayHealth
+        if ($script:Applied -ne 1 -or $null -ne $script:HealthProbe) { throw "probe not applied once" }
+        Update-TrayHealth
+        $script:HealthProbeGeneration += 1
+        if (-not $script:HealthProbe.Pending.AsyncWaitHandle.WaitOne(5000)) { throw "probe timed out" }
+        Update-TrayHealth
+        if ($script:Applied -ne 1) { throw "pre-restart result was applied" }
+        $watchdog = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq "Invoke-WatchdogTick" }, $true)
+        Invoke-Expression $watchdog.Extent.Text
+        function Test-ManualStopToday { $false }
+        function Test-HealthyAutoDy { $false }
+        function Test-OwnedAutoDyIdentity { $true }
+        function Set-ManagedServiceSnapshot {}
+        $script:Recoveries = 0
+        function Invoke-WatchdogRecovery { $script:Recoveries += 1 }
+        $script:WatchdogSuppressed = $false; $script:Repairing = $false
+        $script:WatchdogNeedsAttention = $false; $script:WatchdogFailureSince = $null
+        $WatchdogHealthGraceSeconds = 20
+        $observed = [pscustomobject]@{ Expected=@{}; Snapshot=@{Pid=123}; ManagedCurrent=$false }
+        Invoke-WatchdogTick -Probe $observed
+        if ($script:Recoveries -ne 0 -or $null -eq $script:WatchdogFailureSince) { throw "newly discovered owned service lost its health grace period" }
+        $script:WatchdogFailureSince = (Get-Date).AddSeconds(-21)
+        Invoke-WatchdogTick -Probe $observed
+        if ($script:Recoveries -ne 1) { throw "sustained failure did not reach existing recovery" }
+    } finally {
+        if ($null -ne $script:HealthProbe) { $script:HealthProbe.Worker.Dispose() }
+    }
+    '''
+    completed = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", command],
+        env={**os.environ, "AUTODY_TEST_TRAY_SCRIPT": str(Path("scripts/autody-tray.ps1").resolve())},
+        capture_output=True, text=True, encoding="utf-8", check=False,
+    )
+    assert completed.returncode == 0, completed.stderr

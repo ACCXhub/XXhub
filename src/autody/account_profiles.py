@@ -15,6 +15,8 @@ import re
 import shutil
 import uuid
 
+from pydantic import ValidationError
+
 from autody.account_profile import load_account_profile
 from autody.config import AppConfig, Target, load_config, save_config
 
@@ -135,14 +137,19 @@ class MultiAccountStore:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, TypeError) as exc:
             raise AccountProfileStoreError("本地账号设置不可用") from exc
+        if not isinstance(value, dict) or value.get("format_version") != FORMAT_VERSION:
+            raise AccountProfileStoreError("本地账号设置版本不受支持")
         config.targets = [
             Target.model_validate(item)
             for item in value.get("targets", [])
         ]
+        defaults = AppConfig()
         for field in _ACCOUNT_CONFIG_FIELDS:
-            if field == "targets" or field not in value:
+            if field == "targets":
                 continue
-            setattr(config, field, value[field])
+            # An older account may omit a setting. Never inherit the active
+            # account's schedule when restoring that older snapshot.
+            setattr(config, field, value.get(field, getattr(defaults, field)))
         config.profile_dir = self.profile_root(profile_id) / "browser-profile"
 
     def _snapshot_runtime(self, profile_id: str) -> None:
@@ -352,16 +359,28 @@ class MultiAccountStore:
             raise AccountProfileStoreError("本地账号不存在")
         if registry["active_profile_id"] == profile_id:
             return registry["profiles"][profile_id]
+        original_config = load_config(self.config_path)
+        config = original_config.model_copy(deep=True)
+        try:
+            self._apply_settings(profile_id, config)
+            config = AppConfig.model_validate(config.model_dump())
+        except (AccountProfileStoreError, ValidationError, TypeError, AttributeError) as exc:
+            raise AccountProfileStoreError("本地账号设置不可用") from exc
         self.persist_active()
         registry = self.ensure_migrated()
-        self._clear_working_runtime()
-        self._restore_runtime(profile_id)
-        config = load_config(self.config_path)
-        self._apply_settings(profile_id, config)
-        save_config(self.config_path, config)
-        registry["active_profile_id"] = profile_id
-        registry["profiles"][profile_id]["last_active_at"] = _timestamp()
-        self._save_registry(registry)
+        previous_id = str(registry["active_profile_id"])
+        try:
+            self._clear_working_runtime()
+            self._restore_runtime(profile_id)
+            save_config(self.config_path, config)
+            registry["active_profile_id"] = profile_id
+            registry["profiles"][profile_id]["last_active_at"] = _timestamp()
+            self._save_registry(registry)
+        except Exception as exc:
+            self._clear_working_runtime()
+            self._restore_runtime(previous_id)
+            save_config(self.config_path, original_config)
+            raise AccountProfileStoreError("账号切换失败，已恢复原账号") from exc
         return registry["profiles"][profile_id]
 
     def logout_active(self, auth_clearer) -> dict:

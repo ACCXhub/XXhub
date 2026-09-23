@@ -192,6 +192,67 @@ def test_today_audit_recognizes_native_sticker_outgoing_with_message_timestamp(
     assert audit.boundary == "message_timestamp"
 
 
+@pytest.mark.parametrize(
+    ("direction", "marker", "sent"),
+    [("outgoing", "", True), ("incoming", "", False),
+     ("outgoing", "send-pending", False), ("outgoing", "send-failed", False)],
+)
+def test_douyin_audit_reads_time_on_newest_first_sticker_row(
+    page, fake_chat, direction, marker, sent
+):
+    # Reduced from the live Douyin DOM: newest is first, with a row-owned
+    # clock label and no data-message-id or numeric timestamp attributes.
+    page.locator("body").evaluate("""(body, [direction, marker]) => {
+        const root = document.createElement('div'); root.className = 'componentsRightPanelwrapper';
+        root.innerHTML = `<div class="messageMessageListlist" style="height:100px;overflow:auto">
+          <div class="messageMessageBoxmessageBox" style="height:160px">
+            <div class="MessageBoxTimetimeLayout">06:30</div>
+            <div class="messageMessageBoxcontentBox ${direction === 'outgoing' ? 'messageMessageBoxisFromMe' : ''}">
+              <div data-e2e="msg-item-content"><img class="MessageItemEmojiimage" src="https://example.test/fire.webp"></div>
+              ${marker ? `<i data-e2e="${marker}"></i>` : ''}
+            </div>
+          </div>
+          <div class="messageMessageBoxmessageBox" style="height:160px">
+            <div class="MessageBoxTimetimeLayout">昨天 22:00</div>
+            <div class="messageMessageBoxcontentBox messageMessageBoxisFromMe">
+              <div data-e2e="msg-item-content"><img class="MessageItemEmojiimage" src="https://example.test/fire.webp"></div>
+            </div>
+          </div></div>`;
+        body.append(root);
+    }""", [direction, marker])
+    fake_chat.confirmation_selectors = DOUYIN_CONFIRMATION_SELECTORS
+
+    result = fake_chat.audit_today_outgoing(date.today(), max_scrolls=2)
+
+    assert (result.status is TodayOutgoingStatus.CONFIRMED_SENT) is sent
+    if sent:
+        assert result.reason == "today_outgoing_timestamp_found"
+        assert page.locator(DOUYIN_CONFIRMATION_SELECTORS.history_container).evaluate("el => el.scrollTop") == 0
+
+
+def test_sticker_confirmation_accepts_prepend_in_real_douyin_order(page, fake_chat):
+    page.locator("body").evaluate("""body => {
+        const root = document.createElement('div'); root.className = 'componentsRightPanelwrapper';
+        root.innerHTML = `<div class="messageMessageListlist">
+          <div class="messageMessageBoxmessageBox"><div class="messageMessageBoxisFromMe">
+            <div data-e2e="msg-item-content"><img src="https://example.test/fire.webp"></div>
+          </div></div></div>`;
+        body.append(root);
+    }""")
+    fake_chat.confirmation_selectors = DOUYIN_CONFIRMATION_SELECTORS
+    before = fake_chat._outgoing_sticker_payloads()
+    page.locator(DOUYIN_CONFIRMATION_SELECTORS.history_container).evaluate(
+        "el => el.prepend(el.firstElementChild.cloneNode(true))"
+    )
+
+    result, _ = fake_chat._confirm_sticker_delivery(
+        NativeStickerDescriptor(logical_id="fire", display_name="续火花", resource_key="fire.webp"),
+        pre_send_payloads=before,
+    )
+
+    assert result is DeliveryStatus.CONFIRMED
+
+
 def test_sticker_scan_is_read_only_and_never_clicks_a_sticker(page, fake_chat):
     page.locator("body").evaluate(
         """body => {
@@ -276,6 +337,127 @@ def test_native_sticker_immediate_send_requires_new_matching_outgoing_and_never_
     assert result.successful is True
     assert result.send_attempts == 1
     assert page.evaluate("window.enterCount") == 0
+
+
+def test_sticker_locator_keeps_original_index_when_hidden_items_precede_it(page, fake_chat):
+    page.locator("body").evaluate("""body => {
+        const panel = document.createElement('div'); panel.dataset.e2e = 'sticker-panel';
+        for (const [name, hidden] of [['hidden', true], ['wrong', false], ['chosen', false]]) {
+            const item = document.createElement('button'); item.dataset.e2e = 'sticker-item';
+            item.hidden = hidden; item.setAttribute('aria-label', name);
+            const img = document.createElement('img'); img.src = 'https://example.test/' + name + '.webp';
+            item.append(img); panel.append(item);
+        }
+        body.append(panel);
+    }""")
+    locator = fake_chat._resolve_sticker_locator(NativeStickerDescriptor(
+        logical_id="chosen", display_name="chosen", resource_key="chosen.webp"
+    ))
+    assert locator.get_attribute("aria-label") == "chosen"
+
+
+@pytest.mark.parametrize(
+    ("scenario", "successful"),
+    [
+        ("empty_history", True),
+        ("prepend_newest", True),
+        ("pending_then_sent", True),
+        ("same_row_direction", True),
+        ("no_change", False),
+        ("remount", False),
+        ("append_old_history", False),
+        ("old_image_loads", False),
+        ("old_gains_id", False),
+        ("incoming", False),
+        ("wrong_sticker", False),
+        ("pending", False),
+        ("failed", False),
+    ],
+)
+def test_native_sticker_without_message_id_uses_new_outgoing_tail(
+    page, fake_chat, scenario, successful
+):
+    # Exercise production selectors: real sticker rows need not expose the
+    # data-message-id that the original synthetic chat fixture always supplied.
+    fake_chat.confirmation_selectors = DOUYIN_CONFIRMATION_SELECTORS
+    fake_chat.confirmation_delay_ms = 30
+    page.locator("body").evaluate(
+        """(body, scenario) => {
+            window.stickerClicks = 0;
+            const root = document.createElement('div');
+            root.className = 'componentsRightPanelwrapper';
+            const history = document.createElement('div');
+            history.className = 'messageMessageListlist'; root.append(history);
+            const makeRow = (incoming = false) => {
+                const row = document.createElement('div');
+                row.className = 'messageMessageBoxmessageBox';
+                const content = document.createElement('div');
+                content.dataset.e2e = 'msg-item-content';
+                if (!incoming) content.className = 'messageMessageBoxisFromMe';
+                const image = document.createElement('img');
+                image.src = 'https://example.test/fire.webp';
+                content.append(image); row.append(content); return row;
+            };
+            const old = makeRow();
+            if (scenario === 'old_image_loads') old.querySelector('img').remove();
+            if (scenario !== 'empty_history') history.append(old);
+            const panel = document.createElement('div'); panel.dataset.e2e = 'sticker-panel';
+            const item = document.createElement('button'); item.dataset.e2e = 'sticker-item';
+            const image = document.createElement('img'); image.src = 'https://example.test/fire.webp';
+            item.append(image); panel.append(item);
+            item.addEventListener('click', () => {
+                window.stickerClicks++;
+                if (scenario === 'no_change') return;
+                if (scenario === 'old_image_loads') {
+                    old.firstChild.append(image.cloneNode(true)); return;
+                }
+                if (scenario === 'old_gains_id') { old.dataset.messageId = 'old'; return; }
+                const row = makeRow(scenario === 'incoming');
+                if (scenario === 'wrong_sticker') row.querySelector('img').src = 'https://example.test/other.webp';
+                if (scenario === 'same_row_direction') {
+                    row.classList.add('messageMessageBoxisFromMe'); row.firstChild.className = '';
+                }
+                if (scenario === 'pending' || scenario === 'pending_then_sent') row.dataset.e2e = 'send-pending';
+                if (scenario === 'failed') row.dataset.e2e = 'send-failed';
+                if (scenario === 'remount') history.replaceChildren(row);
+                else if (scenario === 'append_old_history') history.append(row);
+                else history.prepend(row);
+                if (scenario === 'pending_then_sent') setTimeout(() => delete row.dataset.e2e, 45);
+            });
+            body.append(root, panel);
+        }""",
+        scenario,
+    )
+
+    result = fake_chat.send_native_sticker(
+        "小明", NativeStickerDescriptor(
+            logical_id="fire", display_name="续火花", resource_key="fire.webp",
+        ),
+        expected_conversation_id="verified", conversation_verified=True,
+    )
+
+    assert result.successful is successful
+    assert result.send_attempts == page.evaluate("window.stickerClicks") == 1
+    assert result.confirmation_provenance is (
+        DeliveryConfirmationProvenance.POST_SEND_OBSERVED
+        if successful else DeliveryConfirmationProvenance.NONE
+    )
+    if not successful:
+        assert result.reason_code == "confirmation_failed_uncertain"
+
+
+def test_sticker_locator_rejects_resource_conflict_despite_same_name(page, fake_chat):
+    page.locator("body").evaluate("""body => {
+        const panel = document.createElement('div'); panel.dataset.e2e = 'sticker-panel';
+        const item = document.createElement('button'); item.dataset.e2e = 'sticker-item';
+        item.setAttribute('aria-label', '比心');
+        const img = document.createElement('img'); img.src = 'https://example.test/wrong.webp';
+        item.append(img); panel.append(item); body.append(panel);
+    }""")
+    with pytest.raises(RuntimeError, match="可靠定位"):
+        fake_chat._resolve_sticker_locator(NativeStickerDescriptor(
+            logical_id="chosen", display_name="比心", resource_key="chosen.webp"
+        ))
 
 
 def test_native_sticker_staged_send_clicks_publish_only_when_staged_state_is_visible(

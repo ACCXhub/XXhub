@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { Sidebar, type ViewName } from "./components/Sidebar";
 import { BackupPage } from "./pages/BackupPage";
@@ -60,7 +60,7 @@ function manualRunFailureMessage(status: DashboardStatus): string | null {
     (item) => item.task_type === "daily_send" && item.trigger_source === "manual"
   );
   if (latestManualRun?.final_status !== "uncertain") return null;
-  return "发送状态暂无法自动确认：系统已停止以避免重复发送。请使用“一键诊断与修复”重新核查聊天记录；系统仅在确认今日未发送后自动补发。";
+  return "发送状态暂无法自动确认：系统已停止以避免重复发送。请使用“一键诊断与修复”核对并更新已发送状态；诊断不会重发消息。";
 }
 
 export default function App() {
@@ -73,7 +73,12 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState("");
   const [testCenterInstalled, setTestCenterInstalled] = useState(false);
+  const refreshSequence = useRef(0);
+  const accountChangeInFlight = useRef(false);
+  const actionInFlight = useRef(false);
+  const accountChanging = ["switch-account", "add-account", "logout-account"].includes(busy || "");
   const refreshAll = useCallback(async () => {
+    const sequence = ++refreshSequence.current;
     setLoading(true);
     try {
       const [nextStatus, nextAccount, nextAccounts, modules] = await Promise.all([
@@ -82,6 +87,7 @@ export default function App() {
         api.accountProfiles().catch(() => EMPTY_ACCOUNTS),
         api.modules().catch(() => ({ modules: [] }))
       ]);
+      if (sequence !== refreshSequence.current) return nextStatus;
       setStatus(nextStatus);
       setAccount(nextAccount);
       setAccounts(nextAccounts);
@@ -89,23 +95,25 @@ export default function App() {
       setLoadFailure(null);
       return nextStatus;
     } catch (error) {
-      setLoadFailure(statusLoadFailure(error));
+      if (sequence === refreshSequence.current) setLoadFailure(statusLoadFailure(error));
       throw error;
     } finally {
-      setLoading(false);
+      if (sequence === refreshSequence.current) setLoading(false);
     }
   }, []);
   useEffect(() => {
     void refreshAll().catch(() => undefined);
     const refresh = () => {
-      if (!document.hidden) void refreshAll().catch(() => undefined);
+      if (!document.hidden && !accountChangeInFlight.current) void refreshAll().catch(() => undefined);
     };
     const id = window.setInterval(refresh, 30000);
     document.addEventListener("visibilitychange", refresh);
     return () => { window.clearInterval(id); document.removeEventListener("visibilitychange", refresh); };
   }, [refreshAll]);
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 3200); };
-  const action = async (name: string) => {
+  const action = async (name: string, targetIds?: string[]) => {
+    if (actionInFlight.current || busy || accountChangeInFlight.current) return;
+    actionInFlight.current = true;
     setBusy(name);
     try {
       if (name === "diagnose-and-repair") {
@@ -120,28 +128,34 @@ export default function App() {
         ].join("\n"));
         return;
       }
-      const job = await api.action(name);
-      notify("操作已启动，可在运行日志中查看进度");
-      const finished = await api.waitForAction(job.id);
+      const job = targetIds ? await api.action(name, targetIds) : await api.action(name);
+      if (job.status === "running") notify("操作已启动，可在运行日志中查看进度");
+      const finished = job.status === "running" ? await api.waitForAction(job.id) : job;
       const nextStatus = await refreshAll();
       if (finished.status === "failed") {
         const manualRunFailure = name === "run" ? manualRunFailureMessage(nextStatus) : null;
         const failure = nextStatus.friends.find((friend) => friend.failure)?.failure;
         throw new Error(
           manualRunFailure
-          || failure?.user_summary_zh
           || finished.failure?.user_summary_zh
+          || finished.message
+          || failure?.user_summary_zh
           || `操作失败（诊断退出码 ${finished.exit_code ?? "未知"}）`
         );
       }
-      notify("操作已完成");
+      notify(finished.message || "操作已完成");
     } catch (error) {
+      if (name === "safe-supplement" || name === "diagnose-and-repair") {
+        await refreshAll().catch(() => undefined);
+      }
       notify(error instanceof Error ? error.message : "操作失败");
     } finally {
+      actionInFlight.current = false;
       setBusy(null);
     }
   };
   const refreshAccount = async () => {
+    if (busy || accountChangeInFlight.current) return;
     try {
       const result = await api.refreshAccountProfile();
       setAccount(result);
@@ -153,39 +167,61 @@ export default function App() {
     }
   };
   const switchAccount = async (profileId: string) => {
+    if (busy || accountChangeInFlight.current) return;
+    accountChangeInFlight.current = true;
+    refreshSequence.current += 1;
     setBusy("switch-account");
     try {
       await api.switchAccountProfile(profileId);
+      setStatus(null);
       await refreshAll();
       notify("本地账号已切换");
     } catch (error) {
       notify(error instanceof Error ? error.message : "账号切换失败");
     } finally {
+      accountChangeInFlight.current = false;
       setBusy(null);
     }
   };
   const addAccount = async () => {
+    if (busy || accountChangeInFlight.current) return;
+    accountChangeInFlight.current = true;
+    refreshSequence.current += 1;
     setBusy("add-account");
     try {
       const result = await api.addAccountProfile();
-      await api.waitForAction(result.job.id);
-      await refreshAll();
+      setStatus(null);
+      let finished;
+      try {
+        finished = await api.waitForAction(result.job.id);
+      } finally {
+        await refreshAll();
+      }
+      if (finished.status === "failed") {
+        throw new Error(finished.failure?.user_summary_zh || "新账号登录未完成，请重新登录");
+      }
       notify("新账号登录流程已完成");
     } catch (error) {
       notify(error instanceof Error ? error.message : "添加账号失败");
     } finally {
+      accountChangeInFlight.current = false;
       setBusy(null);
     }
   };
   const logoutAccount = async () => {
+    if (busy || accountChangeInFlight.current) return;
+    accountChangeInFlight.current = true;
+    refreshSequence.current += 1;
     setBusy("logout-account");
     try {
       await api.logoutAccount();
+      setStatus(null);
       await refreshAll();
       notify("当前 AutoDy 账号已退出，本地设置已保留");
     } catch (error) {
       notify(error instanceof Error ? error.message : "退出当前账号失败");
     } finally {
+      accountChangeInFlight.current = false;
       setBusy(null);
     }
   };
@@ -211,7 +247,7 @@ export default function App() {
       </div>
     );
   }
-  if (!status) return <div className="app-loading">正在连接 AutoDy 本地服务…</div>;
+  if (!status) return <div className="app-loading">{accountChanging ? "正在处理账号，请稍候…" : "正在连接 AutoDy 本地服务…"}</div>;
   return (
     <div className="app-shell">
       <Sidebar
@@ -219,6 +255,7 @@ export default function App() {
         onChange={setView}
         account={account}
         accounts={accounts}
+        accountActionsDisabled={Boolean(busy)}
         onRefreshAccount={() => void refreshAccount()}
         onSwitchAccount={(profileId) => void switchAccount(profileId)}
         onAddAccount={() => void addAccount()}
@@ -227,7 +264,8 @@ export default function App() {
         testCenterActive={view === "test-center"}
         onOpenTestCenter={() => setView("test-center")}
       />
-      <main className="workspace">
+      <main className="workspace" key={accounts.active_profile_id || "unscoped"}>
+        {accountChanging ? <div className="loading" role="status">正在处理账号，请稍候…</div> : <>
         {loadFailure && (
           <section className="status-stale-notice" role="alert">
             <strong>当前状态暂不可用</strong>
@@ -245,6 +283,7 @@ export default function App() {
         {view === "backup" && <BackupPage notify={notify} onDataChanged={() => void refreshAll()} />}
         {view === "settings" && <SettingsPage notify={notify} onOpenTestCenter={() => setView("test-center")} onTestCenterStateChange={setTestCenterInstalled} />}
         {view === "test-center" && testCenterInstalled && <ModuleHostPage key={accounts.active_profile_id || "unscoped"} onRemoved={() => { setTestCenterInstalled(false); setView("settings"); }} />}
+        </>}
       </main>
       {toast && <div className="toast" role="status">{toast}</div>}
     </div>

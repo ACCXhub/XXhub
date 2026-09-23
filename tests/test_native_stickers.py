@@ -116,6 +116,18 @@ def test_diagnostic_index_is_never_used_as_sticker_identity(tmp_path: Path):
         )
 
 
+def test_resource_mismatch_cannot_resolve_to_a_same_named_sticker(tmp_path: Path):
+    store = NativeStickerCatalogStore(tmp_path)
+    account = "account-" + "a" * 24
+    store.replace(account, [descriptor(
+        "other", "比心", resource_key="other.webp", accessible_name="比心"
+    )])
+    with pytest.raises(NativeStickerCatalogError, match="可靠定位"):
+        store.resolve(account, NativeStickerReference(
+            logical_id="chosen", display_name="比心", resource_key="chosen.webp"
+        ))
+
+
 def test_global_selection_round_trip_is_account_scoped_and_account_neutral(
     tmp_path: Path,
 ):

@@ -503,11 +503,11 @@ class MessagePackService:
         try:
             reference = NativeStickerReference.model_validate(value)
         except ValidationError as exc:
-            raise MessagePackError("原生表情包含无效字段") from exc
+            raise MessagePackError("表情包包含无效字段") from exc
         logical_id = reference.logical_id.strip()
         display_name = reference.display_name.strip()
         if not logical_id or not display_name:
-            raise MessagePackError("原生表情必须包含稳定逻辑标识和名称")
+            raise MessagePackError("表情包必须包含稳定逻辑标识和名称")
 
         def normalized(value: str | None) -> str | None:
             stripped = value.strip() if value else ""
@@ -546,7 +546,7 @@ class MessagePackService:
         catalog.packages[AUTO_NATIVE_STICKER_PACK_ID] = PackageRecord(
             id=AUTO_NATIVE_STICKER_PACK_ID,
             name=AUTO_NATIVE_STICKER_PACK_NAME,
-            description="从当前账号原生表情目录添加的便捷表情包",
+            description="从当前账号表情包目录添加的便捷表情包",
             created_at=self.now(),
             version=AUTO_NATIVE_STICKER_PACK_VERSION,
             category="custom",
@@ -560,7 +560,7 @@ class MessagePackService:
         expected_revision: int,
     ) -> NativeStickerBatchMutationResult:
         if not stickers:
-            raise MessagePackError("请至少选择一个原生表情")
+            raise MessagePackError("请至少选择一个表情包")
         references = [
             self._validated_native_sticker_reference(sticker)
             for sticker in stickers
@@ -570,7 +570,7 @@ class MessagePackService:
             if pack_id == AUTO_NATIVE_STICKER_PACK_ID:
                 self._ensure_auto_native_sticker_pack(catalog)
             elif pack_id not in catalog.top_level_pack_ids:
-                raise MessagePackError("只能向顶层文案包新增原生表情")
+                raise MessagePackError("只能向顶层文案包新增表情包")
             package = catalog.packages[pack_id]
             existing_logical_ids = {
                 catalog.native_stickers[item.sticker_id].logical_id

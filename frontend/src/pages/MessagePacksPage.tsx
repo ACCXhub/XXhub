@@ -2,6 +2,7 @@ import { Check, Download, Eye, Library, Pencil, Plus, RefreshCw, Upload } from "
 import type { DragEvent } from "react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { MessageSourceControl } from "../components/MessageSourceControl";
 import type { AppConfig, MessagePack, NativeStickerCatalog, NativeStickerDescriptor, NativeStickerReference, PackCatalog, PackImportResult, PackMutationResult, PackPreview } from "../types";
 
 const categoryLabels: Record<string, string> = {
@@ -51,7 +52,7 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
       setStickerCatalog(await api.nativeStickerCatalog());
       setSelectedStickerIds(new Set());
       setStickerPack(pack);
-    } catch (error) { report(error, "原生表情目录加载失败"); }
+    } catch (error) { report(error, "表情包目录加载失败"); }
     finally { setBusy(null); }
   };
 
@@ -63,7 +64,7 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
       const currentIds = new Set(scanned.stickers.map((sticker) => sticker.logical_id));
       setSelectedStickerIds((selected) => new Set([...selected].filter((id) => currentIds.has(id))));
     }
-    catch (error) { report(error, "原生表情扫描失败，已保留上次目录"); }
+    catch (error) { report(error, "表情包扫描失败，已保留上次目录"); }
     finally { setBusy(null); }
   };
 
@@ -95,8 +96,8 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
       acceptMutation(mutation);
       setStickerPack(null);
       setSelectedStickerIds(new Set());
-      notify(`已新增 ${mutation.added_count} 个原生表情${mutation.duplicate_count ? `，已存在 ${mutation.duplicate_count} 个` : ""}`);
-    } catch (error) { report(error, "添加原生表情失败"); load(); }
+      notify(`已新增 ${mutation.added_count} 个表情包${mutation.duplicate_count ? `，已存在 ${mutation.duplicate_count} 个` : ""}`);
+    } catch (error) { report(error, "添加表情包失败"); load(); }
     finally { setBusy(null); }
   };
 
@@ -219,13 +220,13 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
     finally { setBusy(null); }
   };
 
-  const setDefaultPack = async (id: string) => {
+  const setDefaultPack = async (id: string | null) => {
     if (!config || config.default_message_pack === id) return;
-    setBusy(id);
+    setBusy("message-source");
     try {
-      const saved = await api.saveConfig({ ...config, default_message_pack: id });
-      setConfig(saved);
-      notify("默认文案包已更新");
+      const saved = await api.saveMessageSource(id);
+      setConfig({ ...config, default_message_pack: saved.default_message_pack });
+      notify("发送来源已更新；今天结果不确定的发送仍禁止重试");
     } catch (error) { report(error, "默认文案包更新失败"); }
     finally { setBusy(null); }
   };
@@ -298,6 +299,7 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
           <button className="action-button" onClick={load}><RefreshCw size={17} />刷新列表</button>
         </div>
       </header>
+      <MessageSourceControl value={config?.default_message_pack ?? null} packs={catalog?.packs ?? []} disabled={!config || !catalog || busy !== null} onChange={(id) => void setDefaultPack(id)} />
       <p className="pack-drag-help">拖动卡片边缘调整顺序，拖到另一张卡片中央可融合。</p>
       <div className="pack-grid">
         {catalog?.packs.map((pack) => {
@@ -325,7 +327,7 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
             {pack.direct_fused_sources.length ? <p className="pack-provenance">已融合：{pack.direct_fused_sources.map((source) => source.name).join("、")}</p> : null}
             <div className="pack-actions" data-no-pack-drag onDragStart={(event) => event.preventDefault()}>
               <button disabled={busy !== null} onClick={() => void showPreview(pack.id)}><Eye size={15} />预览</button>
-              <button disabled={busy !== null} onClick={() => void openStickerChooser(pack)}>添加原生表情</button>
+              <button disabled={busy !== null} onClick={() => void openStickerChooser(pack)}>添加表情包</button>
               <button disabled={busy !== null || config?.default_message_pack === pack.id} onClick={() => void setDefaultPack(pack.id)}><Check size={15} />{config?.default_message_pack === pack.id ? "默认文案包" : "设为默认"}</button>
               <button disabled={busy !== null} onClick={() => void renamePack(pack.id, pack.name)}><Pencil size={15} />重命名</button>
               {pack.direct_fused_sources.length ? (
@@ -370,20 +372,20 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
           );
         })}
       </div>
-      {result ? <div className="panel import-result"><strong>全局文案库导入结果</strong><span>新增 {result.added_count} 条</span><span>重复 {result.duplicate_count} 条</span>{result.excluded_non_text_count ? <span>已排除原生表情 {result.excluded_non_text_count} 条</span> : null}<span>共 {result.total_count} 条</span></div> : null}
+      {result ? <div className="panel import-result"><strong>全局文案库导入结果</strong><span>新增 {result.added_count} 条</span><span>重复 {result.duplicate_count} 条</span>{result.excluded_non_text_count ? <span>已排除表情包 {result.excluded_non_text_count} 条</span> : null}<span>共 {result.total_count} 条</span></div> : null}
       {preview ? <section className="panel pack-preview"><div className="panel-heading"><h2>{preview.pack.name} · 预览</h2><button className="text-button" onClick={() => setPreview(null)}>关闭</button></div>{preview.entries.length ? <ol>{preview.entries.map((entry) => {
         const directEntries = preview.entries.filter((candidate) => candidate.native);
         const directIndex = directEntries.findIndex((candidate) => candidate.id === entry.id);
-        return <li key={entry.id}>{entry.kind === "native_sticker" ? `原生表情 · ${entry.sticker?.display_name || "未命名"}` : entry.text}{!entry.native ? <small> · 来源：{entry.origin_pack_name}</small> : null}{entry.native && entry.kind === "native_sticker" ? <span className="entry-actions"><button aria-label={`上移 ${entry.sticker?.display_name || "原生表情"}`} disabled={busy !== null || directIndex <= 0} onClick={() => void moveDirectEntry(entry.id, -1)}>上移</button><button aria-label={`下移 ${entry.sticker?.display_name || "原生表情"}`} disabled={busy !== null || directIndex === directEntries.length - 1} onClick={() => void moveDirectEntry(entry.id, 1)}>下移</button><button aria-label={`删除 ${entry.sticker?.display_name || "原生表情"}`} disabled={busy !== null} onClick={() => void removeEntry(entry.id)}>删除</button></span> : null}</li>;
+        return <li key={entry.id}>{entry.kind === "native_sticker" ? `表情包 · ${entry.sticker?.display_name || "未命名"}` : entry.text}{!entry.native ? <small> · 来源：{entry.origin_pack_name}</small> : null}{entry.native && entry.kind === "native_sticker" ? <span className="entry-actions"><button aria-label={`上移 ${entry.sticker?.display_name || "表情包"}`} disabled={busy !== null || directIndex <= 0} onClick={() => void moveDirectEntry(entry.id, -1)}>上移</button><button aria-label={`下移 ${entry.sticker?.display_name || "表情包"}`} disabled={busy !== null || directIndex === directEntries.length - 1} onClick={() => void moveDirectEntry(entry.id, 1)}>下移</button><button aria-label={`删除 ${entry.sticker?.display_name || "表情包"}`} disabled={busy !== null} onClick={() => void removeEntry(entry.id)}>删除</button></span> : null}</li>;
       })}</ol> : <p className="empty-list-copy">此文案包当前为空。</p>}</section> : null}
-      {stickerPack ? <div className="cleanup-dialog" role="dialog" aria-modal="true" aria-label="添加原生表情">
+      {stickerPack ? <div className="cleanup-dialog" role="dialog" aria-modal="true" aria-label="添加表情包">
         <div className="panel">
-          <div className="panel-heading"><h2>添加原生表情到「{stickerPack.name}」</h2><button className="text-button" onClick={() => { setStickerPack(null); setSelectedStickerIds(new Set()); }}>关闭</button></div>
+          <div className="panel-heading"><h2>添加表情包到「{stickerPack.name}」</h2><button className="text-button" onClick={() => { setStickerPack(null); setSelectedStickerIds(new Set()); }}>关闭</button></div>
           {stickerCatalog?.stickers.length ? <div className="sticker-chooser">{stickerCatalog.stickers.map((sticker) => {
             const selected = selectedStickerIds.has(sticker.logical_id);
             return <button key={sticker.logical_id} className={selected ? "selected" : ""} aria-label={`选择 ${sticker.display_name}`} aria-pressed={selected} disabled={busy !== null} onClick={() => toggleSticker(sticker)}>{sticker.preview_url ? <img src={sticker.preview_url} alt="" /> : null}<span>{sticker.display_name}</span></button>;
-          })}</div> : <p>当前账号尚未扫描原生表情。</p>}
-          <div className="sticker-chooser-footer"><span>已选择 {selectedStickerIds.size} 个</span><button className="action-button" disabled={busy !== null} onClick={() => void scanStickers()}>{stickerCatalog?.stickers.length ? "刷新原生表情" : "扫描原生表情"}</button></div>
+          })}</div> : <p>当前账号尚未扫描表情包。</p>}
+          <div className="sticker-chooser-footer"><span>已选择 {selectedStickerIds.size} 个</span><button className="action-button" disabled={busy !== null} onClick={() => void scanStickers()}>{stickerCatalog?.stickers.length ? "刷新表情包" : "扫描表情包"}</button></div>
           <div className="dialog-actions"><button className="action-button" disabled={busy !== null || selectedStickerIds.size === 0} onClick={() => void addSelectedStickers(stickerPack.id)}>添加到当前文案包（{selectedStickerIds.size}）</button><button className="action-button" disabled={busy !== null || selectedStickerIds.size === 0} onClick={() => void addSelectedStickers(AUTO_NATIVE_STICKER_PACK_ID)}>添加到自动表情包（{selectedStickerIds.size}）</button></div>
         </div>
       </div> : null}
@@ -397,7 +399,7 @@ export function MessagePacksPage({ notify }: { notify: (message: string) => void
       {overwritePack ? <div className="cleanup-dialog" role="dialog" aria-modal="true" aria-label="确认覆盖全局文案">
         <div className="panel">
           <h2>确认覆盖全局文案</h2>
-          <p>{overwritePack.textCount ? <>将用「{overwritePack.name}」的 {overwritePack.textCount} 条文案覆盖当前全局文案。<br />原有全局文案将被替换。</> : <>「{overwritePack.name}」没有文字内容，不能覆盖全局文案。</>}{overwritePack.excludedCount ? <><br />其中 {overwritePack.excludedCount} 条原生表情不会写入 messages.txt。</> : null}</p>
+          <p>{overwritePack.textCount ? <>将用「{overwritePack.name}」的 {overwritePack.textCount} 条文案覆盖当前全局文案。<br />原有全局文案将被替换。</> : <>「{overwritePack.name}」没有文字内容，不能覆盖全局文案。</>}{overwritePack.excludedCount ? <><br />其中 {overwritePack.excludedCount} 条表情包不会写入 messages.txt。</> : null}</p>
           <div className="dialog-actions">
             <button className="action-button" onClick={() => setOverwritePack(null)}>取消</button>
             <button className="action-button danger-confirm" disabled={!overwritePack.textCount} onClick={() => void replaceGlobalMessages()}>确认覆盖</button>
